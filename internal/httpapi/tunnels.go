@@ -91,12 +91,21 @@ var errNoSubnetAvailable = &inboundValidationError{"no tunnel subnet available"}
 // unique, cheap to guarantee and always safe), the control port only needs
 // to be unique per physical relay box, since two different boxes listening
 // on the same port number don't conflict with each other at all.
+//
+// Starts at 27000, not frp's own common tutorial default of 7000: every
+// relay/node this fleet already had before this feature existed was
+// hand-configured using exactly that default, so starting there is a near-
+// guaranteed collision with something this allocator has no way to see
+// (tunnelprovision.ensurePathFree is the hard backstop that refuses to
+// overwrite such a collision either way, but avoiding it in the first
+// allocation attempt means a tunnel create doesn't fail for a reason that
+// has nothing to do with the request itself).
 func allocateFRPControlPort(used []int32) int32 {
 	usedSet := make(map[int32]bool, len(used))
 	for _, u := range used {
 		usedSet[u] = true
 	}
-	for port := int32(7000); port < 7000+1000; port++ {
+	for port := int32(27000); port < 27000+1000; port++ {
 		if !usedSet[port] {
 			return port
 		}

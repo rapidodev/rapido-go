@@ -130,6 +130,26 @@ rm -rf frp.tar.gz frp_%s_linux_amd64
 	return nil
 }
 
+// ensurePathFree fails loudly if path already exists, instead of silently
+// overwriting it. Every path Provision writes below is supposed to be
+// brand new (a freshly allocated control port, a freshly allocated
+// interface name) - but the allocator only knows about tunnels THIS system
+// created. A relay or node that already has something at that exact path
+// from outside this system (a hand-configured frpc/frps from before this
+// feature existed, say) is a real collision, and clobbering it silently is
+// exactly how a live, unrelated tunnel gets overwritten and broken. This
+// check is what makes that fail fast instead.
+func ensurePathFree(ctx context.Context, c *sshexec.Client, path string) error {
+	out, err := c.Run(ctx, "test -e "+path+" && echo present || echo missing")
+	if err != nil {
+		return fmt.Errorf("check for %s: %w", path, err)
+	}
+	if strings.TrimSpace(out) == "present" {
+		return fmt.Errorf("%s already exists - refusing to overwrite something this provisioning run did not create (the allocated port or interface name collided with existing config on this box)", path)
+	}
+	return nil
+}
+
 func ensureSystemdUnit(ctx context.Context, c *sshexec.Client, path, content string) error {
 	out, err := c.Run(ctx, "test -f "+path+" && echo present || echo missing")
 	if err != nil {
@@ -228,6 +248,9 @@ func Provision(ctx context.Context, relay, node *sshexec.Client, p Params) error
 	}
 
 	greUnitPath := "/etc/systemd/system/gre-" + p.InterfaceName + ".service"
+	if err := ensurePathFree(ctx, relay, greUnitPath); err != nil {
+		return fmt.Errorf("relay: %w", err)
+	}
 	relayGRE := greUnit(p.InterfaceName, p.NodeAddress, p.RelayHost, p.relayTunnelIP())
 	if err := relay.WriteFile(ctx, greUnitPath, []byte(relayGRE), "644"); err != nil {
 		return fmt.Errorf("relay: write GRE unit: %w", err)
@@ -237,6 +260,9 @@ func Provision(ctx context.Context, relay, node *sshexec.Client, p Params) error
 	}
 
 	frpsPath := fmt.Sprintf("/root/frp/server/server-%d.toml", p.FRPControlPort)
+	if err := ensurePathFree(ctx, relay, frpsPath); err != nil {
+		return fmt.Errorf("relay: %w", err)
+	}
 	if err := relay.WriteFile(ctx, frpsPath, []byte(frpsConfig(p.FRPControlPort, p.FRPToken)), "600"); err != nil {
 		return fmt.Errorf("relay: write frps config: %w", err)
 	}
@@ -251,6 +277,9 @@ func Provision(ctx context.Context, relay, node *sshexec.Client, p Params) error
 		return fmt.Errorf("node: %w", err)
 	}
 
+	if err := ensurePathFree(ctx, node, greUnitPath); err != nil {
+		return fmt.Errorf("node: %w", err)
+	}
 	nodeGRE := greUnit(p.InterfaceName, p.RelayHost, p.NodeAddress, p.nodeTunnelIP())
 	if err := node.WriteFile(ctx, greUnitPath, []byte(nodeGRE), "644"); err != nil {
 		return fmt.Errorf("node: write GRE unit: %w", err)
@@ -272,6 +301,9 @@ func Provision(ctx context.Context, relay, node *sshexec.Client, p Params) error
 	}
 
 	clientPath := fmt.Sprintf("/root/frp/client/client-%d.toml", p.FRPControlPort)
+	if err := ensurePathFree(ctx, node, clientPath); err != nil {
+		return fmt.Errorf("node: %w", err)
+	}
 	frpcContent := frpcConfig(p.relayTunnelIP().String(), p.FRPControlPort, p.FRPToken, p.Ports)
 	if err := node.WriteFile(ctx, clientPath, []byte(frpcContent), "600"); err != nil {
 		return fmt.Errorf("node: write frpc config: %w", err)
