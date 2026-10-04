@@ -25,6 +25,7 @@ type NotifyFlags struct {
 	UserDataUsedReset bool // gates both UserDataUsageReset and UserDataResetByNext, matching Python's single NOTIFY_USER_DATA_USED_RESET
 	UserSubRevoked    bool
 	Login             bool
+	InfraAlert        bool
 }
 
 // SettingsFunc resolves the current dynamic settings, called fresh on every
@@ -212,6 +213,23 @@ func (d *Dispatcher) UserSubscriptionRevoked(ctx context.Context, username, byUs
 
 	payload := discord.SubscriptionRevokedPayload(username, byUsername, belongsTo(userAdmin))
 	d.discord.Send(ctx, payload, vals.DiscordWebhookURL, adminWebhook(userAdmin), d.logger)
+}
+
+// InfraAlert reports a WireGuard tunnel or external relay changing
+// availability - fleet-wide, like Login, with no owning-admin/DM routing.
+func (d *Dispatcher) InfraAlert(ctx context.Context, kind, name, detail string, up bool) {
+	if !d.flags.InfraAlert {
+		return
+	}
+	vals, tgCfg, ok := d.resolve(ctx)
+	if !ok {
+		return
+	}
+	text := telegram.InfraAlertMessage(kind, name, detail, up)
+	d.telegram.Report(ctx, tgCfg, text, nil, d.logger)
+
+	payload := discord.InfraAlertPayload(kind, name, detail, up)
+	d.discord.Send(ctx, payload, vals.DiscordWebhookURL, nil, d.logger)
 }
 
 // Login has no owning-admin concept - matches Python's report_login, which

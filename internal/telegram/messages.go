@@ -170,6 +170,27 @@ func SubscriptionRevokedMessage(username, byUsername string, belongsTo *string) 
 // password to this exact message (permanently, into Telegram's chat
 // history); the user explicitly decided this rewrite must not replicate
 // that, so only username/client_ip/status are reported.
+// InfraAlertMessage reports an infrastructure component outside the normal
+// user lifecycle - a WireGuard tunnel or an external relay - changing
+// availability. up is the new state. Has no owning-admin concept, like
+// LoginMessage: this is fleet-wide, not tied to one reseller's users.
+func InfraAlertMessage(kind, name, detail string, up bool) string {
+	icon, label := "🔴", "Down"
+	if up {
+		icon, label = "🟢", "Recovered"
+	}
+	msg := fmt.Sprintf(
+		"%s <b>#Infra%s</b>\n"+
+			"➖➖➖➖➖➖➖➖➖\n"+
+			"<b>%s</b> : <code>%s</code>",
+		icon, label, html.EscapeString(kind), html.EscapeString(name),
+	)
+	if !up && detail != "" {
+		msg += fmt.Sprintf("\n<b>Error</b> : <code>%s</code>", html.EscapeString(detail))
+	}
+	return msg
+}
+
 func LoginMessage(username, clientIP, status string) string {
 	return fmt.Sprintf(
 		"🔐 <b>#Login</b>\n"+

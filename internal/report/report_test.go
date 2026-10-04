@@ -85,7 +85,7 @@ func testDispatcher(flags NotifyFlags, vals integrationsettings.Values, tgServer
 }
 
 func allFlags() NotifyFlags {
-	return NotifyFlags{StatusChange: true, UserCreated: true, UserUpdated: true, UserDeleted: true, UserDataUsedReset: true, UserSubRevoked: true, Login: true}
+	return NotifyFlags{StatusChange: true, UserCreated: true, UserUpdated: true, UserDeleted: true, UserDataUsedReset: true, UserSubRevoked: true, Login: true, InfraAlert: true}
 }
 
 func TestUserCreatedSendsTelegramAndDiscord(t *testing.T) {
@@ -110,6 +110,36 @@ func TestUserCreatedSendsTelegramAndDiscord(t *testing.T) {
 	}
 	if !strings.Contains(dc.Requests()[0].Body, "alice") {
 		t.Errorf("discord body missing username: %s", dc.Requests()[0].Body)
+	}
+}
+
+func TestInfraAlertSendsTelegramAndDiscordAndRespectsItsFlag(t *testing.T) {
+	tg := newCaptureServer()
+	defer tg.Close()
+	dc := newCaptureServer()
+	defer dc.Close()
+
+	vals := integrationsettings.Values{TelegramAPIToken: "tok", TelegramAdminIDs: []int64{111}, DiscordWebhookURL: dc.URL}
+	d := testDispatcher(allFlags(), vals, tg, dc)
+
+	d.InfraAlert(context.Background(), "WireGuard tunnel", "node2/germany", "", false)
+
+	if got := len(tg.Requests()); got != 1 {
+		t.Fatalf("telegram requests = %d, want 1", got)
+	}
+	if got := len(dc.Requests()); got != 1 {
+		t.Fatalf("discord requests = %d, want 1", got)
+	}
+	if !strings.Contains(tg.Requests()[0].Body, "node2/germany") {
+		t.Errorf("telegram body missing tunnel name: %s", tg.Requests()[0].Body)
+	}
+
+	flags := allFlags()
+	flags.InfraAlert = false
+	off := testDispatcher(flags, vals, tg, dc)
+	off.InfraAlert(context.Background(), "Relay", "node1-relay", "dial timeout", false)
+	if got := len(tg.Requests()); got != 1 {
+		t.Errorf("telegram requests after NOTIFY_INFRA_ALERT=false = %d, want still 1 (nothing new sent)", got)
 	}
 }
 
