@@ -274,6 +274,15 @@ func runAsBackendSingleton(ctx context.Context, databaseURL string, queries *gen
 			Alert: func(ctx context.Context, r relayhealth.Relay, up bool, detail string) {
 				dispatcher.InfraAlert(ctx, "Relay", fmt.Sprintf("%s (%s:%d)", r.Name, r.Host, r.Port), detail, up)
 			},
+			// Publishes the full live snapshot every round (not just on a
+			// transition, unlike Alert) so the api role's GET
+			// /api/tunnel-relays - a separate process with no Monitor of its
+			// own - can show current status on the dashboard.
+			OnTick: func(statuses []relayhealth.Status) {
+				if err := relayhealth.PublishStatuses(ctx, redisClient, statuses); err != nil {
+					logger.Warn("relayhealth: could not publish status to redis", "error", err)
+				}
+			},
 			Logger: logger,
 		}).Run(ctx)
 		// Gateway (multi-panel load balancer) sub-phase 4: keeps every

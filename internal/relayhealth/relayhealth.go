@@ -12,13 +12,62 @@ package relayhealth
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net"
 	"sort"
 	"strconv"
+	"errors"
 	"sync"
 	"time"
+
+	"github.com/redis/go-redis/v9"
+
+	"github.com/legendary1205/rapido-go/internal/cache"
 )
+
+// redisKey is where PublishStatuses/ReadStatuses keep the live snapshot -
+// shared between the backend singleton (the only process that actually
+// runs a Monitor) and the api role's GET /api/tunnel-relays handler, which
+// has no Monitor of its own to read from directly.
+const redisKey = "relayhealth:status"
+
+// redisTTL bounds how long a snapshot is trusted once written: if the
+// backend singleton dies, GET /api/tunnel-relays should stop claiming
+// relays are up/down from stale data rather than serving it forever.
+const redisTTL = 2 * time.Minute
+
+// PublishStatuses writes a Snapshot to Redis - call from OnTick.
+func PublishStatuses(ctx context.Context, c *cache.Client, statuses []Status) error {
+	raw, err := json.Marshal(statuses)
+	if err != nil {
+		return err
+	}
+	return c.Set(ctx, redisKey, string(raw), redisTTL)
+}
+
+// ReadStatuses reads back the last-published snapshot, keyed by relay id.
+// A relay with no entry (nothing published yet, or the key expired) is
+// simply absent from the map - the caller decides what "unknown" means for
+// its own response shape.
+func ReadStatuses(ctx context.Context, c *cache.Client) (map[int32]Status, error) {
+	raw, err := c.Get(ctx, redisKey)
+	if errors.Is(err, redis.Nil) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var statuses []Status
+	if err := json.Unmarshal([]byte(raw), &statuses); err != nil {
+		return nil, err
+	}
+	out := make(map[int32]Status, len(statuses))
+	for _, s := range statuses {
+		out[s.ID] = s
+	}
+	return out, nil
+}
 
 // Relay is one endpoint to probe.
 type Relay struct {
@@ -65,6 +114,12 @@ type Options struct {
 	UpAfter      int
 	ProbeTimeout time.Duration
 	Logger       *slog.Logger
+	// OnTick, if set, is called after every round with the full current
+	// Snapshot - the hook cmd/panel/main.go uses to publish live status to
+	// Redis so the api role (a separate process from the backend singleton
+	// that actually runs this Monitor) can serve it from GET
+	// /api/tunnel-relays without needing its own copy of this Monitor.
+	OnTick func(snapshot []Status)
 }
 
 type entry struct {
@@ -72,6 +127,16 @@ type entry struct {
 	known      bool
 	okStreak   int
 	failStreak int
+	lastError  string
+	checkedAt  time.Time
+}
+
+// Status is one relay's current verdict, as Snapshot reports it.
+type Status struct {
+	ID        int32     `json:"id"`
+	Up        bool      `json:"up"`
+	Error     string    `json:"error,omitempty"`
+	CheckedAt time.Time `json:"checked_at"`
 }
 
 type Monitor struct {
@@ -152,6 +217,25 @@ func (m *Monitor) Tick(ctx context.Context) {
 		}
 	}
 	m.mu.Unlock()
+
+	if m.opts.OnTick != nil {
+		m.opts.OnTick(m.Snapshot())
+	}
+}
+
+// Snapshot returns every currently-tracked relay's verdict, sorted by id.
+func (m *Monitor) Snapshot() []Status {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]Status, 0, len(m.entries))
+	for id, e := range m.entries {
+		if !e.known {
+			continue
+		}
+		out = append(out, Status{ID: id, Up: e.up, Error: e.lastError, CheckedAt: e.checkedAt})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 func (m *Monitor) record(ctx context.Context, r Relay, err error) {
@@ -166,17 +250,20 @@ func (m *Monitor) record(ctx context.Context, r Relay, err error) {
 	if err == nil {
 		e.okStreak++
 		e.failStreak = 0
+		e.lastError = ""
 		if !wasKnown || (!e.up && e.okStreak >= m.opts.UpAfter) {
 			e.up = true
 		}
 	} else {
 		e.failStreak++
 		e.okStreak = 0
+		e.lastError = err.Error()
 		if !wasKnown || (e.up && e.failStreak >= m.opts.DownAfter) {
 			e.up = false
 		}
 	}
 	e.known = true
+	e.checkedAt = time.Now()
 	nowUp := e.up
 	m.mu.Unlock()
 

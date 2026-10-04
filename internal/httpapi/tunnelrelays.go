@@ -3,10 +3,12 @@ package httpapi
 import (
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/legendary1205/rapido-go/internal/db/generated"
+	"github.com/legendary1205/rapido-go/internal/relayhealth"
 )
 
 type tunnelRelayDTO struct {
@@ -14,24 +16,53 @@ type tunnelRelayDTO struct {
 	Name string `json:"name"`
 	Host string `json:"host"`
 	Port int32  `json:"port"`
+
+	// Live status, published by the backend singleton's relayhealth.Monitor
+	// via Redis (see relayhealth.PublishStatuses) - absent entirely (all
+	// three nil) when nothing has been published yet, e.g. a relay added
+	// seconds ago that hasn't been probed for the first time.
+	Up        *bool      `json:"up"`
+	Error     *string    `json:"error"`
+	CheckedAt *time.Time `json:"checked_at"`
 }
 
-func toTunnelRelayDTO(r generated.TunnelRelay) tunnelRelayDTO {
-	return tunnelRelayDTO{ID: r.ID, Name: r.Name, Host: r.Host, Port: r.Port}
+func toTunnelRelayDTO(r generated.TunnelRelay, status relayhealth.Status, known bool) tunnelRelayDTO {
+	dto := tunnelRelayDTO{ID: r.ID, Name: r.Name, Host: r.Host, Port: r.Port}
+	if !known {
+		return dto
+	}
+	up := status.Up
+	dto.Up = &up
+	checkedAt := status.CheckedAt
+	dto.CheckedAt = &checkedAt
+	if status.Error != "" {
+		dto.Error = &status.Error
+	}
+	return dto
 }
 
 // handleListTunnelRelays implements GET /api/tunnel-relays (sudo only):
 // every external relay (GRE+FRP box or similar) registered for health
-// probing - see internal/relayhealth's doc comment for what a probe means.
+// probing - see internal/relayhealth's doc comment for what a probe means -
+// plus each one's live up/down status as of the backend singleton's last
+// probe round.
 func (h *Handler) handleListTunnelRelays(c *gin.Context) {
-	rows, err := h.store.Queries.ListTunnelRelays(c.Request.Context())
+	ctx := c.Request.Context()
+	rows, err := h.store.Queries.ListTunnelRelays(ctx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not list tunnel relays"})
 		return
 	}
+	// A Redis read failure degrades to "no live status" for every row
+	// rather than failing the whole request - the relay list itself (from
+	// Postgres) is still useful on its own, matching
+	// gateway_subscription.go's same fail-open treatment of a best-effort
+	// cached value.
+	statuses, _ := relayhealth.ReadStatuses(ctx, h.store.Cache)
 	out := make([]tunnelRelayDTO, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, toTunnelRelayDTO(r))
+		status, known := statuses[r.ID]
+		out = append(out, toTunnelRelayDTO(r, status, known))
 	}
 	c.JSON(http.StatusOK, out)
 }
@@ -58,7 +89,7 @@ func (h *Handler) handleCreateTunnelRelay(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not create tunnel relay"})
 		return
 	}
-	c.JSON(http.StatusOK, toTunnelRelayDTO(created))
+	c.JSON(http.StatusOK, toTunnelRelayDTO(created, relayhealth.Status{}, false))
 }
 
 // handleDeleteTunnelRelay implements DELETE /api/tunnel-relays/:id (sudo

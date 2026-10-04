@@ -1,10 +1,14 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
 	"testing"
+	"time"
+
+	"github.com/legendary1205/rapido-go/internal/relayhealth"
 )
 
 // tunnelRelayList decodes the bare JSON array GET /api/tunnel-relays
@@ -41,6 +45,9 @@ func TestTunnelRelaysCRUD(t *testing.T) {
 	if create.Body["name"] != "node1-relay" || create.Body["host"] != "5.202.4.97" || create.Body["port"] != float64(20004) {
 		t.Errorf("created relay = %v, want name/host/port echoed back", create.Body)
 	}
+	if create.Body["up"] != nil || create.Body["error"] != nil || create.Body["checked_at"] != nil {
+		t.Errorf("a freshly created relay = %v, want up/error/checked_at all null (not probed yet)", create.Body)
+	}
 	id, ok := create.Body["id"].(float64)
 	if !ok || id <= 0 {
 		t.Fatalf("created relay has no usable id: %v", create.Body)
@@ -70,6 +77,45 @@ func TestTunnelRelaysCRUD(t *testing.T) {
 	}
 	if got := tunnelRelayList(t, after.Raw); len(got) != 0 {
 		t.Errorf("GET (after delete) = %v, want none left", got)
+	}
+}
+
+// TestTunnelRelaysSurfaceLivePublishedStatus is the actual regression test
+// for the dashboard's "is this relay up right now" display: once
+// relayhealth.PublishStatuses has written a snapshot (exactly what the
+// backend singleton's Monitor does after every probe round), GET
+// /api/tunnel-relays must merge it in by id - not just echo the static
+// name/host/port row Postgres holds.
+func TestTunnelRelaysSurfaceLivePublishedStatus(t *testing.T) {
+	router, token, handler := newTestRouterAndHandler(t)
+
+	create := doRequest(t, router, "POST", "/api/tunnel-relays", token, map[string]interface{}{
+		"name": "node2-relay", "host": "185.124.175.44", "port": 20001,
+	})
+	id := int32(create.Body["id"].(float64))
+
+	checkedAt := time.Now().UTC().Truncate(time.Second)
+	err := relayhealth.PublishStatuses(context.Background(), handler.store.Cache, []relayhealth.Status{
+		{ID: id, Up: false, Error: "dial tcp: i/o timeout", CheckedAt: checkedAt},
+	})
+	if err != nil {
+		t.Fatalf("PublishStatuses: %v", err)
+	}
+
+	list := doRequest(t, router, "GET", "/api/tunnel-relays", token, nil)
+	rows := tunnelRelayList(t, list.Raw)
+	if len(rows) != 1 {
+		t.Fatalf("GET = %v, want exactly 1 row", rows)
+	}
+	row := rows[0]
+	if up, ok := row["up"].(bool); !ok || up {
+		t.Errorf("up = %v, want false", row["up"])
+	}
+	if row["error"] != "dial tcp: i/o timeout" {
+		t.Errorf("error = %v, want the published error", row["error"])
+	}
+	if row["checked_at"] == nil {
+		t.Error("checked_at = nil, want the published timestamp")
 	}
 }
 
