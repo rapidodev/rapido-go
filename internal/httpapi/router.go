@@ -260,13 +260,12 @@ func NewRouter(h *Handler, logger *slog.Logger, allowedOrigins []string) *gin.En
 		api.GET("/monitoring", requireSudo, h.handleGetMonitoring)
 		api.GET("/monitoring/history", requireSudo, h.handleGetMonitoringHistory)
 
-		api.GET("/tunnel-relays", requireSudo, h.handleListTunnelRelays)
-		api.POST("/tunnel-relays", requireSudo, h.handleCreateTunnelRelay)
-		api.DELETE("/tunnel-relays/:id", requireSudo, h.handleDeleteTunnelRelay)
-
 		api.GET("/tunnels", requireSudo, h.handleListTunnels)
 		api.POST("/tunnels", requireSudo, h.handleCreateTunnel)
 		api.DELETE("/tunnels/:id", requireSudo, h.handleDeleteTunnel)
+		api.POST("/tunnels/:id/stop", requireSudo, h.handleStopTunnel)
+		api.POST("/tunnels/:id/start", requireSudo, h.handleStartTunnel)
+		api.POST("/tunnels/:id/restart", requireSudo, h.handleRestartTunnel)
 
 		api.GET("/settings/integrations", requireSudo, h.handleGetIntegrationSettings)
 		api.PUT("/settings/integrations", requireSudo, h.handleUpdateIntegrationSettings)

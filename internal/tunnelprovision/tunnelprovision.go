@@ -255,9 +255,6 @@ func Provision(ctx context.Context, relay, node *sshexec.Client, p Params) error
 	if err := relay.WriteFile(ctx, greUnitPath, []byte(relayGRE), "644"); err != nil {
 		return fmt.Errorf("relay: write GRE unit: %w", err)
 	}
-	if _, err := relay.Run(ctx, "systemctl daemon-reload && systemctl enable --now gre-"+p.InterfaceName); err != nil {
-		return fmt.Errorf("relay: start GRE tunnel: %w", err)
-	}
 
 	frpsPath := fmt.Sprintf("/root/frp/server/server-%d.toml", p.FRPControlPort)
 	if err := ensurePathFree(ctx, relay, frpsPath); err != nil {
@@ -265,9 +262,6 @@ func Provision(ctx context.Context, relay, node *sshexec.Client, p Params) error
 	}
 	if err := relay.WriteFile(ctx, frpsPath, []byte(frpsConfig(p.FRPControlPort, p.FRPToken)), "600"); err != nil {
 		return fmt.Errorf("relay: write frps config: %w", err)
-	}
-	if _, err := relay.Run(ctx, fmt.Sprintf("systemctl daemon-reload && systemctl enable --now frps@server-%d", p.FRPControlPort)); err != nil {
-		return fmt.Errorf("relay: start frps: %w", err)
 	}
 
 	if err := ensureFRPInstalled(ctx, node); err != nil {
@@ -283,6 +277,34 @@ func Provision(ctx context.Context, relay, node *sshexec.Client, p Params) error
 	nodeGRE := greUnit(p.InterfaceName, p.RelayHost, p.NodeAddress, p.nodeTunnelIP())
 	if err := node.WriteFile(ctx, greUnitPath, []byte(nodeGRE), "644"); err != nil {
 		return fmt.Errorf("node: write GRE unit: %w", err)
+	}
+
+	clientPath := fmt.Sprintf("/root/frp/client/client-%d.toml", p.FRPControlPort)
+	if err := ensurePathFree(ctx, node, clientPath); err != nil {
+		return fmt.Errorf("node: %w", err)
+	}
+	frpcContent := frpcConfig(p.relayTunnelIP().String(), p.FRPControlPort, p.FRPToken, p.Ports)
+	if err := node.WriteFile(ctx, clientPath, []byte(frpcContent), "600"); err != nil {
+		return fmt.Errorf("node: write frpc config: %w", err)
+	}
+
+	// Every file is in place on both ends - enabling/starting the four
+	// units is the exact same sequence Start uses to resume a stopped
+	// tunnel, so it does that part too rather than repeating it.
+	return Start(ctx, relay, node, p)
+}
+
+// Start enables and starts the four units Provision writes (or Stop
+// disabled) - relay GRE, relay frps, node GRE, node frpc, in that order, with
+// the same ping-based connectivity check Provision uses before trusting
+// frpc to actually work. Writes nothing: every config/unit file is assumed
+// to already be on disk, exactly as Provision left it.
+func Start(ctx context.Context, relay, node *sshexec.Client, p Params) error {
+	if _, err := relay.Run(ctx, "systemctl daemon-reload && systemctl enable --now gre-"+p.InterfaceName); err != nil {
+		return fmt.Errorf("relay: start GRE tunnel: %w", err)
+	}
+	if _, err := relay.Run(ctx, fmt.Sprintf("systemctl daemon-reload && systemctl enable --now frps@server-%d", p.FRPControlPort)); err != nil {
+		return fmt.Errorf("relay: start frps: %w", err)
 	}
 	if _, err := node.Run(ctx, "systemctl daemon-reload && systemctl enable --now gre-"+p.InterfaceName); err != nil {
 		return fmt.Errorf("node: start GRE tunnel: %w", err)
@@ -300,14 +322,6 @@ func Provision(ctx context.Context, relay, node *sshexec.Client, p Params) error
 		return fmt.Errorf("node: GRE tunnel is up but not passing traffic (ping to the relay failed): %w", err)
 	}
 
-	clientPath := fmt.Sprintf("/root/frp/client/client-%d.toml", p.FRPControlPort)
-	if err := ensurePathFree(ctx, node, clientPath); err != nil {
-		return fmt.Errorf("node: %w", err)
-	}
-	frpcContent := frpcConfig(p.relayTunnelIP().String(), p.FRPControlPort, p.FRPToken, p.Ports)
-	if err := node.WriteFile(ctx, clientPath, []byte(frpcContent), "600"); err != nil {
-		return fmt.Errorf("node: write frpc config: %w", err)
-	}
 	if _, err := node.Run(ctx, fmt.Sprintf("systemctl daemon-reload && systemctl enable --now frpc@client-%d", p.FRPControlPort)); err != nil {
 		return fmt.Errorf("node: start frpc: %w", err)
 	}
@@ -320,8 +334,39 @@ func Provision(ctx context.Context, relay, node *sshexec.Client, p Params) error
 	if err != nil || strings.TrimSpace(status) != "active" {
 		return fmt.Errorf("node: frpc did not stay running (status: %s): %w", strings.TrimSpace(status), err)
 	}
-
 	return nil
+}
+
+// Stop disables and stops the four units Start brings up, without removing
+// any config or unit file - the exact inverse of Start, so a stopped tunnel
+// can be resumed later with nothing re-provisioned. Best-effort, like
+// Teardown: every step runs even if an earlier one fails, errors collected
+// rather than stopping at the first one.
+func Stop(ctx context.Context, relay, node *sshexec.Client, p Params) error {
+	var errs []string
+	run := func(c *sshexec.Client, label, cmd string) {
+		if _, err := c.Run(ctx, cmd); err != nil {
+			errs = append(errs, label+": "+err.Error())
+		}
+	}
+	run(node, "node: stop frpc", fmt.Sprintf("systemctl disable --now frpc@client-%d", p.FRPControlPort))
+	run(node, "node: stop GRE", "systemctl disable --now gre-"+p.InterfaceName)
+	run(relay, "relay: stop frps", fmt.Sprintf("systemctl disable --now frps@server-%d", p.FRPControlPort))
+	run(relay, "relay: stop GRE", "systemctl disable --now gre-"+p.InterfaceName)
+	if len(errs) > 0 {
+		return fmt.Errorf("stop had %d error(s): %s", len(errs), strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// Restart is Stop immediately followed by Start - the simplest way to bounce
+// a tunnel that's acting up, reusing the exact same two building blocks the
+// Stop/Start buttons use individually.
+func Restart(ctx context.Context, relay, node *sshexec.Client, p Params) error {
+	if err := Stop(ctx, relay, node, p); err != nil {
+		return fmt.Errorf("restart: %w", err)
+	}
+	return Start(ctx, relay, node, p)
 }
 
 // Teardown removes everything Provision created, best-effort: every step

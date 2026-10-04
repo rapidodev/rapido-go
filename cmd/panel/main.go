@@ -42,6 +42,7 @@ import (
 	"github.com/legendary1205/rapido-go/internal/reviewjob"
 	"github.com/legendary1205/rapido-go/internal/telegram"
 	"github.com/legendary1205/rapido-go/internal/telegrambot"
+	"github.com/legendary1205/rapido-go/internal/tunnelmetrics"
 	"github.com/legendary1205/rapido-go/internal/usagejob"
 )
 
@@ -275,9 +276,9 @@ func runAsBackendSingleton(ctx context.Context, databaseURL string, queries *gen
 				dispatcher.InfraAlert(ctx, "Relay", fmt.Sprintf("%s (%s:%d)", r.Name, r.Host, r.Port), detail, up)
 			},
 			// Publishes the full live snapshot every round (not just on a
-			// transition, unlike Alert) so the api role's GET
-			// /api/tunnel-relays - a separate process with no Monitor of its
-			// own - can show current status on the dashboard.
+			// transition, unlike Alert) so the api role's GET /api/tunnels
+			// - a separate process with no Monitor of its own - can show
+			// current status on the dashboard.
 			OnTick: func(statuses []relayhealth.Status) {
 				if err := relayhealth.PublishStatuses(ctx, redisClient, statuses); err != nil {
 					logger.Warn("relayhealth: could not publish status to redis", "error", err)
@@ -285,6 +286,31 @@ func runAsBackendSingleton(ctx context.Context, databaseURL string, queries *gen
 			},
 			Logger: logger,
 		}).Run(ctx)
+		// CPU/RAM/disk/traffic per tunnel's relay, same page now shows this
+		// alongside relayhealth's up/down - only active tunnels have both a
+		// live GRE interface to read counters from and credentials worth
+		// re-dialing with every round.
+		go tunnelmetrics.Run(ctx, redisClient, tunnelmetrics.Options{
+			Lister: func(ctx context.Context) ([]tunnelmetrics.Target, error) {
+				rows, err := queries.ListTunnels(ctx)
+				if err != nil {
+					return nil, err
+				}
+				targets := make([]tunnelmetrics.Target, 0, len(rows))
+				for _, t := range rows {
+					if t.Status != "active" {
+						continue
+					}
+					targets = append(targets, tunnelmetrics.Target{
+						TunnelID: t.ID, RelayHost: t.RelayHost, RelaySSHPort: t.RelaySshPort,
+						RelaySSHUser: t.RelaySshUser, RelaySSHPassword: t.RelaySshPassword,
+						InterfaceName: t.InterfaceName,
+					})
+				}
+				return targets, nil
+			},
+			Logger: logger,
+		})
 		// Gateway (multi-panel load balancer) sub-phase 4: keeps every
 		// enabled peer's crowdedness/host cache warm so a real client's
 		// subscription fetch never waits on a network call to another

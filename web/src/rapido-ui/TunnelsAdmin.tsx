@@ -4,13 +4,17 @@ import classNames from "classnames";
 import {
   useCreateTunnelMutation,
   useDeleteTunnelMutation,
+  useRestartTunnelMutation,
+  useStartTunnelMutation,
+  useStopTunnelMutation,
   useTunnelsQuery,
 } from "hooks/useTunnelsQuery";
 import { useNodesQuery } from "hooks/useNodesQuery";
 import { useInboundPortsQuery } from "hooks/useInboundsQuery";
 import { Tunnel, TunnelCreatePayload, TunnelStatus } from "types/Tunnel";
 import { Node } from "types/Node";
-import { parseInboundPortInput, summarizePorts } from "utils/inboundPorts";
+import { parseInboundPortInput } from "utils/inboundPorts";
+import { formatBytes } from "utils/formatByte";
 import { errorText } from "service/errors";
 import { Card } from "rapido-ui/Card";
 import { Badge, BadgeTone } from "rapido-ui/Badge";
@@ -20,13 +24,14 @@ import { Select } from "rapido-ui/Select";
 import { Checkbox } from "rapido-ui/Checkbox";
 import { Modal } from "rapido-ui/Modal";
 
-// Panel-provisioned GRE+FRP tunnels: unlike TunnelRelaysAdmin.tsx (pure
-// monitoring of a relay someone set up by hand), creating a row here makes
-// the panel itself SSH into both the relay and the node and bring the whole
-// tunnel up (internal/tunnelprovision), and deleting one tears both ends
-// back down. Provisioning runs in the background on the server, so a freshly
-// created row starts "pending" and this page polls (useTunnelsQuery) until
-// it settles into "active" or "failed".
+// Panel-provisioned GRE+FRP tunnels. A tunnel row IS its own monitoring
+// entry (health via internal/relayhealth, resource metrics via
+// internal/tunnelmetrics) - the old separate "Tunnel Relays" monitoring-only
+// page was merged in here, since every real relay this fleet has is a
+// provisioned tunnel and already carries the SSH credentials a resource
+// check needs. Provisioning/stop/start/restart all run in the background on
+// the server, so a row starts in a transient status and this page polls
+// (useTunnelsQuery) until it settles.
 
 const cardToneClasses: Partial<Record<BadgeTone, string>> = {
   green: "!border-emerald-500/60 bg-emerald-500/[0.04]",
@@ -39,6 +44,9 @@ const statusTone: Record<TunnelStatus, BadgeTone> = {
   active: "green",
   failed: "red",
   deleting: "yellow",
+  stopped: "gray",
+  stopping: "yellow",
+  starting: "yellow",
 };
 
 const statusLabelKey: Record<TunnelStatus, string> = {
@@ -46,6 +54,28 @@ const statusLabelKey: Record<TunnelStatus, string> = {
   active: "rapido.tunnels.statusActive",
   failed: "rapido.tunnels.statusFailed",
   deleting: "rapido.tunnels.statusDeleting",
+  stopped: "rapido.tunnels.statusStopped",
+  stopping: "rapido.tunnels.statusStopping",
+  starting: "rapido.tunnels.statusStarting",
+};
+
+const BUSY_STATUSES = new Set<TunnelStatus>(["pending", "deleting", "stopping", "starting"]);
+
+// Reuses the exact "N <unit> ago" phrasing the Monitoring page already
+// established.
+const agoLabelKey = {
+  seconds: "rapido.monitoring.agoSeconds",
+  minutes: "rapido.monitoring.agoMinutes",
+  hours: "rapido.monitoring.agoHours",
+  days: "rapido.monitoring.agoDays",
+} as const;
+
+const agoText = (t: (key: string, opts?: Record<string, unknown>) => string, checkedAt: string): string => {
+  const seconds = Math.max(0, Math.floor((Date.now() - new Date(checkedAt).getTime()) / 1000));
+  if (seconds < 60) return t(agoLabelKey.seconds, { value: seconds });
+  if (seconds < 3600) return t(agoLabelKey.minutes, { value: Math.floor(seconds / 60) });
+  if (seconds < 86400) return t(agoLabelKey.hours, { value: Math.floor(seconds / 3600) });
+  return t(agoLabelKey.days, { value: Math.floor(seconds / 86400) });
 };
 
 // ---------------------------------------------------------------------------
@@ -78,8 +108,7 @@ const emptyForm = (): FormValues => ({
 
 // A node's own candidate ports: its explicit listen_ports profile if it has
 // one, otherwise every port any inbound actually listens on (an
-// unrestricted node serves all of them) - the same source of truth
-// NodesAdmin.tsx's own per-node port field reads from.
+// unrestricted node serves all of them).
 const candidatePortsForNode = (node: Node | undefined, portsByTag: Record<string, number[]>): number[] => {
   if (node?.listen_ports && node.listen_ports.length > 0) {
     return [...node.listen_ports].sort((a, b) => a - b);
@@ -306,14 +335,104 @@ const TunnelFormModal: FC<{ onClose: () => void; onCreated: () => void }> = ({ o
 
 // ---------------------------------------------------------------------------
 
+const HealthRow: FC<{ tunnel: Tunnel }> = ({ tunnel }) => {
+  const { t } = useTranslation();
+  const health = tunnel.health;
+  const tone: BadgeTone = health === null ? "gray" : health.up ? "green" : "red";
+  const label = health === null
+    ? t("rapido.tunnels.healthUnknown")
+    : t(health.up ? "rapido.tunnels.healthUp" : "rapido.tunnels.healthDown");
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-xs">
+      <span className="text-rapido-muted">{t("rapido.tunnels.health")}:</span>
+      <Badge tone={tone} title={health?.error || undefined}>
+        {label}
+      </Badge>
+      {health?.checked_at && <span className="text-rapido-muted">{agoText(t, health.checked_at)}</span>}
+    </div>
+  );
+};
+
+const MetricBar: FC<{ label: string; used: number; total: number; display: string }> = ({
+  label,
+  used,
+  total,
+  display,
+}) => {
+  const pct = total > 0 ? Math.min(100, Math.round((used / total) * 100)) : 0;
+  return (
+    <div className="flex flex-col gap-0.5">
+      <div className="flex items-center justify-between text-[11px] text-rapido-muted">
+        <span>{label}</span>
+        <span dir="ltr">{display}</span>
+      </div>
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-rapido-raised">
+        <div
+          className={classNames("h-full rounded-full", pct >= 90 ? "bg-red-500" : pct >= 70 ? "bg-amber-500" : "bg-rapido-accent")}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  );
+};
+
+const MetricsSection: FC<{ tunnel: Tunnel }> = ({ tunnel }) => {
+  const { t } = useTranslation();
+  const m = tunnel.metrics;
+  if (!m) {
+    return <p className="text-xs text-rapido-muted">{t("rapido.tunnels.metricsPending")}</p>;
+  }
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="grid grid-cols-2 gap-3">
+        <MetricBar
+          label={t("rapido.tunnels.metricsCpu")}
+          used={m.cpu_percent}
+          total={100}
+          display={`${m.cpu_percent}%`}
+        />
+        <MetricBar
+          label={t("rapido.tunnels.metricsRam")}
+          used={m.mem_used_mb}
+          total={m.mem_total_mb}
+          display={`${m.mem_used_mb} / ${m.mem_total_mb} MB`}
+        />
+        <MetricBar
+          label={t("rapido.tunnels.metricsDisk")}
+          used={m.disk_used_gb}
+          total={m.disk_total_gb}
+          display={`${m.disk_used_gb} / ${m.disk_total_gb} GB`}
+        />
+        <div className="flex flex-col gap-0.5">
+          <span className="text-[11px] text-rapido-muted">{t("rapido.tunnels.metricsTraffic")}</span>
+          <span className="text-xs" dir="ltr">
+            ↓{formatBytes(m.rx_bytes)} / ↑{formatBytes(m.tx_bytes)}
+          </span>
+        </div>
+      </div>
+      <span className="text-[11px] text-rapido-muted">{t("rapido.tunnels.lastChecked", { time: agoText(t, m.checked_at) })}</span>
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
+
 const TunnelCard: FC<{ tunnel: Tunnel; nodeName: string | undefined }> = ({ tunnel, nodeName }) => {
   const { t } = useTranslation();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const deleteTunnel = useDeleteTunnelMutation();
+  const stopTunnel = useStopTunnelMutation();
+  const startTunnel = useStartTunnelMutation();
+  const restartTunnel = useRestartTunnelMutation();
   const tone = statusTone[tunnel.status];
-  const ports = summarizePorts(tunnel.ports);
-  const busy = tunnel.status === "pending" || tunnel.status === "deleting";
+  const busy = BUSY_STATUSES.has(tunnel.status) || deleteTunnel.isPending || stopTunnel.isPending || startTunnel.isPending || restartTunnel.isPending;
+
+  const runAction = (mutate: (id: number, opts: { onError: (e: unknown) => void }) => void, failKey: string) => {
+    setMsg(null);
+    mutate(tunnel.id, { onError: (e) => setMsg(errorText(e, t(failKey))) });
+  };
 
   const remove = () => {
     setMsg(null);
@@ -348,13 +467,21 @@ const TunnelCard: FC<{ tunnel: Tunnel; nodeName: string | undefined }> = ({ tunn
               {tunnel.relay_host}
             </span>
           </span>
-          <span dir="ltr" title={ports.truncated ? tunnel.ports.join(", ") : undefined}>
-            {t("rapido.tunnels.portsLabel")}: <span className="text-rapido-text">{ports.text}</span>
-            {ports.truncated && (
-              <span className="text-rapido-muted"> {t("rapido.xrayConfig.portsCount", { count: ports.total })}</span>
-            )}
-          </span>
         </div>
+
+        <div className="flex flex-col gap-1">
+          <span className="text-xs text-rapido-muted">{t("rapido.tunnels.portsLabel")} ({tunnel.ports.length})</span>
+          <div className="flex flex-wrap gap-1" dir="ltr">
+            {tunnel.ports.map((port) => (
+              <span key={port} className="rounded bg-rapido-raised px-1.5 py-0.5 text-[11px] text-rapido-text">
+                {port}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        <HealthRow tunnel={tunnel} />
+        <MetricsSection tunnel={tunnel} />
 
         {tunnel.status === "failed" && tunnel.status_message && (
           <div className="break-words text-xs text-rapido-muted" title={tunnel.status_message}>
@@ -371,6 +498,33 @@ const TunnelCard: FC<{ tunnel: Tunnel; nodeName: string | undefined }> = ({ tunn
         )}
 
         <div className="flex flex-wrap items-center gap-1.5">
+          {!busy && tunnel.status === "active" && (
+            <>
+              <Button
+                variant="chip"
+                tone="sky"
+                onClick={() => runAction((id, o) => restartTunnel.mutate(id, o), "rapido.tunnels.restartFailed")}
+              >
+                {t("rapido.tunnels.restart")}
+              </Button>
+              <Button
+                variant="chip"
+                tone="amber"
+                onClick={() => runAction((id, o) => stopTunnel.mutate(id, o), "rapido.tunnels.stopFailed")}
+              >
+                {t("rapido.tunnels.stop")}
+              </Button>
+            </>
+          )}
+          {!busy && (tunnel.status === "stopped" || tunnel.status === "failed") && (
+            <Button
+              variant="chip"
+              tone="accent"
+              onClick={() => runAction((id, o) => startTunnel.mutate(id, o), "rapido.tunnels.startFailed")}
+            >
+              {t("rapido.tunnels.start")}
+            </Button>
+          )}
           {confirmDelete ? (
             <>
               <span className="text-xs text-red-400">{t("rapido.tunnels.confirmDelete")}</span>
