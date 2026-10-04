@@ -134,6 +134,19 @@ func SubscriptionRevokedPayload(username, byUsername string, belongsTo *string) 
 	}}}
 }
 
+// InfraAlertPayload mirrors telegram.InfraAlertMessage for Discord.
+func InfraAlertPayload(kind, name, detail string, up bool) EmbedPayload {
+	title, color := ":red_circle: "+kind+" down", 0xff0000
+	if up {
+		title, color = ":green_circle: "+kind+" recovered", 0x00ff00
+	}
+	desc := "**" + kind + ":** " + name
+	if !up && detail != "" {
+		desc += "\n**Error:** " + detail
+	}
+	return EmbedPayload{Embeds: []Embed{{Title: title, Description: desc, Color: color}}}
+}
+
 // LoginPayload deliberately has no password parameter - see
 // telegram.LoginMessage's comment; the same security decision applies to
 // both integrations.

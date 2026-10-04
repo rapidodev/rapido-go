@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -34,6 +35,7 @@ import (
 	"github.com/legendary1205/rapido-go/internal/httpapi"
 	"github.com/legendary1205/rapido-go/internal/integrationsettings"
 	"github.com/legendary1205/rapido-go/internal/logstream"
+	"github.com/legendary1205/rapido-go/internal/relayhealth"
 	"github.com/legendary1205/rapido-go/internal/report"
 	"github.com/legendary1205/rapido-go/internal/resellerapi"
 	"github.com/legendary1205/rapido-go/internal/resellerusagejob"
@@ -132,7 +134,7 @@ func run(logger *slog.Logger) error {
 	dispatcher := report.New(report.NotifyFlags{
 		StatusChange: cfg.NotifyStatusChange, UserCreated: cfg.NotifyUserCreated, UserUpdated: cfg.NotifyUserUpdated,
 		UserDeleted: cfg.NotifyUserDeleted, UserDataUsedReset: cfg.NotifyUserDataUsedReset,
-		UserSubRevoked: cfg.NotifyUserSubRevoked, Login: cfg.NotifyLogin,
+		UserSubRevoked: cfg.NotifyUserSubRevoked, Login: cfg.NotifyLogin, InfraAlert: cfg.NotifyInfraAlert,
 	}, settingsFn, telegram.NewSender(notifyHTTPClient, ""), discord.NewSender(notifyHTTPClient), logger)
 	resellerAPIClient := resellerapi.NewClient(&http.Client{Timeout: 3 * time.Second})
 	hostMetricsTracker := hostmetrics.NewPreviousTracker()
@@ -249,6 +251,31 @@ func runAsBackendSingleton(ctx context.Context, databaseURL string, queries *gen
 		// enough, so it lives here rather than on every replica.
 		go httpapi.RunPresenceTrim(ctx, redisClient, logger, time.Minute)
 		go hostmetrics.PanelSelfSampleLoop(ctx, queries, hostMetricsTracker, redisClient, logger, 30*time.Second)
+		// Alerts on a WireGuard tunnel's up<->down transition - the data was
+		// already being collected (see monitoring.go), nobody was being told.
+		go hostmetrics.RunTunnelAlerts(ctx, queries, func(ctx context.Context, nodeName, tunnelName string, up bool) {
+			dispatcher.InfraAlert(ctx, "WireGuard tunnel", nodeName+"/"+tunnelName, "", up)
+		}, logger, 30*time.Second)
+		// Probes every registered external relay (a GRE+FRP box or similar in
+		// front of a node, living entirely outside this fleet - see
+		// internal/relayhealth's doc comment) and alerts the same way.
+		go relayhealth.New(relayhealth.Options{
+			Lister: func(ctx context.Context) ([]relayhealth.Relay, error) {
+				rows, err := queries.ListTunnelRelays(ctx)
+				if err != nil {
+					return nil, err
+				}
+				out := make([]relayhealth.Relay, len(rows))
+				for i, r := range rows {
+					out[i] = relayhealth.Relay{ID: r.ID, Name: r.Name, Host: r.Host, Port: r.Port}
+				}
+				return out, nil
+			},
+			Alert: func(ctx context.Context, r relayhealth.Relay, up bool, detail string) {
+				dispatcher.InfraAlert(ctx, "Relay", fmt.Sprintf("%s (%s:%d)", r.Name, r.Host, r.Port), detail, up)
+			},
+			Logger: logger,
+		}).Run(ctx)
 		// Gateway (multi-panel load balancer) sub-phase 4: keeps every
 		// enabled peer's crowdedness/host cache warm so a real client's
 		// subscription fetch never waits on a network call to another

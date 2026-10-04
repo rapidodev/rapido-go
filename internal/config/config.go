@@ -165,6 +165,7 @@ type Config struct {
 	NotifyUserDataUsedReset bool
 	NotifyUserSubRevoked    bool
 	NotifyLogin             bool
+	NotifyInfraAlert        bool
 }
 
 func Load() (*Config, error) {
@@ -221,6 +222,7 @@ func Load() (*Config, error) {
 	cfg.NotifyUserDataUsedReset = getBool("NOTIFY_USER_DATA_USED_RESET", true)
 	cfg.NotifyUserSubRevoked = getBool("NOTIFY_USER_SUB_REVOKED", true)
 	cfg.NotifyLogin = getBool("NOTIFY_LOGIN", true)
+	cfg.NotifyInfraAlert = getBool("NOTIFY_INFRA_ALERT", true)
 
 	if n, err := strconv.ParseInt(getEnv("TELEGRAM_LOGGER_CHANNEL_ID", "0"), 10, 64); err == nil {
 		cfg.TelegramLoggerChannelID = n
