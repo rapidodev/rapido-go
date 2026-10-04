@@ -98,6 +98,47 @@ func TestFlappingRelayNeedsConsecutiveRoundsBeforeEachTransition(t *testing.T) {
 	}
 }
 
+// TestSnapshotAndOnTickReportEveryTrackedRelay covers the data Phase 1's
+// dashboard reads: Snapshot (polled by the GET /api/tunnel-relays handler
+// indirectly, via the Redis blob OnTick publishes) must carry every
+// relay's current up/error/checked-at, and OnTick must fire with exactly
+// that same data after each round - not just on a transition, unlike
+// Alert.
+func TestSnapshotAndOnTickReportEveryTrackedRelay(t *testing.T) {
+	var onTickCalls [][]Status
+	healthy := Relay{ID: 1, Name: "ok", Host: "x", Port: 1}
+	broken := Relay{ID: 2, Name: "bad", Host: "x", Port: 2}
+	m := New(Options{
+		Lister: relayList([]Relay{healthy, broken}),
+		Prober: func(ctx context.Context, r Relay) (time.Duration, error) {
+			if r.ID == healthy.ID {
+				return time.Millisecond, nil
+			}
+			return 0, errors.New("refused")
+		},
+		OnTick: func(s []Status) { onTickCalls = append(onTickCalls, s) },
+	})
+	m.Tick(context.Background())
+
+	snap := m.Snapshot()
+	if len(snap) != 2 {
+		t.Fatalf("Snapshot = %v, want 2 entries", snap)
+	}
+	if !snap[0].Up || snap[0].Error != "" {
+		t.Errorf("healthy relay status = %+v, want Up=true Error=\"\"", snap[0])
+	}
+	if snap[1].Up || snap[1].Error != "refused" {
+		t.Errorf("broken relay status = %+v, want Up=false Error=\"refused\"", snap[1])
+	}
+	if snap[0].CheckedAt.IsZero() || snap[1].CheckedAt.IsZero() {
+		t.Error("CheckedAt was never set")
+	}
+
+	if len(onTickCalls) != 1 || len(onTickCalls[0]) != 2 {
+		t.Fatalf("OnTick calls = %v, want exactly 1 call with 2 statuses", onTickCalls)
+	}
+}
+
 // TestRemovedRelayStopsBeingTracked proves a relay deleted via the API
 // (next Lister call simply omits it) does not leave a stale entry that
 // would resume its old streak if the same id were ever reused.

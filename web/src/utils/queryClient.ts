@@ -42,4 +42,5 @@ export const queryKeys = {
   backups: ["backups"] as const,
   gatewaySettings: ["gateway-settings"] as const,
   gatewayPeers: ["gateway-peers"] as const,
+  tunnelRelays: ["tunnel-relays"] as const,
 };
