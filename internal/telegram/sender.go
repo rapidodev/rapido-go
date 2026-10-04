@@ -130,3 +130,63 @@ func (s *Sender) send(ctx context.Context, cfg Config, chatID int64, text string
 		logger.Warn("telegram: sendMessage returned non-2xx", "chat_id", chatID, "status", resp.StatusCode)
 	}
 }
+
+type createForumTopicRequest struct {
+	ChatID int64  `json:"chat_id"`
+	Name   string `json:"name"`
+}
+
+type apiResult struct {
+	OK          bool            `json:"ok"`
+	Description string          `json:"description"`
+	Result      json.RawMessage `json:"result"`
+}
+
+// CreateForumTopic creates one topic thread in chatID (a supergroup with
+// Topics/forum mode enabled and this bot added as an admin with "Manage
+// Topics") and returns its thread id. Unlike Report's fire-and-forget
+// sends, this is a synchronous admin-triggered setup action - the caller
+// needs the real error (most commonly Telegram's own "chat is not a
+// forum", when the admin hasn't turned Topics on yet) to show the admin
+// exactly what to fix, not a swallowed log line.
+func (s *Sender) CreateForumTopic(ctx context.Context, cfg Config, chatID int64, name string) (int64, error) {
+	body, err := json.Marshal(createForumTopicRequest{ChatID: chatID, Name: name})
+	if err != nil {
+		return 0, fmt.Errorf("encode createForumTopic body: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("%s/bot%s/createForumTopic", s.baseURL, cfg.APIToken)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return 0, fmt.Errorf("build createForumTopic request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := s.httpClient
+	if cfg.ProxyURL != "" {
+		if proxyURL, err := url.Parse(cfg.ProxyURL); err == nil {
+			client = &http.Client{Timeout: s.httpClient.Timeout, Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+		}
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("createForumTopic: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result apiResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, fmt.Errorf("createForumTopic: decode response: %w", err)
+	}
+	if !result.OK {
+		return 0, fmt.Errorf("telegram: %s", result.Description)
+	}
+	var topic struct {
+		MessageThreadID int64 `json:"message_thread_id"`
+	}
+	if err := json.Unmarshal(result.Result, &topic); err != nil {
+		return 0, fmt.Errorf("createForumTopic: decode result: %w", err)
+	}
+	return topic.MessageThreadID, nil
+}

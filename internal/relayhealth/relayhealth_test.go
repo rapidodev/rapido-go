@@ -63,8 +63,13 @@ func TestFlappingRelayNeedsConsecutiveRoundsBeforeEachTransition(t *testing.T) {
 	relay := Relay{ID: 1, Name: "r", Host: "x", Port: 1}
 	up := true
 	m := New(Options{
-		Lister:    relayList([]Relay{relay}),
-		Prober:    func(ctx context.Context, r Relay) (time.Duration, error) { if up { return time.Millisecond, nil }; return 0, errors.New("down") },
+		Lister: relayList([]Relay{relay}),
+		Prober: func(ctx context.Context, r Relay) (time.Duration, error) {
+			if up {
+				return time.Millisecond, nil
+			}
+			return 0, errors.New("down")
+		},
 		Alert:     alert.record,
 		DownAfter: 2, UpAfter: 2,
 	})

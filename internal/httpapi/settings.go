@@ -9,24 +9,117 @@ import (
 
 	"github.com/legendary1205/rapido-go/internal/db/generated"
 	"github.com/legendary1205/rapido-go/internal/integrationsettings"
+	"github.com/legendary1205/rapido-go/internal/report"
 )
 
+// telegramTopicPlan is the fixed, ordered set of forum topics
+// handleSetupTelegramTopics creates - one per report.Category*, with a
+// Persian label since that's what this operator's admins read. Order is
+// deliberate (most noise-prone/high-frequency categories first) only in
+// the sense that it is what the admin sees topics appear in, not a
+// functional requirement.
+var telegramTopicPlan = []report.TopicRequest{
+	{Category: report.CategoryLogin, Name: "🔐 ورود"},
+	{Category: report.CategoryUserCreated, Name: "✅ ساخت کاربر"},
+	{Category: report.CategoryUserUpdated, Name: "✏️ ویرایش کاربر"},
+	{Category: report.CategoryUserDeleted, Name: "🗑 حذف کاربر"},
+	{Category: report.CategoryUserDataUsedReset, Name: "📊 ریست حجم"},
+	{Category: report.CategoryUserSubRevoked, Name: "🔁 لغو اشتراک"},
+	{Category: report.CategoryStatusChange, Name: "🔄 تغییر وضعیت"},
+	{Category: report.CategoryInfraAlert, Name: "🛰 هشدار زیرساخت"},
+}
+
+// handleSetupTelegramTopics implements POST
+// /api/settings/integrations/telegram-topics (sudo only): creates one forum
+// topic per notification category in the given group and saves the
+// mapping, so each category's own Report call (see internal/report's
+// resolve) routes to its own thread instead of every category sharing one
+// feed. The target chat must already be a supergroup with Topics (forum
+// mode) turned on and this bot added as an admin with "Manage Topics" -
+// Telegram's own error for a plain group/channel ("chat is not a forum")
+// comes back verbatim in errors below so the admin knows exactly what to
+// fix. Whatever categories do succeed are saved even if others fail (a
+// transient per-call rate limit should not throw away the ones that
+// worked); re-running the same request only retries what's missing since
+// handleUpdateIntegrationSettings's topic ids merge, not replace, is reused
+// here via a direct DB round-trip.
+func (h *Handler) handleSetupTelegramTopics(c *gin.Context) {
+	var body struct {
+		ChatID int64 `json:"chat_id" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": err.Error()})
+		return
+	}
+
+	ctx := c.Request.Context()
+	vals, _, err := h.resolveIntegrationSettings(c)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not read integration settings"})
+		return
+	}
+	if vals.TelegramAPIToken == "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": "Set telegram_api_token first"})
+		return
+	}
+
+	created, errs := h.reports.CreateTopics(ctx, body.ChatID, telegramTopicPlan)
+
+	current, err := h.store.Queries.GetIntegrationSettings(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not read integration settings"})
+		return
+	}
+	merged := integrationsettings.Resolve(current, h.envDefaults).TelegramTopicIDs
+	if merged == nil {
+		merged = make(map[string]int64, len(created))
+	}
+	for category, id := range created {
+		merged[category] = id
+	}
+	encodedTopics, err := json.Marshal(merged)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not encode topic ids"})
+		return
+	}
+
+	params := generated.UpdateIntegrationSettingsParams{
+		ResellerApiSecret: current.ResellerApiSecret, ResellerApiUrl: current.ResellerApiUrl, ResellerApiLicense: current.ResellerApiLicense,
+		TelegramApiToken: current.TelegramApiToken, TelegramAdminIds: current.TelegramAdminIds, TelegramProxyUrl: current.TelegramProxyUrl,
+		TelegramLoggerChannelID: int8FromPtr(&body.ChatID), TelegramLoggerTopicID: current.TelegramLoggerTopicID,
+		TelegramDefaultVlessFlow: current.TelegramDefaultVlessFlow,
+		WebhookAddresses:         current.WebhookAddresses, WebhookSecret: current.WebhookSecret, DiscordWebhookUrl: current.DiscordWebhookUrl,
+		TelegramTopicIds: encodedTopics,
+	}
+	if _, err := h.store.Queries.UpdateIntegrationSettings(ctx, params); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not save topic ids"})
+		return
+	}
+	if err := h.store.InvalidateIntegrationSettings(ctx); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not invalidate integration settings cache"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"chat_id": body.ChatID, "created": created, "errors": errs})
+}
+
 type integrationSettingsDTO struct {
-	ResellerApiEnabled            bool       `json:"reseller_api_enabled"`
-	ResellerApiSecret             *string    `json:"reseller_api_secret"` // masked
-	ResellerApiUrl                *string    `json:"reseller_api_url"`
-	ResellerApiLicense            *string    `json:"reseller_api_license"` // masked
-	TelegramEnabled          bool       `json:"telegram_enabled"`
-	TelegramAPIToken         *string    `json:"telegram_api_token"` // masked
-	TelegramAdminIDs         []int64    `json:"telegram_admin_ids"`
-	TelegramProxyURL         *string    `json:"telegram_proxy_url"` // masked
-	TelegramLoggerChannelID  *int64     `json:"telegram_logger_channel_id"`
-	TelegramLoggerTopicID    *int64     `json:"telegram_logger_topic_id"`
-	TelegramDefaultVlessFlow *string    `json:"telegram_default_vless_flow"`
-	WebhookAddresses         []string   `json:"webhook_addresses"`
-	WebhookSecret            *string    `json:"webhook_secret"`      // masked
-	DiscordWebhookURL        *string    `json:"discord_webhook_url"` // masked
-	UpdatedAt                *time.Time `json:"updated_at"`
+	ResellerApiEnabled       bool             `json:"reseller_api_enabled"`
+	ResellerApiSecret        *string          `json:"reseller_api_secret"` // masked
+	ResellerApiUrl           *string          `json:"reseller_api_url"`
+	ResellerApiLicense       *string          `json:"reseller_api_license"` // masked
+	TelegramEnabled          bool             `json:"telegram_enabled"`
+	TelegramAPIToken         *string          `json:"telegram_api_token"` // masked
+	TelegramAdminIDs         []int64          `json:"telegram_admin_ids"`
+	TelegramProxyURL         *string          `json:"telegram_proxy_url"` // masked
+	TelegramLoggerChannelID  *int64           `json:"telegram_logger_channel_id"`
+	TelegramLoggerTopicID    *int64           `json:"telegram_logger_topic_id"`
+	TelegramTopicIDs         map[string]int64 `json:"telegram_topic_ids"`
+	TelegramDefaultVlessFlow *string          `json:"telegram_default_vless_flow"`
+	WebhookAddresses         []string         `json:"webhook_addresses"`
+	WebhookSecret            *string          `json:"webhook_secret"`      // masked
+	DiscordWebhookURL        *string          `json:"discord_webhook_url"` // masked
+	UpdatedAt                *time.Time       `json:"updated_at"`
 }
 
 func maskedPtr(value string) *string {
@@ -61,16 +154,17 @@ func (h *Handler) resolveIntegrationSettings(ctx *gin.Context) (integrationsetti
 
 func toIntegrationSettingsDTO(vals integrationsettings.Values, row generated.IntegrationSetting) integrationSettingsDTO {
 	dto := integrationSettingsDTO{
-		ResellerApiEnabled:            vals.ResellerApiSecret != "",
-		ResellerApiSecret:             maskedPtr(vals.ResellerApiSecret),
-		ResellerApiUrl:                plainPtr(vals.ResellerApiUrl),
-		ResellerApiLicense:            maskedPtr(vals.ResellerApiLicense),
+		ResellerApiEnabled:       vals.ResellerApiSecret != "",
+		ResellerApiSecret:        maskedPtr(vals.ResellerApiSecret),
+		ResellerApiUrl:           plainPtr(vals.ResellerApiUrl),
+		ResellerApiLicense:       maskedPtr(vals.ResellerApiLicense),
 		TelegramEnabled:          vals.TelegramAPIToken != "",
 		TelegramAPIToken:         maskedPtr(vals.TelegramAPIToken),
 		TelegramAdminIDs:         vals.TelegramAdminIDs,
 		TelegramProxyURL:         maskedPtr(vals.TelegramProxyURL),
 		TelegramLoggerChannelID:  int64PtrOrNil(vals.TelegramLoggerChannelID),
 		TelegramLoggerTopicID:    int64PtrOrNil(vals.TelegramLoggerTopicID),
+		TelegramTopicIDs:         vals.TelegramTopicIDs,
 		TelegramDefaultVlessFlow: plainPtr(vals.TelegramDefaultVlessFlow),
 		WebhookAddresses:         vals.WebhookAddresses,
 		WebhookSecret:            maskedPtr(vals.WebhookSecret),
@@ -123,9 +217,9 @@ func (h *Handler) handleUpdateIntegrationSettings(c *gin.Context) {
 	}
 
 	params := generated.UpdateIntegrationSettingsParams{
-		ResellerApiSecret:             current.ResellerApiSecret,
-		ResellerApiUrl:                current.ResellerApiUrl,
-		ResellerApiLicense:            current.ResellerApiLicense,
+		ResellerApiSecret:        current.ResellerApiSecret,
+		ResellerApiUrl:           current.ResellerApiUrl,
+		ResellerApiLicense:       current.ResellerApiLicense,
 		TelegramApiToken:         current.TelegramApiToken,
 		TelegramAdminIds:         current.TelegramAdminIds,
 		TelegramProxyUrl:         current.TelegramProxyUrl,

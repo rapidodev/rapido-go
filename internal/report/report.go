@@ -8,6 +8,7 @@ package report
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/legendary1205/rapido-go/internal/discord"
 	"github.com/legendary1205/rapido-go/internal/integrationsettings"
@@ -27,6 +28,22 @@ type NotifyFlags struct {
 	Login             bool
 	InfraAlert        bool
 }
+
+// Category* are the keys integrationsettings.Values.TelegramTopicIDs is
+// keyed by - one per notification method below, so an admin who has split
+// the logger group into per-category topics gets each event type routed to
+// its own thread instead of every type sharing one feed (the DM/single-
+// channel firehose a reseller bot's before-every-call login was flooding).
+const (
+	CategoryStatusChange      = "status_change"
+	CategoryUserCreated       = "user_created"
+	CategoryUserUpdated       = "user_updated"
+	CategoryUserDeleted       = "user_deleted"
+	CategoryUserDataUsedReset = "user_data_used_reset"
+	CategoryUserSubRevoked    = "user_sub_revoked"
+	CategoryLogin             = "login"
+	CategoryInfraAlert        = "infra_alert"
+)
 
 // SettingsFunc resolves the current dynamic settings, called fresh on every
 // dispatch - never cached inside this package, since internal/httpapi's
@@ -68,22 +85,34 @@ func New(flags NotifyFlags, settingsFn SettingsFunc, tg *telegram.Sender, dc *di
 	return &Dispatcher{flags: flags, settingsFn: settingsFn, telegram: tg, discord: dc, logger: logger}
 }
 
-// resolve fetches the current settings and builds the telegram.Config -
-// shared setup for every dispatch method below. Returns ok=false (nothing
-// to send) on a settings-read failure, logging the error - the one path
-// that can't be per-recipient like telegram.Sender/discord.Sender's own
-// failure isolation, since without settings there's no recipient to try.
-func (d *Dispatcher) resolve(ctx context.Context) (integrationsettings.Values, telegram.Config, bool) {
+// resolve fetches the current settings and builds the telegram.Config for
+// one notification category - shared setup for every dispatch method
+// below. Returns ok=false (nothing to send) on a settings-read failure,
+// logging the error - the one path that can't be per-recipient like
+// telegram.Sender/discord.Sender's own failure isolation, since without
+// settings there's no recipient to try.
+//
+// The category's own topic id (if the admin has set one up via POST
+// /api/settings/integrations/telegram-topics) overrides the single global
+// TelegramLoggerTopicID - a category with no topic of its own still falls
+// back to that global one (or the group's General topic if neither is
+// set), so a fresh integration with no topics configured yet behaves
+// exactly as it did before this field existed.
+func (d *Dispatcher) resolve(ctx context.Context, category string) (integrationsettings.Values, telegram.Config, bool) {
 	vals, err := d.settingsFn(ctx)
 	if err != nil {
 		d.logger.Warn("report: could not resolve integration settings, dropping notification", "error", err)
 		return integrationsettings.Values{}, telegram.Config{}, false
 	}
+	topicID := vals.TelegramLoggerTopicID
+	if id, ok := vals.TelegramTopicIDs[category]; ok {
+		topicID = id
+	}
 	cfg := telegram.Config{
 		APIToken:        vals.TelegramAPIToken,
 		AdminIDs:        vals.TelegramAdminIDs,
 		LoggerChannelID: vals.TelegramLoggerChannelID,
-		LoggerTopicID:   vals.TelegramLoggerTopicID,
+		LoggerTopicID:   topicID,
 		ProxyURL:        vals.TelegramProxyURL,
 	}
 	return vals, cfg, true
@@ -114,7 +143,7 @@ func (d *Dispatcher) StatusChange(ctx context.Context, username, status string, 
 	if !d.flags.StatusChange {
 		return
 	}
-	vals, tgCfg, ok := d.resolve(ctx)
+	vals, tgCfg, ok := d.resolve(ctx, CategoryStatusChange)
 	if !ok {
 		return
 	}
@@ -129,7 +158,7 @@ func (d *Dispatcher) UserCreated(ctx context.Context, user UserSummary, byUserna
 	if !d.flags.UserCreated {
 		return
 	}
-	vals, tgCfg, ok := d.resolve(ctx)
+	vals, tgCfg, ok := d.resolve(ctx, CategoryUserCreated)
 	if !ok {
 		return
 	}
@@ -144,7 +173,7 @@ func (d *Dispatcher) UserUpdated(ctx context.Context, user UserSummary, byUserna
 	if !d.flags.UserUpdated {
 		return
 	}
-	vals, tgCfg, ok := d.resolve(ctx)
+	vals, tgCfg, ok := d.resolve(ctx, CategoryUserUpdated)
 	if !ok {
 		return
 	}
@@ -159,7 +188,7 @@ func (d *Dispatcher) UserDeleted(ctx context.Context, username, byUsername strin
 	if !d.flags.UserDeleted {
 		return
 	}
-	vals, tgCfg, ok := d.resolve(ctx)
+	vals, tgCfg, ok := d.resolve(ctx, CategoryUserDeleted)
 	if !ok {
 		return
 	}
@@ -174,7 +203,7 @@ func (d *Dispatcher) UserDataUsageReset(ctx context.Context, username, byUsernam
 	if !d.flags.UserDataUsedReset {
 		return
 	}
-	vals, tgCfg, ok := d.resolve(ctx)
+	vals, tgCfg, ok := d.resolve(ctx, CategoryUserDataUsedReset)
 	if !ok {
 		return
 	}
@@ -189,7 +218,7 @@ func (d *Dispatcher) UserDataResetByNext(ctx context.Context, user UserSummary, 
 	if !d.flags.UserDataUsedReset {
 		return
 	}
-	vals, tgCfg, ok := d.resolve(ctx)
+	vals, tgCfg, ok := d.resolve(ctx, CategoryUserDataUsedReset)
 	if !ok {
 		return
 	}
@@ -204,7 +233,7 @@ func (d *Dispatcher) UserSubscriptionRevoked(ctx context.Context, username, byUs
 	if !d.flags.UserSubRevoked {
 		return
 	}
-	vals, tgCfg, ok := d.resolve(ctx)
+	vals, tgCfg, ok := d.resolve(ctx, CategoryUserSubRevoked)
 	if !ok {
 		return
 	}
@@ -221,7 +250,7 @@ func (d *Dispatcher) InfraAlert(ctx context.Context, kind, name, detail string, 
 	if !d.flags.InfraAlert {
 		return
 	}
-	vals, tgCfg, ok := d.resolve(ctx)
+	vals, tgCfg, ok := d.resolve(ctx, CategoryInfraAlert)
 	if !ok {
 		return
 	}
@@ -232,13 +261,58 @@ func (d *Dispatcher) InfraAlert(ctx context.Context, kind, name, detail string, 
 	d.discord.Send(ctx, payload, vals.DiscordWebhookURL, nil, d.logger)
 }
 
+// TopicRequest is one forum topic CreateTopics should create.
+type TopicRequest struct {
+	Category string
+	Name     string
+}
+
+// CreateTopics creates one forum topic per entry in chatID (a supergroup
+// with Topics/forum mode enabled, the bot added as an admin with "Manage
+// Topics" - see telegram.Sender.CreateForumTopic for what fails without
+// that) and returns the created thread ids keyed by category, plus any
+// per-category errors. Partial success is expected and handled by the
+// caller (handleSetupTelegramTopics) saving whatever did succeed rather
+// than discarding it over one failure.
+//
+// Calls are spaced out, not fired concurrently: Telegram rate-limits
+// createForumTopic per chat, and a setup action run once by an admin is not
+// a place worth racing against that limit for a bit of speed.
+func (d *Dispatcher) CreateTopics(ctx context.Context, chatID int64, topics []TopicRequest) (map[string]int64, map[string]string) {
+	vals, err := d.settingsFn(ctx)
+	if err != nil {
+		return nil, map[string]string{"*": err.Error()}
+	}
+	cfg := telegram.Config{APIToken: vals.TelegramAPIToken, ProxyURL: vals.TelegramProxyURL}
+
+	created := make(map[string]int64, len(topics))
+	errs := make(map[string]string)
+	for i, t := range topics {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				errs[t.Category] = ctx.Err().Error()
+				continue
+			case <-time.After(1200 * time.Millisecond):
+			}
+		}
+		id, err := d.telegram.CreateForumTopic(ctx, cfg, chatID, t.Name)
+		if err != nil {
+			errs[t.Category] = err.Error()
+			continue
+		}
+		created[t.Category] = id
+	}
+	return created, errs
+}
+
 // Login has no owning-admin concept - matches Python's report_login, which
 // always sends with admin_webhook=None and no DM.
 func (d *Dispatcher) Login(ctx context.Context, username, clientIP, status string) {
 	if !d.flags.Login {
 		return
 	}
-	vals, tgCfg, ok := d.resolve(ctx)
+	vals, tgCfg, ok := d.resolve(ctx, CategoryLogin)
 	if !ok {
 		return
 	}
