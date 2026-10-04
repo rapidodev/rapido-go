@@ -138,6 +138,188 @@ func TestInboundsSyncAndDetailRoundTripATLSCertificate(t *testing.T) {
 	}
 }
 
+// TestCreateInboundGivesItARealWorkingHostInOneCall is the main thing POST
+// /api/inbounds exists for, versus POST /api/inbounds/sync: the host it
+// creates carries the real port right away, not NULL (see
+// createDefaultHost's own doc comment) - no separate Hosts-page edit needed
+// before this inbound actually serves anyone.
+func TestCreateInboundGivesItARealWorkingHostInOneCall(t *testing.T) {
+	router, token := newTestRouter(t)
+	resp := doRequest(t, router, "POST", "/api/inbounds", token, map[string]interface{}{
+		"tag": "vmess-quick", "protocol": "vmess", "port": 20300,
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("create inbound: %d %v", resp.Code, resp.Body)
+	}
+	if resp.Body["tag"] != "vmess-quick" || resp.Body["protocol"] != "vmess" {
+		t.Errorf("unexpected shape: %v", resp.Body)
+	}
+
+	hosts := doRequest(t, router, "GET", "/api/hosts", token, nil)
+	tagHosts, _ := hosts.Body["vmess-quick"].([]interface{})
+	if len(tagHosts) != 1 {
+		t.Fatalf("hosts for vmess-quick = %v, want exactly 1", tagHosts)
+	}
+	host := tagHosts[0].(map[string]interface{})
+	if host["port"] == nil || int(host["port"].(float64)) != 20300 {
+		t.Errorf("host port = %v, want 20300 (not left NULL)", host["port"])
+	}
+}
+
+func TestCreateInboundRejectsADuplicateTag(t *testing.T) {
+	router, token := newTestRouter(t)
+	doRequest(t, router, "POST", "/api/inbounds", token, map[string]interface{}{
+		"tag": "dup-tag", "protocol": "vmess", "port": 20301,
+	})
+	resp := doRequest(t, router, "POST", "/api/inbounds", token, map[string]interface{}{
+		"tag": "dup-tag", "protocol": "vmess", "port": 20302,
+	})
+	if resp.Code != http.StatusConflict {
+		t.Errorf("duplicate tag: %d, want 409: %v", resp.Code, resp.Body)
+	}
+	// The original must be completely untouched - no silent upsert.
+	hosts := doRequest(t, router, "GET", "/api/hosts", token, nil)
+	tagHosts, _ := hosts.Body["dup-tag"].([]interface{})
+	if len(tagHosts) != 1 || int(tagHosts[0].(map[string]interface{})["port"].(float64)) != 20301 {
+		t.Errorf("hosts for dup-tag after the rejected duplicate = %v, want unchanged at port 20301", tagHosts)
+	}
+}
+
+func TestCreateInboundRejectsAnOutOfRangePort(t *testing.T) {
+	router, token := newTestRouter(t)
+	for _, port := range []int{0, -1, 70000} {
+		resp := doRequest(t, router, "POST", "/api/inbounds", token, map[string]interface{}{
+			"tag": "bad-port", "protocol": "vmess", "port": port,
+		})
+		if resp.Code != http.StatusUnprocessableEntity {
+			t.Errorf("port %d: %d, want 422: %v", port, resp.Code, resp.Body)
+		}
+	}
+}
+
+// TestCreateInboundAutoGeneratesACertificateForATLSMandatoryProtocol is the
+// other reason this endpoint exists versus sync: hysteria2 (and tuic,
+// anytls) refuse to even start without TLS, so creating one with no
+// certificate must not leave it inert waiting for an admin to paste one in.
+func TestCreateInboundAutoGeneratesACertificateForATLSMandatoryProtocol(t *testing.T) {
+	router, token := newTestRouter(t)
+	resp := doRequest(t, router, "POST", "/api/inbounds", token, map[string]interface{}{
+		"tag": "hysteria2-quick", "protocol": "hysteria2", "port": 20303,
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("create hysteria2 inbound: %d %v", resp.Code, resp.Body)
+	}
+
+	detail := doRequest(t, router, "GET", "/api/inbounds/detail", token, nil)
+	var rows []map[string]interface{}
+	json.Unmarshal(detail.Raw, &rows)
+	var found map[string]interface{}
+	for _, r := range rows {
+		if r["tag"] == "hysteria2-quick" {
+			found = r
+		}
+	}
+	if found == nil {
+		t.Fatalf("hysteria2-quick not found in %v", rows)
+	}
+	if found["security"] != "tls" {
+		t.Errorf("security = %v, want tls", found["security"])
+	}
+	cert, _ := found["tls_certificate"].(string)
+	key, _ := found["tls_key"].(string)
+	if cert == "" || key == "" {
+		t.Error("no certificate/key was auto-generated for a TLS-mandatory protocol")
+	}
+}
+
+// TestCreateInboundKeepsACallerSuppliedCertificate proves the auto-generate
+// path never overrides a real certificate the caller actually brought
+// (e.g. one for a public domain).
+func TestCreateInboundKeepsACallerSuppliedCertificate(t *testing.T) {
+	router, token := newTestRouter(t)
+	doRequest(t, router, "POST", "/api/inbounds", token, map[string]interface{}{
+		"tag": "hysteria2-owncert", "protocol": "hysteria2", "port": 20304,
+		"tls_certificate": testCertPEM, "tls_key": testKeyPEM,
+	})
+	detail := doRequest(t, router, "GET", "/api/inbounds/detail", token, nil)
+	var rows []map[string]interface{}
+	json.Unmarshal(detail.Raw, &rows)
+	var found map[string]interface{}
+	for _, r := range rows {
+		if r["tag"] == "hysteria2-owncert" {
+			found = r
+		}
+	}
+	if found["tls_certificate"] != testCertPEM || found["tls_key"] != testKeyPEM {
+		t.Errorf("the caller's own certificate was replaced: %v", found)
+	}
+}
+
+// TestCreateInboundAutoGeneratesASnellPSK mirrors the TLS-certificate
+// auto-generation test for the other protocol that would otherwise reject
+// a one-shot "+ Add inbound" create outright: snell requires a 12-255 byte
+// PSK (see syncInboundEntries's own check), which the simple create form
+// never asks for.
+func TestCreateInboundAutoGeneratesASnellPSK(t *testing.T) {
+	router, token := newTestRouter(t)
+	resp := doRequest(t, router, "POST", "/api/inbounds", token, map[string]interface{}{
+		"tag": "snell-quick", "protocol": "snell", "port": 20306,
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("create snell inbound: %d %v", resp.Code, resp.Body)
+	}
+
+	detail := doRequest(t, router, "GET", "/api/inbounds/detail", token, nil)
+	var rows []map[string]interface{}
+	json.Unmarshal(detail.Raw, &rows)
+	var found map[string]interface{}
+	for _, r := range rows {
+		if r["tag"] == "snell-quick" {
+			found = r
+		}
+	}
+	if found == nil {
+		t.Fatalf("snell-quick not found in %v", rows)
+	}
+	psk, _ := found["snell_psk"].(string)
+	if len(psk) < 12 || len(psk) > 255 {
+		t.Errorf("snell_psk = %q (len %d), want an auto-generated value within [12,255]", psk, len(psk))
+	}
+}
+
+func TestCreateInboundKeepsACallerSuppliedSnellPSK(t *testing.T) {
+	router, token := newTestRouter(t)
+	doRequest(t, router, "POST", "/api/inbounds", token, map[string]interface{}{
+		"tag": "snell-owncreds", "protocol": "snell", "port": 20307, "snell_psk": "my-own-chosen-psk-value",
+	})
+	detail := doRequest(t, router, "GET", "/api/inbounds/detail", token, nil)
+	var rows []map[string]interface{}
+	json.Unmarshal(detail.Raw, &rows)
+	var found map[string]interface{}
+	for _, r := range rows {
+		if r["tag"] == "snell-owncreds" {
+			found = r
+		}
+	}
+	if found["snell_psk"] != "my-own-chosen-psk-value" {
+		t.Errorf("snell_psk = %v, want the caller's own value kept", found["snell_psk"])
+	}
+}
+
+func TestCreateInboundRequiresSudo(t *testing.T) {
+	router, sudoToken := newTestRouter(t)
+	doRequest(t, router, "POST", "/api/admin", sudoToken, map[string]interface{}{
+		"username": "inbound-probe-reseller", "password": "pw12345", "is_sudo": false,
+	})
+	nonSudoToken := loginAs(t, router, "inbound-probe-reseller", "pw12345")
+	resp := doRequest(t, router, "POST", "/api/inbounds", nonSudoToken, map[string]interface{}{
+		"tag": "x", "protocol": "vmess", "port": 20305,
+	})
+	if resp.Code != http.StatusForbidden {
+		t.Errorf("non-sudo create inbound: %d, want 403: %v", resp.Code, resp.Body)
+	}
+}
+
 // TestNewInboundsGetDistinctHostPriorities is a regression test for a real
 // bug: createDefaultHost never set a priority at all, so every
 // auto-created default host landed on the hosts.priority column's bare

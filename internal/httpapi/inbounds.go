@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/legendary1205/rapido-go/internal/auth"
+	"github.com/legendary1205/rapido-go/internal/certs"
 	"github.com/legendary1205/rapido-go/internal/db/generated"
 	"github.com/legendary1205/rapido-go/internal/resellerapi"
 )
@@ -236,6 +237,16 @@ type inboundSyncEntry struct {
 	Protocol   string `json:"protocol" binding:"required"`
 	Network    string `json:"network"`     // tcp/ws/grpc/kcp/quic/splithttp/xhttp - defaults to "tcp"
 	HeaderType string `json:"header_type"` // e.g. "http" for tcp obfuscation
+	// Port, when a brand-new tag is created, is written straight onto its
+	// default host instead of leaving it NULL (see createDefaultHost's own
+	// doc comment on why a portless default host normally exists) - what
+	// lets POST /api/inbounds (a direct, one-shot "add this protocol on
+	// this port" creation, unlike this endpoint's own sync/upsert shape)
+	// build a fully working inbound in a single call. Zero/omitted keeps
+	// the original portless-default behavior; ignored entirely when the
+	// tag already exists, matching upsert's own "don't touch an existing
+	// host" rule.
+	Port int32 `json:"port,omitempty"`
 
 	Security          string   `json:"security"` // none/tls/reality - defaults to "none"
 	RealityPrivateKey string   `json:"reality_private_key,omitempty"`
@@ -340,7 +351,7 @@ func (h *Handler) syncInboundEntries(ctx context.Context, entries []inboundSyncE
 			return created, fmt.Errorf("could not invalidate inbound cache for %s: %w", e.Tag, err)
 		}
 		if row.Inserted {
-			if err := createDefaultHost(ctx, h.store.Queries, e.Tag); err != nil {
+			if err := createDefaultHost(ctx, h.store.Queries, e.Tag, e.Port); err != nil {
 				return created, fmt.Errorf("could not create default host for %s: %w", e.Tag, err)
 			}
 			created++
@@ -374,6 +385,94 @@ func (h *Handler) handleSyncInbounds(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"synced": len(entries), "created": created})
 }
 
+// tlsRequiredProtocols mirrors syncInboundEntries's own check - duplicated
+// as a lookup set here (rather than calling into that function just to
+// learn this) so handleCreateInbound can decide whether to auto-generate a
+// certificate before validation ever runs.
+var tlsRequiredProtocols = map[string]bool{"hysteria2": true, "tuic": true, "anytls": true}
+
+// handleCreateInbound implements POST /api/inbounds (sudo only): a direct,
+// one-shot "add this protocol on this port" creation for the dashboard's
+// own "+ Add inbound" form - unlike POST /api/inbounds/sync's array/upsert
+// shape (built for bulk sync from an external source, and silently
+// updating an existing tag's settings without touching its host), this
+// always creates exactly one brand-new tag, rejects a tag that already
+// exists instead of quietly upserting it, and gives it a real, immediately
+// working host (see createDefaultHost's own doc comment on the port it's
+// handed).
+//
+// Security="tls" with no certificate supplied gets one generated on the
+// spot (certs.GenerateSelfSignedLeaf), and protocol="snell" with no PSK
+// supplied gets one generated too - without this, hysteria2/tuic/anytls
+// (TLS-mandatory at the sing-box level) or snell (PSK-mandatory, see
+// syncInboundEntries's own check) would be created but sit inert or get
+// rejected outright, which defeats the entire point of a one-click "add
+// this protocol" action. A caller that brings its own certificate or PSK
+// (e.g. a real certificate for a public domain) is never overridden.
+func (h *Handler) handleCreateInbound(c *gin.Context) {
+	var e inboundSyncEntry
+	if err := c.ShouldBindJSON(&e); err != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": err.Error()})
+		return
+	}
+	if e.Port <= 0 || e.Port > 65535 {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": "port must be between 1 and 65535"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	if _, err := h.store.Queries.GetInboundByTag(ctx, e.Tag); err == nil {
+		c.JSON(http.StatusConflict, gin.H{"detail": "an inbound with tag " + e.Tag + " already exists"})
+		return
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "could not check for an existing inbound"})
+		return
+	}
+
+	if (e.Security == "tls" || tlsRequiredProtocols[e.Protocol]) && e.TLSCertificate == "" && e.TLSKey == "" {
+		e.Security = "tls"
+		cn := e.TLSServerName
+		if cn == "" {
+			cn = e.Tag
+		}
+		pair, err := certs.GenerateSelfSignedLeaf(cn)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "could not generate a certificate: " + err.Error()})
+			return
+		}
+		e.TLSCertificate, e.TLSKey = pair.CertPEM, pair.KeyPEM
+	}
+	if e.Protocol == "snell" && e.SnellPSK == "" {
+		// Reuses node.go's own secret generator (crypto/rand, 32 bytes hex) -
+		// same "generate a real random credential, don't ask the admin to
+		// think one up" need as a node's report secret, just for a
+		// different field.
+		psk, err := generateReportSecret()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "could not generate a PSK: " + err.Error()})
+			return
+		}
+		e.SnellPSK = psk
+	}
+
+	if _, err := h.syncInboundEntries(ctx, []inboundSyncEntry{e}); err != nil {
+		var verr *inboundValidationError
+		if errors.As(err, &verr) {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": verr.msg})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		return
+	}
+
+	row, err := h.store.Queries.GetInboundByTag(ctx, e.Tag)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "inbound created but could not be read back"})
+		return
+	}
+	c.JSON(http.StatusOK, toInboundDetailDTO(row))
+}
+
 // inboundValidationError marks an error from syncInboundEntries as a
 // client mistake (400-shaped) rather than an internal failure - same
 // pattern as coreconfig.go's coreConfigValidationError, for the same
@@ -386,7 +485,12 @@ func (e *inboundValidationError) Error() string { return e.msg }
 
 // createDefaultHost mirrors add_default_host in the current
 // crud.get_or_create_inbound: every inbound gets one default ProxyHost the
-// first time it's registered.
+// first time it's registered. port=0 leaves it NULL (the original "no real
+// port yet" behavior every existing caller relies on); a nonzero port -
+// only ever passed by POST /api/inbounds's one-shot "add this protocol on
+// this port" creation - writes a fully working host in the same step
+// instead of leaving a second, separate Hosts-page edit required before
+// this inbound actually serves anyone.
 //
 // Placed at the end of the existing global priority order (see migration
 // 00008 and GetMaxHostPriority's own doc comment) rather than left at the
@@ -395,7 +499,7 @@ func (e *inboundValidationError) Error() string { return e.msg }
 // page's up/down reorder buttons a real no-op between any two of them
 // (swapping two equal values changes nothing) without anything actually
 // being broken in the swap logic itself.
-func createDefaultHost(ctx context.Context, q *generated.Queries, tag string) error {
+func createDefaultHost(ctx context.Context, q *generated.Queries, tag string, port int32) error {
 	maxPriority, err := q.GetMaxHostPriority(ctx)
 	if err != nil {
 		return fmt.Errorf("could not determine the next host priority: %w", err)
@@ -403,6 +507,7 @@ func createDefaultHost(ctx context.Context, q *generated.Queries, tag string) er
 	_, err = q.CreateHost(ctx, generated.CreateHostParams{
 		Remark:      "Rapido ({USERNAME}) [{PROTOCOL} - {TRANSPORT}]",
 		Address:     "{SERVER_IP}",
+		Port:        pgInt4FromZero(port),
 		Security:    "inbound_default",
 		Alpn:        "none",
 		Fingerprint: "none",

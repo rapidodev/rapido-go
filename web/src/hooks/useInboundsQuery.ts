@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { fetch } from "service/http";
-import { InboundListEntry, InboundsByProtocol } from "types/Inbound";
+import { CreateInboundPayload, Inbound, InboundListEntry, InboundsByProtocol } from "types/Inbound";
 import { XrayImportRequest, XrayImportResult } from "types/XrayImport";
 import { portsByTag } from "utils/inboundPorts";
 import { queryKeys } from "utils/queryClient";
@@ -49,6 +49,24 @@ export const useInboundPortsQuery = () =>
 // preview response comes back with the exact same shape, so gate the
 // invalidation on `applied` rather than skip it for preview calls via a
 // separate code path).
+// POST /api/inbounds - a direct, one-shot "add this protocol on this port"
+// create for the dashboard's own "+ Add inbound" / "+ Add all protocols"
+// actions (see internal/httpapi/inbounds.go's handleCreateInbound), as
+// opposed to useImportXrayConfigMutation's bulk/upsert-by-tag shape. Touches
+// inbounds, hosts, and core-config the same way an import does, so the same
+// three caches are invalidated on every successful create.
+export const useCreateInboundMutation = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreateInboundPayload) => fetch<Inbound>("/inbounds", { method: "POST", body }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.inbounds });
+      queryClient.invalidateQueries({ queryKey: queryKeys.hosts });
+      queryClient.invalidateQueries({ queryKey: queryKeys.xrayConfig });
+    },
+  });
+};
+
 export const useImportXrayConfigMutation = () => {
   const queryClient = useQueryClient();
   return useMutation({
