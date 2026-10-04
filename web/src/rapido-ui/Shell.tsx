@@ -17,6 +17,7 @@ import {
   CircleStackIcon,
   ArrowsRightLeftIcon,
   SignalIcon,
+  CubeTransparentIcon,
 } from "@heroicons/react/24/outline";
 import { ReactComponent as Logo } from "assets/logo.svg";
 import { useCurrentAdminQuery } from "hooks/useCurrentAdminQuery";
@@ -66,6 +67,7 @@ export type RapidoNavKey =
   | "nodes"
   | "monitoring"
   | "tunnelRelays"
+  | "tunnels"
   | "logs"
   | "admins"
   | "templates"
@@ -109,6 +111,13 @@ const NAV_ITEMS: {
     href: "/tunnel-relays/",
     labelKey: "rapido.tunnelRelays.nav",
     icon: SignalIcon,
+    sudoOnly: true,
+  },
+  {
+    key: "tunnels",
+    href: "/tunnels/",
+    labelKey: "rapido.tunnels.nav",
+    icon: CubeTransparentIcon,
     sudoOnly: true,
   },
   // GET /api/logs and /api/logs/sources are requireSudo, same as Monitoring.
