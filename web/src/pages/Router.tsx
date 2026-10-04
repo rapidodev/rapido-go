@@ -36,6 +36,7 @@ const UserTemplatesPage = lazy(() => import("./UserTemplatesPage"));
 const NodesPage = lazy(() => import("./NodesPage"));
 const MonitoringPage = lazy(() => import("./MonitoringPage"));
 const TunnelRelaysPage = lazy(() => import("./TunnelRelaysPage"));
+const TunnelsPage = lazy(() => import("./TunnelsPage"));
 const LogsPage = lazy(() => import("./LogsPage"));
 const BackupsPage = lazy(() => import("./BackupsPage"));
 const GatewayPage = lazy(() => import("./GatewayPage"));
@@ -191,6 +192,18 @@ export const router = createHashRouter([
       <SudoOnly>
         <Suspense fallback={null}>
           <TunnelRelaysPage />
+        </Suspense>
+      </SudoOnly>
+    ),
+    errorElement: <Login />,
+    loader: fetchAdminLoader,
+  },
+  {
+    path: "/tunnels/",
+    element: (
+      <SudoOnly>
+        <Suspense fallback={null}>
+          <TunnelsPage />
         </Suspense>
       </SudoOnly>
     ),

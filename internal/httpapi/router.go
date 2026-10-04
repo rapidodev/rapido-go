@@ -264,6 +264,10 @@ func NewRouter(h *Handler, logger *slog.Logger, allowedOrigins []string) *gin.En
 		api.POST("/tunnel-relays", requireSudo, h.handleCreateTunnelRelay)
 		api.DELETE("/tunnel-relays/:id", requireSudo, h.handleDeleteTunnelRelay)
 
+		api.GET("/tunnels", requireSudo, h.handleListTunnels)
+		api.POST("/tunnels", requireSudo, h.handleCreateTunnel)
+		api.DELETE("/tunnels/:id", requireSudo, h.handleDeleteTunnel)
+
 		api.GET("/settings/integrations", requireSudo, h.handleGetIntegrationSettings)
 		api.PUT("/settings/integrations", requireSudo, h.handleUpdateIntegrationSettings)
 		api.POST("/settings/integrations/telegram-topics", requireSudo, h.handleSetupTelegramTopics)
