@@ -63,8 +63,6 @@ func (h *Handler) handleSetupTelegramTopics(c *gin.Context) {
 		return
 	}
 
-	created, errs := h.reports.CreateTopics(ctx, body.ChatID, telegramTopicPlan)
-
 	current, err := h.store.Queries.GetIntegrationSettings(ctx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not read integration settings"})
@@ -72,8 +70,20 @@ func (h *Handler) handleSetupTelegramTopics(c *gin.Context) {
 	}
 	merged := integrationsettings.Resolve(current, h.envDefaults).TelegramTopicIDs
 	if merged == nil {
-		merged = make(map[string]int64, len(created))
+		merged = make(map[string]int64, len(telegramTopicPlan))
 	}
+
+	// Only request the categories not already holding a topic id, so
+	// re-running this (e.g. after one category hit Telegram's rate limit
+	// the first time) tops up what's missing instead of creating duplicate
+	// topics for every category that already succeeded.
+	pending := make([]report.TopicRequest, 0, len(telegramTopicPlan))
+	for _, t := range telegramTopicPlan {
+		if _, ok := merged[t.Category]; !ok {
+			pending = append(pending, t)
+		}
+	}
+	created, errs := h.reports.CreateTopics(ctx, body.ChatID, pending)
 	for category, id := range created {
 		merged[category] = id
 	}
@@ -100,7 +110,7 @@ func (h *Handler) handleSetupTelegramTopics(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"chat_id": body.ChatID, "created": created, "errors": errs})
+	c.JSON(http.StatusOK, gin.H{"chat_id": body.ChatID, "created": created, "errors": errs, "topics": merged})
 }
 
 type integrationSettingsDTO struct {
