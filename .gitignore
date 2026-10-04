@@ -4,6 +4,9 @@
 # build artifacts
 /panel
 /panel-linux-amd64
+/node
+/node-linux-amd64
+/loadgen
 *.exe
 
 # local tunnel/dev logs
