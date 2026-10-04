@@ -119,7 +119,7 @@ export const QuickAddInboundModal: FC<{ onClose: () => void; onCreated: () => vo
           <Input dir="ltr" value={values.tag} onChange={(e) => setValues((v) => ({ ...v, tag: e.target.value }))} />
         </label>
         <label className="flex flex-col gap-1">
-          <span className="text-xs text-rapido-muted">{t("rapido.tunnelRelays.port")}</span>
+          <span className="text-xs text-rapido-muted">{t("rapido.inbounds.quickAdd.port")}</span>
           <Input
             dir="ltr"
             type="number"

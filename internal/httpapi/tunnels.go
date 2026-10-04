@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/netip"
 	"strconv"
@@ -10,9 +11,36 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/legendary1205/rapido-go/internal/db/generated"
+	"github.com/legendary1205/rapido-go/internal/relayhealth"
 	"github.com/legendary1205/rapido-go/internal/sshexec"
+	"github.com/legendary1205/rapido-go/internal/tunnelmetrics"
 	"github.com/legendary1205/rapido-go/internal/tunnelprovision"
 )
+
+// A Tunnel row is both the provisioning record (Phase 3) and, merged in
+// here, its own monitoring entry: the standalone "Tunnel Relays" page
+// (add a bare host:port for health-only probing, with no SSH access) was
+// folded into this one page/endpoint - every real relay this fleet has is
+// a provisioned tunnel now, and a tunnel already carries everything a
+// health/resource check needs (the relay's own SSH credentials), so there
+// was no reason left to keep them as two separate concepts.
+
+type tunnelHealthDTO struct {
+	Up        bool       `json:"up"`
+	Error     string     `json:"error,omitempty"`
+	CheckedAt *time.Time `json:"checked_at,omitempty"`
+}
+
+type tunnelMetricsDTO struct {
+	CPUPercent  float64   `json:"cpu_percent"`
+	MemUsedMB   int64     `json:"mem_used_mb"`
+	MemTotalMB  int64     `json:"mem_total_mb"`
+	DiskUsedGB  float64   `json:"disk_used_gb"`
+	DiskTotalGB float64   `json:"disk_total_gb"`
+	RxBytes     int64     `json:"rx_bytes"`
+	TxBytes     int64     `json:"tx_bytes"`
+	CheckedAt   time.Time `json:"checked_at"`
+}
 
 type tunnelDTO struct {
 	ID             int32   `json:"id"`
@@ -25,10 +53,16 @@ type tunnelDTO struct {
 	FRPControlPort int32   `json:"frp_control_port"`
 	Status         string  `json:"status"`
 	StatusMessage  *string `json:"status_message"`
-	TunnelRelayID  *int32  `json:"tunnel_relay_id"`
+
+	// Live health (internal/relayhealth, probed via the linked tunnel_relays
+	// row) and resource metrics (internal/tunnelmetrics, probed via this
+	// tunnel's own stored SSH credentials) - both nil until the backend
+	// singleton's first round publishes something.
+	Health  *tunnelHealthDTO  `json:"health"`
+	Metrics *tunnelMetricsDTO `json:"metrics"`
 }
 
-func toTunnelDTO(t generated.Tunnel) tunnelDTO {
+func toTunnelDTO(t generated.Tunnel, health relayhealth.Status, healthKnown bool, metrics tunnelmetrics.Metrics, metricsKnown bool) tunnelDTO {
 	dto := tunnelDTO{
 		ID: t.ID, Name: t.Name, Method: t.Method, NodeID: t.NodeID,
 		RelayHost: t.RelayHost, Ports: t.Ports, InterfaceName: t.InterfaceName,
@@ -37,22 +71,44 @@ func toTunnelDTO(t generated.Tunnel) tunnelDTO {
 	if t.StatusMessage.Valid {
 		dto.StatusMessage = &t.StatusMessage.String
 	}
-	if t.TunnelRelayID.Valid {
-		dto.TunnelRelayID = &t.TunnelRelayID.Int32
+	if healthKnown {
+		h := tunnelHealthDTO{Up: health.Up, Error: health.Error, CheckedAt: &health.CheckedAt}
+		dto.Health = &h
+	}
+	if metricsKnown {
+		m := tunnelMetricsDTO{
+			CPUPercent: metrics.CPUPercent, MemUsedMB: metrics.MemUsedMB, MemTotalMB: metrics.MemTotalMB,
+			DiskUsedGB: metrics.DiskUsedGB, DiskTotalGB: metrics.DiskTotalGB,
+			RxBytes: metrics.RxBytes, TxBytes: metrics.TxBytes, CheckedAt: metrics.CheckedAt,
+		}
+		dto.Metrics = &m
 	}
 	return dto
 }
 
-// handleListTunnels implements GET /api/tunnels (sudo only).
+// handleListTunnels implements GET /api/tunnels (sudo only): every
+// provisioned tunnel, merged with its live health (by tunnel_relay_id) and
+// resource metrics (by tunnel id). A Redis read failure degrades to "no
+// live data" for every row rather than failing the whole request - the
+// list itself (from Postgres) is still useful on its own.
 func (h *Handler) handleListTunnels(c *gin.Context) {
-	rows, err := h.store.Queries.ListTunnels(c.Request.Context())
+	ctx := c.Request.Context()
+	rows, err := h.store.Queries.ListTunnels(ctx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not list tunnels"})
 		return
 	}
+	healthByRelayID, _ := relayhealth.ReadStatuses(ctx, h.store.Cache)
+	metricsByTunnelID, _ := tunnelmetrics.ReadMetrics(ctx, h.store.Cache)
+
 	out := make([]tunnelDTO, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, toTunnelDTO(r))
+		health, healthKnown := relayhealth.Status{}, false
+		if r.TunnelRelayID.Valid {
+			health, healthKnown = healthByRelayID[r.TunnelRelayID.Int32]
+		}
+		metrics, metricsKnown := metricsByTunnelID[r.ID]
+		out = append(out, toTunnelDTO(r, health, healthKnown, metrics, metricsKnown))
 	}
 	c.JSON(http.StatusOK, out)
 }
@@ -142,16 +198,16 @@ func allocateInterfaceName(ctx context.Context, q interface {
 }
 
 type createTunnelRequest struct {
-	Name            string  `json:"name" binding:"required"`
-	NodeID          int32   `json:"node_id" binding:"required"`
-	NodeSSHPort     int32   `json:"node_ssh_port"`
-	NodeSSHUser     string  `json:"node_ssh_user" binding:"required"`
-	NodeSSHPassword string  `json:"node_ssh_password" binding:"required"`
-	RelayHost       string  `json:"relay_host" binding:"required"`
-	RelaySSHPort    int32   `json:"relay_ssh_port"`
-	RelaySSHUser    string  `json:"relay_ssh_user" binding:"required"`
-	RelaySSHPassword string `json:"relay_ssh_password" binding:"required"`
-	Ports           []int32 `json:"ports" binding:"required"`
+	Name             string  `json:"name" binding:"required"`
+	NodeID           int32   `json:"node_id" binding:"required"`
+	NodeSSHPort      int32   `json:"node_ssh_port"`
+	NodeSSHUser      string  `json:"node_ssh_user" binding:"required"`
+	NodeSSHPassword  string  `json:"node_ssh_password" binding:"required"`
+	RelayHost        string  `json:"relay_host" binding:"required"`
+	RelaySSHPort     int32   `json:"relay_ssh_port"`
+	RelaySSHUser     string  `json:"relay_ssh_user" binding:"required"`
+	RelaySSHPassword string  `json:"relay_ssh_password" binding:"required"`
+	Ports            []int32 `json:"ports" binding:"required"`
 }
 
 // handleCreateTunnel implements POST /api/tunnels (sudo only): allocates
@@ -237,7 +293,33 @@ func (h *Handler) handleCreateTunnel(c *gin.Context) {
 
 	go h.provisionTunnelInBackground(created, node)
 
-	c.JSON(http.StatusOK, toTunnelDTO(created))
+	c.JSON(http.StatusOK, toTunnelDTO(created, relayhealth.Status{}, false, tunnelmetrics.Metrics{}, false))
+}
+
+// dialTunnelEnds connects to both ends with this tunnel's own stored
+// credentials, or fails outright if either is unreachable - unlike
+// handleDeleteTunnel's teardown dial (which tolerates one side being gone,
+// since deleting a half-dead tunnel must still work), every caller here
+// (provision, stop, start, restart) needs both ends to do anything
+// meaningful, so there is nothing useful to do with just one.
+func (h *Handler) dialTunnelEnds(ctx context.Context, t generated.Tunnel, node generated.Node) (relay, nodeClient *sshexec.Client, err error) {
+	relay, err = sshexec.Dial(ctx, sshexec.Config{Host: t.RelayHost, Port: t.RelaySshPort, User: t.RelaySshUser, Password: t.RelaySshPassword})
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not connect to the relay: %w", err)
+	}
+	nodeClient, err = sshexec.Dial(ctx, sshexec.Config{Host: node.Address, Port: t.NodeSshPort, User: t.NodeSshUser, Password: t.NodeSshPassword})
+	if err != nil {
+		relay.Close()
+		return nil, nil, fmt.Errorf("could not connect to the node: %w", err)
+	}
+	return relay, nodeClient, nil
+}
+
+func tunnelParams(t generated.Tunnel, nodeAddress string) tunnelprovision.Params {
+	return tunnelprovision.Params{
+		InterfaceName: t.InterfaceName, NodeAddress: nodeAddress, RelayHost: t.RelayHost,
+		TunnelSubnet: t.TunnelSubnet, FRPControlPort: t.FrpControlPort, FRPToken: t.FrpToken, Ports: t.Ports,
+	}
 }
 
 // provisionTunnelInBackground runs Provision against the two real boxes
@@ -249,24 +331,15 @@ func (h *Handler) provisionTunnelInBackground(t generated.Tunnel, node generated
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	relay, err := sshexec.Dial(ctx, sshexec.Config{Host: t.RelayHost, Port: t.RelaySshPort, User: t.RelaySshUser, Password: t.RelaySshPassword})
+	relay, nodeClient, err := h.dialTunnelEnds(ctx, t, node)
 	if err != nil {
-		h.failTunnel(ctx, t.ID, "could not connect to the relay: "+err.Error())
+		h.failTunnel(ctx, t.ID, err.Error())
 		return
 	}
 	defer relay.Close()
-
-	nodeClient, err := sshexec.Dial(ctx, sshexec.Config{Host: node.Address, Port: t.NodeSshPort, User: t.NodeSshUser, Password: t.NodeSshPassword})
-	if err != nil {
-		h.failTunnel(ctx, t.ID, "could not connect to the node: "+err.Error())
-		return
-	}
 	defer nodeClient.Close()
 
-	params := tunnelprovision.Params{
-		InterfaceName: t.InterfaceName, NodeAddress: node.Address, RelayHost: t.RelayHost,
-		TunnelSubnet: t.TunnelSubnet, FRPControlPort: t.FrpControlPort, FRPToken: t.FrpToken, Ports: t.Ports,
-	}
+	params := tunnelParams(t, node.Address)
 	if err := tunnelprovision.Provision(ctx, relay, nodeClient, params); err != nil {
 		h.failTunnel(ctx, t.ID, err.Error())
 		// Best-effort cleanup of whatever partially came up, so a failed
@@ -297,6 +370,87 @@ func (h *Handler) failTunnel(ctx context.Context, id int32, message string) {
 	}); err != nil {
 		h.logger.Warn("could not record tunnel provisioning failure", "tunnel_id", id, "error", err)
 	}
+}
+
+// tunnelAction is the shape Provision/Teardown/Start/Stop/Restart all
+// share - handleTunnelAction runs whichever one is given against a tunnel's
+// two real ends in the background, the same way provisionTunnelInBackground
+// does for create.
+type tunnelAction func(ctx context.Context, relay, node *sshexec.Client, p tunnelprovision.Params) error
+
+// handleTunnelAction implements the Stop/Start/Restart buttons: marks the
+// row with a transient status immediately (so the dashboard shows
+// something happening right away), runs the action in the background, and
+// settles on successStatus or "failed" - the exact async/poll shape
+// handleCreateTunnel already established, since these SSH round trips are
+// just as unsuited to blocking one HTTP request as provisioning is.
+func (h *Handler) handleTunnelAction(c *gin.Context, transientStatus, successStatus string, action tunnelAction) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": "Invalid id"})
+		return
+	}
+	ctx := c.Request.Context()
+	t, err := h.store.Queries.GetTunnel(ctx, int32(id))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"detail": "Tunnel not found"})
+		return
+	}
+	if err := h.store.Queries.UpdateTunnelStatus(ctx, generated.UpdateTunnelStatusParams{ID: t.ID, Status: transientStatus}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not update the tunnel's status"})
+		return
+	}
+	t.Status = transientStatus
+
+	go h.runTunnelActionInBackground(t, successStatus, action)
+
+	c.JSON(http.StatusOK, toTunnelDTO(t, relayhealth.Status{}, false, tunnelmetrics.Metrics{}, false))
+}
+
+func (h *Handler) runTunnelActionInBackground(t generated.Tunnel, successStatus string, action tunnelAction) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	node, err := h.store.Queries.GetNodeByID(ctx, t.NodeID)
+	if err != nil {
+		h.failTunnel(ctx, t.ID, "could not look up this tunnel's node: "+err.Error())
+		return
+	}
+	relay, nodeClient, err := h.dialTunnelEnds(ctx, t, node)
+	if err != nil {
+		h.failTunnel(ctx, t.ID, err.Error())
+		return
+	}
+	defer relay.Close()
+	defer nodeClient.Close()
+
+	if err := action(ctx, relay, nodeClient, tunnelParams(t, node.Address)); err != nil {
+		h.failTunnel(ctx, t.ID, err.Error())
+		return
+	}
+	if err := h.store.Queries.UpdateTunnelStatus(ctx, generated.UpdateTunnelStatusParams{ID: t.ID, Status: successStatus}); err != nil {
+		h.logger.Warn("tunnel action succeeded but its status could not be updated", "tunnel_id", t.ID, "error", err)
+	}
+}
+
+// handleStopTunnel implements POST /api/tunnels/:id/stop: disables and
+// stops both ends' GRE+frp units without removing any config, so Start can
+// resume with nothing re-provisioned.
+func (h *Handler) handleStopTunnel(c *gin.Context) {
+	h.handleTunnelAction(c, "stopping", "stopped", tunnelprovision.Stop)
+}
+
+// handleStartTunnel implements POST /api/tunnels/:id/start: re-enables what
+// Stop turned off, with the same ping-based connectivity check Provision
+// uses.
+func (h *Handler) handleStartTunnel(c *gin.Context) {
+	h.handleTunnelAction(c, "starting", "active", tunnelprovision.Start)
+}
+
+// handleRestartTunnel implements POST /api/tunnels/:id/restart: Stop
+// immediately followed by Start.
+func (h *Handler) handleRestartTunnel(c *gin.Context) {
+	h.handleTunnelAction(c, "starting", "active", tunnelprovision.Restart)
 }
 
 // handleDeleteTunnel implements DELETE /api/tunnels/:id (sudo only): tears
@@ -343,11 +497,7 @@ func (h *Handler) handleDeleteTunnel(c *gin.Context) {
 		defer nodeClient.Close()
 	}
 
-	params := tunnelprovision.Params{
-		InterfaceName: t.InterfaceName, NodeAddress: node.Address, RelayHost: t.RelayHost,
-		TunnelSubnet: t.TunnelSubnet, FRPControlPort: t.FrpControlPort, FRPToken: t.FrpToken, Ports: t.Ports,
-	}
-	if err := tunnelprovision.Teardown(teardownCtx, relay, nodeClient, params); err != nil {
+	if err := tunnelprovision.Teardown(teardownCtx, relay, nodeClient, tunnelParams(t, node.Address)); err != nil {
 		h.logger.Warn("tunnel teardown had errors, deleting the row anyway", "tunnel_id", t.ID, "error", err)
 	}
 
