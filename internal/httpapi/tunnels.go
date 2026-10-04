@@ -350,17 +350,33 @@ func (h *Handler) provisionTunnelInBackground(t generated.Tunnel, node generated
 		return
 	}
 
+	h.ensureMonitoringLink(ctx, t)
+
+	if err := h.store.Queries.UpdateTunnelStatus(ctx, generated.UpdateTunnelStatusParams{ID: t.ID, Status: "active"}); err != nil {
+		h.logger.Warn("tunnel provisioned but its status could not be updated", "tunnel_id", t.ID, "error", err)
+	}
+}
+
+// ensureMonitoringLink creates this tunnel's relayhealth monitoring row if
+// it doesn't already have one - normally set once at creation, but also
+// checked whenever a tunnel settles into "active" (see
+// runTunnelActionInBackground), since an admin can delete a monitoring row
+// from the Tunnels page without meaning to detach it from a real, still-
+// running tunnel - the next Start/Restart re-heals it rather than leaving
+// that tunnel's health permanently unmonitored.
+func (h *Handler) ensureMonitoringLink(ctx context.Context, t generated.Tunnel) {
+	if t.TunnelRelayID.Valid {
+		return
+	}
 	relayRow, err := h.store.Queries.CreateTunnelRelay(ctx, generated.CreateTunnelRelayParams{
 		Name: t.Name, Host: t.RelayHost, Port: t.Ports[0],
 	})
 	if err != nil {
-		h.logger.Warn("tunnel provisioned but could not register its monitoring row", "tunnel_id", t.ID, "error", err)
-	} else if err := h.store.Queries.SetTunnelRelayID(ctx, generated.SetTunnelRelayIDParams{ID: t.ID, TunnelRelayID: pgInt4FromInt(int(relayRow.ID))}); err != nil {
-		h.logger.Warn("could not link tunnel to its monitoring row", "tunnel_id", t.ID, "error", err)
+		h.logger.Warn("could not register tunnel's monitoring row", "tunnel_id", t.ID, "error", err)
+		return
 	}
-
-	if err := h.store.Queries.UpdateTunnelStatus(ctx, generated.UpdateTunnelStatusParams{ID: t.ID, Status: "active"}); err != nil {
-		h.logger.Warn("tunnel provisioned but its status could not be updated", "tunnel_id", t.ID, "error", err)
+	if err := h.store.Queries.SetTunnelRelayID(ctx, generated.SetTunnelRelayIDParams{ID: t.ID, TunnelRelayID: pgInt4FromInt(int(relayRow.ID))}); err != nil {
+		h.logger.Warn("could not link tunnel to its monitoring row", "tunnel_id", t.ID, "error", err)
 	}
 }
 
@@ -427,6 +443,9 @@ func (h *Handler) runTunnelActionInBackground(t generated.Tunnel, successStatus 
 	if err := action(ctx, relay, nodeClient, tunnelParams(t, node.Address)); err != nil {
 		h.failTunnel(ctx, t.ID, err.Error())
 		return
+	}
+	if successStatus == "active" {
+		h.ensureMonitoringLink(ctx, t)
 	}
 	if err := h.store.Queries.UpdateTunnelStatus(ctx, generated.UpdateTunnelStatusParams{ID: t.ID, Status: successStatus}); err != nil {
 		h.logger.Warn("tunnel action succeeded but its status could not be updated", "tunnel_id", t.ID, "error", err)
