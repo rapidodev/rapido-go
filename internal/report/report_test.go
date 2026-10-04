@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -140,6 +141,110 @@ func TestInfraAlertSendsTelegramAndDiscordAndRespectsItsFlag(t *testing.T) {
 	off.InfraAlert(context.Background(), "Relay", "node1-relay", "dial timeout", false)
 	if got := len(tg.Requests()); got != 1 {
 		t.Errorf("telegram requests after NOTIFY_INFRA_ALERT=false = %d, want still 1 (nothing new sent)", got)
+	}
+}
+
+// TestInfraAlertUsesItsOwnTopicWhenConfigured is the actual regression test
+// for the problem this feature set exists to solve: a reseller bot's
+// before-every-call Login notification and a WireGuard tunnel's InfraAlert
+// must land in their own, separate forum-topic threads once an admin has
+// set TelegramTopicIDs up, not pile into the same chat.
+func TestInfraAlertUsesItsOwnTopicWhenConfigured(t *testing.T) {
+	tg := newCaptureServer()
+	defer tg.Close()
+	dc := newCaptureServer()
+	defer dc.Close()
+
+	vals := integrationsettings.Values{
+		TelegramAPIToken: "tok", TelegramLoggerChannelID: -1001234,
+		TelegramTopicIDs: map[string]int64{CategoryInfraAlert: 42, CategoryLogin: 7},
+	}
+	d := testDispatcher(allFlags(), vals, tg, dc)
+
+	d.InfraAlert(context.Background(), "Relay", "node1-relay", "", false)
+	d.Login(context.Background(), "alice", "1.2.3.4", "Success")
+
+	reqs := tg.Requests()
+	if len(reqs) != 2 {
+		t.Fatalf("telegram requests = %d, want 2", len(reqs))
+	}
+	threadIDOf := func(body string) float64 {
+		var decoded map[string]interface{}
+		if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+			t.Fatalf("decode request body: %v: %s", err, body)
+		}
+		v, _ := decoded["message_thread_id"].(float64)
+		return v
+	}
+	if got := threadIDOf(reqs[0].Body); got != 42 {
+		t.Errorf("InfraAlert thread id = %v, want 42 (its own topic)", got)
+	}
+	if got := threadIDOf(reqs[1].Body); got != 7 {
+		t.Errorf("Login thread id = %v, want 7 (its own, different topic)", got)
+	}
+}
+
+// TestACategoryWithNoTopicFallsBackToTheGlobalOne keeps a fresh integration
+// (no per-category topics configured yet) behaving exactly as it did
+// before TelegramTopicIDs existed.
+func TestACategoryWithNoTopicFallsBackToTheGlobalOne(t *testing.T) {
+	tg := newCaptureServer()
+	defer tg.Close()
+	dc := newCaptureServer()
+	defer dc.Close()
+
+	vals := integrationsettings.Values{
+		TelegramAPIToken: "tok", TelegramLoggerChannelID: -1001234, TelegramLoggerTopicID: 99,
+	}
+	d := testDispatcher(allFlags(), vals, tg, dc)
+	d.Login(context.Background(), "alice", "1.2.3.4", "Success")
+
+	var decoded map[string]interface{}
+	if err := json.Unmarshal([]byte(tg.Requests()[0].Body), &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got, _ := decoded["message_thread_id"].(float64); got != 99 {
+		t.Errorf("thread id = %v, want the global 99 (no login-specific topic set)", got)
+	}
+}
+
+func TestCreateTopicsSavesPartialSuccessOnAPerCategoryFailure(t *testing.T) {
+	var gotNames []string
+	tgAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Name string `json:"name"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		gotNames = append(gotNames, body.Name)
+		if body.Name == "bad" {
+			w.Write([]byte(`{"ok":false,"description":"boom"}`))
+			return
+		}
+		w.Write([]byte(`{"ok":true,"result":{"message_thread_id":` + strconv.Itoa(len(gotNames)) + `}}`))
+	}))
+	defer tgAPI.Close()
+
+	vals := integrationsettings.Values{TelegramAPIToken: "tok"}
+	settingsFn := func(ctx context.Context) (integrationsettings.Values, error) { return vals, nil }
+	d := New(allFlags(), settingsFn, telegram.NewSender(&http.Client{Timeout: 5 * time.Second}, tgAPI.URL), discord.NewSender(&http.Client{}), testLogger())
+
+	created, errs := d.CreateTopics(context.Background(), -1001234, []TopicRequest{
+		{Category: "good1", Name: "good1"},
+		{Category: "bad", Name: "bad"},
+		{Category: "good2", Name: "good2"},
+	})
+
+	if len(created) != 2 || created["good1"] == 0 || created["good2"] == 0 {
+		t.Errorf("created = %v, want good1 and good2 both present with nonzero ids", created)
+	}
+	if errs["bad"] != "telegram: boom" {
+		t.Errorf("errs[bad] = %q, want the Telegram description", errs["bad"])
+	}
+	if _, ok := created["bad"]; ok {
+		t.Error("the failed category must not appear in created")
+	}
+	if len(gotNames) != 3 {
+		t.Errorf("Telegram API calls = %d, want exactly 3 (one per topic, none skipped after the failure)", len(gotNames))
 	}
 }
 

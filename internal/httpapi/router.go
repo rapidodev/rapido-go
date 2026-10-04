@@ -265,6 +265,7 @@ func NewRouter(h *Handler, logger *slog.Logger, allowedOrigins []string) *gin.En
 
 		api.GET("/settings/integrations", requireSudo, h.handleGetIntegrationSettings)
 		api.PUT("/settings/integrations", requireSudo, h.handleUpdateIntegrationSettings)
+		api.POST("/settings/integrations/telegram-topics", requireSudo, h.handleSetupTelegramTopics)
 
 		api.GET("/settings/core-config", requireSudo, h.handleGetCoreConfig)
 		api.PUT("/settings/core-config", requireSudo, h.handleUpdateCoreConfig)

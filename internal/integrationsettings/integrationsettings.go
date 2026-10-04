@@ -24,6 +24,14 @@ type Values struct {
 	TelegramLoggerChannelID  int64
 	TelegramLoggerTopicID    int64
 	TelegramDefaultVlessFlow string
+	// TelegramTopicIDs maps a report.Dispatcher category key (see its
+	// Category* constants) to the forum-topic thread id within
+	// TelegramLoggerChannelID a notification of that category should post
+	// to. A category absent from the map falls back to the group's own
+	// General topic (thread id 0). Populated by POST
+	// /api/settings/integrations/telegram-topics, which creates the topics
+	// via the Bot API and fills this in - never hand-edited.
+	TelegramTopicIDs map[string]int64
 
 	WebhookAddresses  []string
 	WebhookSecret     string
@@ -69,6 +77,9 @@ func Resolve(row generated.IntegrationSetting, env Values) Values {
 	if ids := decodeInt64s(row.TelegramAdminIds); len(ids) > 0 {
 		out.TelegramAdminIDs = ids
 	}
+	if topics := decodeTopicIDs(row.TelegramTopicIds); len(topics) > 0 {
+		out.TelegramTopicIDs = topics
+	}
 	if addrs := decodeStrings(row.WebhookAddresses); len(addrs) > 0 {
 		out.WebhookAddresses = addrs
 	}
@@ -81,6 +92,17 @@ func decodeInt64s(raw []byte) []int64 {
 		return nil
 	}
 	var v []int64
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil
+	}
+	return v
+}
+
+func decodeTopicIDs(raw []byte) map[string]int64 {
+	if len(raw) == 0 {
+		return nil
+	}
+	var v map[string]int64
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return nil
 	}
