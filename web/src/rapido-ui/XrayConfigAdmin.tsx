@@ -14,6 +14,7 @@ import { Button } from "rapido-ui/Button";
 import { Modal } from "rapido-ui/Modal";
 import { ltrIsolate } from "rapido-ui/bidi";
 import { XrayConfigStructure, parseDocObject } from "rapido-ui/XrayConfigStructure";
+import { AddAllProtocolsButton, QuickAddInboundModal } from "rapido-ui/QuickAddInbound";
 
 // parseXrayConfigJSON is deliberately lenient about the core-config fields
 // (same reasoning as coreConfigHelpers.ts's own parseFullConfigJSON: only
@@ -444,6 +445,7 @@ export const XrayConfigAdmin: FC = () => {
   const { t } = useTranslation();
   const { data, isLoading, isError } = useXrayConfigQuery();
   const [importing, setImporting] = useState(false);
+  const [quickAdding, setQuickAdding] = useState(false);
 
   if (isError) {
     return (
@@ -458,7 +460,11 @@ export const XrayConfigAdmin: FC = () => {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex justify-end">
+      <div className="flex flex-wrap items-start justify-end gap-2">
+        <Button variant="chip" tone="accent" onClick={() => setQuickAdding(true)}>
+          + {t("rapido.inbounds.quickAdd.addTitle")}
+        </Button>
+        <AddAllProtocolsButton onDone={() => {}} />
         <Button variant="chip" onClick={() => setImporting(true)}>
           {t("rapido.inbounds.xrayImportTitle")}
         </Button>
@@ -467,6 +473,9 @@ export const XrayConfigAdmin: FC = () => {
       <XrayConfigJSONEditor config={data} />
 
       {importing && <XrayImportModal onClose={() => setImporting(false)} onApplied={() => {}} />}
+      {quickAdding && (
+        <QuickAddInboundModal onClose={() => setQuickAdding(false)} onCreated={() => setQuickAdding(false)} />
+      )}
     </div>
   );
 };

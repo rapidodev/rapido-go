@@ -65,4 +65,15 @@ export type InboundSyncEntry = {
   tls_certificate?: string;
   tls_key?: string;
   tls_server_name?: string;
+  snell_psk?: string;
+  snell_v6_mode?: string;
 };
+
+// POST /api/inbounds's body - InboundSyncEntry plus the one extra field
+// that endpoint alone understands: port, required, written straight onto
+// the new inbound's host so it works immediately (see
+// internal/httpapi/inbounds.go's handleCreateInbound). Leaving
+// tls_certificate/tls_key/snell_psk out is deliberate and expected: the
+// server auto-generates them for a protocol that needs one and wasn't
+// given one, exactly what "+ Add inbound" relies on.
+export type CreateInboundPayload = InboundSyncEntry & { port: number };

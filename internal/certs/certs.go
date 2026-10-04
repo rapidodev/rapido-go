@@ -83,6 +83,50 @@ func GenerateCA() (*PEMPair, *rsa.PrivateKey, error) {
 	}, key, nil
 }
 
+// GenerateSelfSignedLeaf creates a standalone self-signed server
+// certificate (not a CA, not chained to the Rapido CA above at all) for an
+// inbound's own TLS - hysteria2/tuic/anytls all need one, and real VPN
+// clients for these protocols validate it by pinned fingerprint or not at
+// all (the "allow_insecure" convention this whole proxy use case already
+// relies on), never through a trusted root, so self-signed is the correct
+// default here, not a shortcut. Used to auto-provision an admin-created
+// inbound that didn't bring its own certificate (see POST /api/inbounds),
+// so "+ add this protocol" produces something that actually starts instead
+// of sitting inert until someone pastes in a certificate by hand.
+func GenerateSelfSignedLeaf(commonName string) (*PEMPair, error) {
+	key, err := rsa.GenerateKey(rand.Reader, keyBits)
+	if err != nil {
+		return nil, fmt.Errorf("certs: generate key: %w", err)
+	}
+
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, fmt.Errorf("certs: generate serial: %w", err)
+	}
+
+	notBefore := time.Now().UTC()
+	template := &x509.Certificate{
+		SerialNumber:       serial,
+		Subject:            pkix.Name{CommonName: commonName},
+		DNSNames:           []string{commonName},
+		NotBefore:          notBefore,
+		NotAfter:           notBefore.Add(validFor),
+		KeyUsage:           x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:        []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		SignatureAlgorithm: x509.SHA512WithRSA,
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		return nil, fmt.Errorf("certs: create certificate: %w", err)
+	}
+
+	return &PEMPair{
+		CertPEM: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
+		KeyPEM:  string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})),
+	}, nil
+}
+
 // SignNodeCert issues a leaf certificate for a node, signed by the Rapido
 // CA produced by GenerateCA. Used in the node-agent phase to give every
 // node a certificate the panel's CA (and thus the panel itself) trusts.
