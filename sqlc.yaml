@@ -1,3 +1,5 @@
+# Drives `sqlc generate`, which writes internal/db/generated - gitignored,
+# regenerate it locally after pulling a migration/query change.
 version: "2"
 sql:
   - engine: "postgresql"

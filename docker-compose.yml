@@ -1,3 +1,6 @@
+# Local dev only: just the two stateful services, run against with `go run
+# ./cmd/panel` directly. Production uses docker-compose.prod.yml instead,
+# which also builds/runs the panel, backend and Caddy containers.
 services:
   postgres:
     image: postgres:16-alpine
