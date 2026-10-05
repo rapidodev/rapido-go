@@ -254,8 +254,8 @@ func runAsBackendSingleton(ctx context.Context, databaseURL string, queries *gen
 		go hostmetrics.PanelSelfSampleLoop(ctx, queries, hostMetricsTracker, redisClient, logger, 30*time.Second)
 		// Alerts on a WireGuard tunnel's up<->down transition - the data was
 		// already being collected (see monitoring.go), nobody was being told.
-		go hostmetrics.RunTunnelAlerts(ctx, queries, func(ctx context.Context, nodeName, tunnelName string, up bool) {
-			dispatcher.InfraAlert(ctx, "WireGuard tunnel", nodeName+"/"+tunnelName, "", up)
+		go hostmetrics.RunTunnelAlerts(ctx, queries, func(ctx context.Context, nodeName, tunnelName string, up bool, domain string, downFor time.Duration) {
+			dispatcher.InfraAlert(ctx, "WireGuard tunnel", nodeName+"/"+tunnelName, "", up, domain, downFor)
 		}, logger, 30*time.Second)
 		// Probes every registered external relay (a GRE+FRP box or similar in
 		// front of a node, living entirely outside this fleet - see
@@ -272,8 +272,8 @@ func runAsBackendSingleton(ctx context.Context, databaseURL string, queries *gen
 				}
 				return out, nil
 			},
-			Alert: func(ctx context.Context, r relayhealth.Relay, up bool, detail string) {
-				dispatcher.InfraAlert(ctx, "Relay", fmt.Sprintf("%s (%s:%d)", r.Name, r.Host, r.Port), detail, up)
+			Alert: func(ctx context.Context, r relayhealth.Relay, up bool, detail string, downFor time.Duration) {
+				dispatcher.InfraAlert(ctx, "Relay", fmt.Sprintf("%s (%s:%d)", r.Name, r.Host, r.Port), detail, up, "", downFor)
 			},
 			// Publishes the full live snapshot every round (not just on a
 			// transition, unlike Alert) so the api role's GET /api/tunnels
@@ -304,7 +304,7 @@ func runAsBackendSingleton(ctx context.Context, databaseURL string, queries *gen
 					targets = append(targets, tunnelmetrics.Target{
 						TunnelID: t.ID, RelayHost: t.RelayHost, RelaySSHPort: t.RelaySshPort,
 						RelaySSHUser: t.RelaySshUser, RelaySSHPassword: t.RelaySshPassword,
-						InterfaceName: t.InterfaceName,
+						InterfaceName: t.InterfaceName, Ports: t.Ports,
 					})
 				}
 				return targets, nil

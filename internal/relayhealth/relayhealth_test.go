@@ -9,11 +9,12 @@ import (
 )
 
 type fakeAlert struct {
-	mu    sync.Mutex
-	calls []string
+	mu      sync.Mutex
+	calls   []string
+	downFor []time.Duration
 }
 
-func (f *fakeAlert) record(ctx context.Context, r Relay, up bool, detail string) {
+func (f *fakeAlert) record(ctx context.Context, r Relay, up bool, detail string, downFor time.Duration) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	state := "down"
@@ -21,6 +22,7 @@ func (f *fakeAlert) record(ctx context.Context, r Relay, up bool, detail string)
 		state = "up"
 	}
 	f.calls = append(f.calls, r.Name+":"+state)
+	f.downFor = append(f.downFor, downFor)
 }
 
 func (f *fakeAlert) snapshot() []string {
@@ -95,6 +97,47 @@ func TestFlappingRelayNeedsConsecutiveRoundsBeforeEachTransition(t *testing.T) {
 	got = alert.snapshot()
 	if len(got) != 2 || got[1] != "r:up" {
 		t.Fatalf("after 2 ok rounds, alerts = %v, want [r:down r:up]", got)
+	}
+}
+
+// TestRecoveryReportsExactDowntime proves Alert's downFor is the real
+// elapsed time the relay was down (DownAfter/UpAfter rounds included),
+// not just "however long Tick happens to take" - computed from each
+// entry's own since, which record pins at the moment of the transition
+// and leaves untouched on every round the relay stays in the same state.
+func TestRecoveryReportsExactDowntime(t *testing.T) {
+	alert := &fakeAlert{}
+	relay := Relay{ID: 1, Name: "r", Host: "x", Port: 1}
+	up := true
+	m := New(Options{
+		Lister: relayList([]Relay{relay}),
+		Prober: func(ctx context.Context, r Relay) (time.Duration, error) {
+			if up {
+				return time.Millisecond, nil
+			}
+			return 0, errors.New("down")
+		},
+		Alert:     alert.record,
+		DownAfter: 1, UpAfter: 1,
+	})
+
+	m.Tick(context.Background()) // first sighting, up - quiet
+	up = false
+	m.Tick(context.Background()) // down transition
+
+	time.Sleep(20 * time.Millisecond)
+	up = true
+	m.Tick(context.Background()) // up transition
+
+	calls, downFor := alert.snapshot(), alert.downFor
+	if len(calls) != 2 || calls[1] != "r:up" {
+		t.Fatalf("calls = %v, want [r:down r:up]", calls)
+	}
+	if downFor[0] != 0 {
+		t.Errorf("downFor on the DOWN call = %v, want 0 (nothing to report yet)", downFor[0])
+	}
+	if downFor[1] < 15*time.Millisecond {
+		t.Errorf("downFor on recovery = %v, want at least ~20ms", downFor[1])
 	}
 }
 

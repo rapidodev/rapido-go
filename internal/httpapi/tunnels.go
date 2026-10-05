@@ -29,6 +29,12 @@ type tunnelHealthDTO struct {
 	Up        bool       `json:"up"`
 	Error     string     `json:"error,omitempty"`
 	CheckedAt *time.Time `json:"checked_at,omitempty"`
+	// Since is when Up last changed; DownForSeconds, present only while
+	// down, is how long ago that was - the same number an InfraAlert
+	// recovery message would report, shown live on the dashboard without
+	// waiting for a recovery to see it.
+	Since          *time.Time `json:"since,omitempty"`
+	DownForSeconds *float64   `json:"down_for_seconds,omitempty"`
 }
 
 type tunnelMetricsDTO struct {
@@ -39,6 +45,18 @@ type tunnelMetricsDTO struct {
 	DiskTotalGB float64   `json:"disk_total_gb"`
 	RxBytes     int64     `json:"rx_bytes"`
 	TxBytes     int64     `json:"tx_bytes"`
+	// RxDropped/TxDropped/RxErrors/TxErrors are the GRE interface's own
+	// cumulative loss counters (since the relay's last reboot) - real
+	// packet loss, not an estimate. Connections is a live (not
+	// cumulative) count of established TCP sockets on the relay using one
+	// of this tunnel's forwarded ports right now - see
+	// internal/tunnelmetrics.Metrics's own doc comment for why there is
+	// no "total connections ever" figure here.
+	RxDropped   int64     `json:"rx_dropped"`
+	TxDropped   int64     `json:"tx_dropped"`
+	RxErrors    int64     `json:"rx_errors"`
+	TxErrors    int64     `json:"tx_errors"`
+	Connections int       `json:"connections"`
 	CheckedAt   time.Time `json:"checked_at"`
 }
 
@@ -72,7 +90,11 @@ func toTunnelDTO(t generated.Tunnel, health relayhealth.Status, healthKnown bool
 		dto.StatusMessage = &t.StatusMessage.String
 	}
 	if healthKnown {
-		h := tunnelHealthDTO{Up: health.Up, Error: health.Error, CheckedAt: &health.CheckedAt}
+		h := tunnelHealthDTO{Up: health.Up, Error: health.Error, CheckedAt: &health.CheckedAt, Since: &health.Since}
+		if !health.Up {
+			secs := time.Since(health.Since).Seconds()
+			h.DownForSeconds = &secs
+		}
 		dto.Health = &h
 	}
 	if metricsKnown {
@@ -80,6 +102,8 @@ func toTunnelDTO(t generated.Tunnel, health relayhealth.Status, healthKnown bool
 			CPUPercent: metrics.CPUPercent, MemUsedMB: metrics.MemUsedMB, MemTotalMB: metrics.MemTotalMB,
 			DiskUsedGB: metrics.DiskUsedGB, DiskTotalGB: metrics.DiskTotalGB,
 			RxBytes: metrics.RxBytes, TxBytes: metrics.TxBytes, CheckedAt: metrics.CheckedAt,
+			RxDropped: metrics.RxDropped, TxDropped: metrics.TxDropped,
+			RxErrors: metrics.RxErrors, TxErrors: metrics.TxErrors, Connections: metrics.Connections,
 		}
 		dto.Metrics = &m
 	}

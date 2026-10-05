@@ -12,6 +12,11 @@ export type TunnelHealth = {
   up: boolean;
   error?: string;
   checked_at?: string;
+  since?: string;
+  // Present only while down - how long ago `since` was, in seconds. The
+  // same number an InfraAlert recovery message reports, shown live here
+  // without waiting for a recovery.
+  down_for_seconds?: number;
 };
 
 export type TunnelMetrics = {
@@ -22,6 +27,15 @@ export type TunnelMetrics = {
   disk_total_gb: number;
   rx_bytes: number;
   tx_bytes: number;
+  // Cumulative loss counters straight from the GRE interface (since the
+  // relay's last reboot) - real packet loss, not an estimate.
+  rx_dropped: number;
+  tx_dropped: number;
+  rx_errors: number;
+  tx_errors: number;
+  // Live (not cumulative) count of established connections through this
+  // tunnel right now.
+  connections: number;
   checked_at: string;
 };
 

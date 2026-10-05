@@ -123,7 +123,7 @@ func TestInfraAlertSendsTelegramAndDiscordAndRespectsItsFlag(t *testing.T) {
 	vals := integrationsettings.Values{TelegramAPIToken: "tok", TelegramAdminIDs: []int64{111}, DiscordWebhookURL: dc.URL}
 	d := testDispatcher(allFlags(), vals, tg, dc)
 
-	d.InfraAlert(context.Background(), "WireGuard tunnel", "node2/germany", "", false)
+	d.InfraAlert(context.Background(), "WireGuard tunnel", "node2/germany", "", false, "exit", 0)
 
 	if got := len(tg.Requests()); got != 1 {
 		t.Fatalf("telegram requests = %d, want 1", got)
@@ -138,7 +138,7 @@ func TestInfraAlertSendsTelegramAndDiscordAndRespectsItsFlag(t *testing.T) {
 	flags := allFlags()
 	flags.InfraAlert = false
 	off := testDispatcher(flags, vals, tg, dc)
-	off.InfraAlert(context.Background(), "Relay", "node1-relay", "dial timeout", false)
+	off.InfraAlert(context.Background(), "Relay", "node1-relay", "dial timeout", false, "", 0)
 	if got := len(tg.Requests()); got != 1 {
 		t.Errorf("telegram requests after NOTIFY_INFRA_ALERT=false = %d, want still 1 (nothing new sent)", got)
 	}
@@ -161,7 +161,7 @@ func TestInfraAlertUsesItsOwnTopicWhenConfigured(t *testing.T) {
 	}
 	d := testDispatcher(allFlags(), vals, tg, dc)
 
-	d.InfraAlert(context.Background(), "Relay", "node1-relay", "", false)
+	d.InfraAlert(context.Background(), "Relay", "node1-relay", "", false, "", 0)
 	d.Login(context.Background(), "alice", "1.2.3.4", "Success")
 
 	reqs := tg.Requests()

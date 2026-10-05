@@ -246,7 +246,13 @@ func (d *Dispatcher) UserSubscriptionRevoked(ctx context.Context, username, byUs
 
 // InfraAlert reports a WireGuard tunnel or external relay changing
 // availability - fleet-wide, like Login, with no owning-admin/DM routing.
-func (d *Dispatcher) InfraAlert(ctx context.Context, kind, name, detail string, up bool) {
+// InfraAlert reports a WireGuard tunnel or external relay's up<->down
+// transition. domain (tunnelhealth's own "tunnel"/"exit"/"node" fault
+// classification, empty for a relay or a recovery) and downFor (the exact
+// time it was down, only meaningful on a recovery) are forwarded as-is to
+// both integrations - see telegram.InfraAlertMessage's own doc comment for
+// what each renders as.
+func (d *Dispatcher) InfraAlert(ctx context.Context, kind, name, detail string, up bool, domain string, downFor time.Duration) {
 	if !d.flags.InfraAlert {
 		return
 	}
@@ -254,10 +260,10 @@ func (d *Dispatcher) InfraAlert(ctx context.Context, kind, name, detail string, 
 	if !ok {
 		return
 	}
-	text := telegram.InfraAlertMessage(kind, name, detail, up)
+	text := telegram.InfraAlertMessage(kind, name, detail, up, domain, downFor)
 	d.telegram.Report(ctx, tgCfg, text, nil, d.logger)
 
-	payload := discord.InfraAlertPayload(kind, name, detail, up)
+	payload := discord.InfraAlertPayload(kind, name, detail, up, domain, downFor)
 	d.discord.Send(ctx, payload, vals.DiscordWebhookURL, nil, d.logger)
 }
 

@@ -114,15 +114,32 @@ func (s *Sample) UnmarshalJSON(b []byte) error {
 // interface exists right now - false means the tunnel is configured on the
 // host (an /etc/wireguard/<name>.conf exists) but has been brought down.
 type Tunnel struct {
-	Name           string   `json:"name"`
-	Up             bool     `json:"up"`
-	Present        bool     `json:"present"`
-	RxBytes        int64    `json:"rx_bytes"`
-	TxBytes        int64    `json:"tx_bytes"`
-	Peers          []Peer   `json:"peers,omitempty"`
-	ProbeMs        *float64 `json:"probe_ms,omitempty"`
-	Error          string   `json:"error,omitempty"`
-	FallbackActive bool     `json:"fallback_active,omitempty"`
+	Name    string `json:"name"`
+	Up      bool   `json:"up"`
+	Present bool   `json:"present"`
+	RxBytes int64  `json:"rx_bytes"`
+	TxBytes int64  `json:"tx_bytes"`
+	Peers   []Peer `json:"peers,omitempty"`
+	ProbeMs *float64 `json:"probe_ms,omitempty"`
+	Error   string   `json:"error,omitempty"`
+	// Since is when Up last changed - the node's own probe-cycle precision
+	// (tunnelhealth.Monitor's own Interval), not this report's push
+	// interval. A down->up transition's exact duration is CurrentSince
+	// (the previous report's own Since, taken while still down) subtracted
+	// from this one - see internal/hostmetrics/tunnelalerts.go's own
+	// doc comment on why that gives real, node-precise downtime rather
+	// than only "within one alert-poll interval."
+	Since *time.Time `json:"since,omitempty"`
+	// Domain narrows down WHERE a down tunnel's fault most likely sits,
+	// one of "tunnel" (this host's own WireGuard interface/config is
+	// missing or broken), "mullvad" (the interface is fine and this
+	// host's own internet access is fine, but traffic bound to THIS
+	// tunnel specifically fails - the exit peer itself, or the path to
+	// it), or "node" (this host has no working internet/DNS at all right
+	// now, unrelated to any one tunnel) - see tunnelhealth.DialProbe's own
+	// doc comment for exactly how each is distinguished. Empty while Up.
+	Domain         string `json:"domain,omitempty"`
+	FallbackActive bool   `json:"fallback_active,omitempty"`
 }
 
 type Peer struct {
@@ -404,6 +421,8 @@ type TunnelHealth struct {
 	Up             bool
 	ProbeMs        *float64
 	Error          string
+	Since          *time.Time
+	Domain         string
 	FallbackActive bool
 }
 
@@ -434,6 +453,8 @@ func ApplyTunnelHealth(tunnels []Tunnel, configured []string, health map[string]
 		t.Up = h.Up
 		t.ProbeMs = h.ProbeMs
 		t.Error = h.Error
+		t.Since = h.Since
+		t.Domain = h.Domain
 		t.FallbackActive = h.FallbackActive
 	}
 	out := make([]Tunnel, 0, len(byName))
