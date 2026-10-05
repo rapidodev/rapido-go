@@ -67,6 +67,9 @@ export type InboundSyncEntry = {
   tls_server_name?: string;
   snell_psk?: string;
   snell_v6_mode?: string;
+  up_mbps?: number;
+  down_mbps?: number;
+  hysteria_obfs_password?: string;
 };
 
 // POST /api/inbounds's body - InboundSyncEntry plus the one extra field

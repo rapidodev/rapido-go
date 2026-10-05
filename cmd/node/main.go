@@ -429,6 +429,9 @@ type inboundSpec struct {
 	ZeroRTTHandshake      bool   `json:"zero_rtt_handshake,omitempty"`
 	SnellPSK              string `json:"snell_psk,omitempty"`
 	SnellV6Mode           string `json:"snell_v6_mode,omitempty"`
+	// HysteriaObfsPassword only applies to protocol="hysteria" (v1) - UpMbps/
+	// DownMbps above are shared with hysteria2 but required for this one.
+	HysteriaObfsPassword string `json:"hysteria_obfs_password,omitempty"`
 }
 
 func (in inboundSpec) ports() []uint16 {
@@ -668,7 +671,7 @@ func (s *server) handleUpdateUsers(w http.ResponseWriter, r *http.Request) {
 // its user list replaced on the running listener.
 func hotUpdatableProtocol(protocol string) bool {
 	switch protocol {
-	case "vless", "vmess", "trojan", "shadowsocks", "hysteria2", "tuic", "snell", "anytls":
+	case "vless", "vmess", "trojan", "shadowsocks", "hysteria2", "tuic", "snell", "anytls", "hysteria":
 		return true
 	}
 	return false
@@ -925,6 +928,23 @@ func buildOptionsPlan(req startRequest) (sbox.Options, nodePlan, error) {
 				}
 				inbounds = append(inbounds, sbox.Inbound{Type: "anytls", Tag: tag, Options: &sbox.AnyTLSInboundOptions{
 					ListenOptions:              listenOptions,
+					Users:                      users,
+					InboundTLSOptionsContainer: sbox.InboundTLSOptionsContainer{TLS: tlsOpts},
+				}})
+			case "hysteria":
+				// Hysteria v1 - also QUIC-based, same mandatory-TLS reasoning as
+				// hysteria2, but with no congestion-control fallback: up_mbps/
+				// down_mbps are required (validated in internal/httpapi/
+				// inbounds.go, not here) rather than an optional hint.
+				users := make([]sbox.HysteriaUser, 0, len(in.Users))
+				for _, u := range in.Users {
+					users = append(users, sbox.HysteriaUser{Name: u.Name, AuthString: u.Password})
+				}
+				inbounds = append(inbounds, sbox.Inbound{Type: "hysteria", Tag: tag, Options: &sbox.HysteriaInboundOptions{
+					ListenOptions:              listenOptions,
+					UpMbps:                     int(in.UpMbps),
+					DownMbps:                   int(in.DownMbps),
+					Obfs:                       in.HysteriaObfsPassword,
 					Users:                      users,
 					InboundTLSOptionsContainer: sbox.InboundTLSOptionsContainer{TLS: tlsOpts},
 				}})

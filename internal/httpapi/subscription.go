@@ -400,6 +400,7 @@ func (h *Handler) forEachUserHost(ctx context.Context, user generated.User, fn f
 			Hysteria2ObfsPassword: ph.host.Hysteria2ObfsPassword, UpMbps: ph.host.UpMbps, DownMbps: ph.host.DownMbps,
 			CongestionControl: ph.host.CongestionControl, ZeroRTTHandshake: ph.host.ZeroRTTHandshake,
 			SnellPSK: ph.host.SnellPSK, SnellV6Mode: ph.host.SnellV6Mode,
+			HysteriaObfsPassword: ph.host.HysteriaObfsPassword,
 		}
 		fn(ph.host.Protocol, settings, remark, address, eff)
 	}

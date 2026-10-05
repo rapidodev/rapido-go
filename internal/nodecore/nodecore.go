@@ -8,6 +8,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 
 	forkedanytls "github.com/legendary1205/rapido-go/internal/nodecore/anytls"
+	forkedhysteria "github.com/legendary1205/rapido-go/internal/nodecore/hysteria"
 	forkedhysteria2 "github.com/legendary1205/rapido-go/internal/nodecore/hysteria2"
 	forkedshadowsocks "github.com/legendary1205/rapido-go/internal/nodecore/shadowsocks"
 	forkedsnell "github.com/legendary1205/rapido-go/internal/nodecore/snell"
@@ -123,6 +124,10 @@ func (n *Node) UpdateUsers(tag, protocol string, users []User) error {
 		return n.UpdateAnyTLSUsers(tag, mapUsers(users, func(u User) option.AnyTLSUser {
 			return option.AnyTLSUser{Name: u.Name, Password: u.Password}
 		}))
+	case "hysteria":
+		return n.UpdateHysteriaUsers(tag, mapUsers(users, func(u User) option.HysteriaUser {
+			return option.HysteriaUser{Name: u.Name, AuthString: u.Password}
+		}))
 	default:
 		return fmt.Errorf("nodecore: unsupported protocol %q", protocol)
 	}
@@ -195,6 +200,17 @@ func (n *Node) UpdateShadowsocksUsers(tag string, users []option.ShadowsocksUser
 // UpdateHysteria2Users is UpdateUsers for a Hysteria2 inbound.
 func (n *Node) UpdateHysteria2Users(tag string, users []option.Hysteria2User) error {
 	in, err := runningInbound[*forkedhysteria2.Inbound](n, tag, "Hysteria2")
+	if err != nil {
+		return err
+	}
+	in.UpdateUsers(users)
+	return nil
+}
+
+// UpdateHysteriaUsers is UpdateUsers for a Hysteria v1 inbound (not to be
+// confused with UpdateHysteria2Users above, a separate protocol).
+func (n *Node) UpdateHysteriaUsers(tag string, users []option.HysteriaUser) error {
+	in, err := runningInbound[*forkedhysteria.Inbound](n, tag, "Hysteria")
 	if err != nil {
 		return err
 	}

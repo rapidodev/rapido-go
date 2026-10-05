@@ -64,6 +64,11 @@ type EffectiveInbound struct {
 	// separate, inbound-level secret from any one user's own credential.
 	SnellPSK    string `json:"snell_psk"`
 	SnellV6Mode string `json:"snell_v6_mode"`
+
+	// HysteriaObfsPassword only applies when Protocol is "hysteria" (v1,
+	// distinct from hysteria2 above) - also inbound-level, no host-level
+	// override. UpMbps/DownMbps above are shared with hysteria2.
+	HysteriaObfsPassword string `json:"hysteria_obfs_password"`
 }
 
 // BuildEffectiveInbound merges one Host row onto its parent Inbound row.
@@ -109,6 +114,7 @@ func BuildEffectiveInbound(inbound generated.Inbound, host generated.Host) Effec
 		ZeroRTTHandshake:      inbound.ZeroRttHandshake,
 		SnellPSK:              inbound.SnellPsk.String,
 		SnellV6Mode:           inbound.SnellV6Mode.String,
+		HysteriaObfsPassword:  inbound.HysteriaObfsPassword.String,
 	}
 	if host.UseSniAsHost {
 		e.HostHeader = e.SNI

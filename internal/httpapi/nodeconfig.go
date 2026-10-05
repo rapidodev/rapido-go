@@ -123,6 +123,11 @@ type nodeConfigInboundSpec struct {
 	SnellPSK    string `json:"snell_psk,omitempty"`
 	SnellV6Mode string `json:"snell_v6_mode,omitempty"`
 
+	// HysteriaObfsPassword only applies to protocol="hysteria" (v1) - UpMbps/
+	// DownMbps above are shared with hysteria2 but required for this one
+	// instead of optional, see inbounds.go's own validation.
+	HysteriaObfsPassword string `json:"hysteria_obfs_password,omitempty"`
+
 	// usersKey is which nodeConfigSnapshot.usersJSON entry holds this
 	// inbound's already-encoded Users - the protocol, or its no-flow variant
 	// (see flowApplies). Not part of the wire format.
@@ -159,6 +164,7 @@ type nodeConfigInboundWire struct {
 	ZeroRTTHandshake      bool   `json:"zero_rtt_handshake,omitempty"`
 	SnellPSK              string `json:"snell_psk,omitempty"`
 	SnellV6Mode           string `json:"snell_v6_mode,omitempty"`
+	HysteriaObfsPassword  string `json:"hysteria_obfs_password,omitempty"`
 }
 
 // nodeConfigResponse is the full payload a node self-applies - see
@@ -262,6 +268,8 @@ func (h *Handler) loadNodeConfigSnapshot(ctx context.Context, version int64) (*n
 			spec.UserKey = settings.Snell.UserKey
 		case "anytls":
 			spec.Password = settings.AnyTLS.Password
+		case "hysteria":
+			spec.Password = settings.Hysteria.AuthString
 		default:
 			continue
 		}
@@ -332,6 +340,10 @@ func (h *Handler) loadNodeConfigSnapshot(ctx context.Context, version int64) (*n
 		case "snell":
 			spec.SnellPSK = in.SnellPsk.String
 			spec.SnellV6Mode = in.SnellV6Mode.String
+		case "hysteria":
+			spec.UpMbps = in.UpMbps.Int32
+			spec.DownMbps = in.DownMbps.Int32
+			spec.HysteriaObfsPassword = in.HysteriaObfsPassword.String
 		}
 		if spec.Users == nil {
 			spec.Users = []nodeConfigUserSpec{}
@@ -387,6 +399,7 @@ func (s *nodeConfigSnapshot) render(p nodeProfile) (nodeConfigResponse, []byte, 
 			Hysteria2ObfsPassword: in.Hysteria2ObfsPassword, UpMbps: in.UpMbps, DownMbps: in.DownMbps,
 			CongestionControl: in.CongestionControl, ZeroRTTHandshake: in.ZeroRTTHandshake,
 			SnellPSK: in.SnellPSK, SnellV6Mode: in.SnellV6Mode,
+			HysteriaObfsPassword: in.HysteriaObfsPassword,
 		})
 	}
 

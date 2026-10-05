@@ -27,6 +27,9 @@ import (
 
 	"github.com/gofrs/uuid/v5"
 
+	quichysteria "github.com/sagernet/sing-quic/hysteria"
+
+	forkedhysteria "github.com/legendary1205/rapido-go/internal/nodecore/hysteria"
 	forkedhysteria2 "github.com/legendary1205/rapido-go/internal/nodecore/hysteria2"
 	"github.com/legendary1205/rapido-go/internal/nodecore/traffic"
 	forkedtuic "github.com/legendary1205/rapido-go/internal/nodecore/tuic"
@@ -171,6 +174,98 @@ func TestHysteria2RoundTripAndHotUpdate(t *testing.T) {
 	conn2, err := newClient("pw-v2").DialConn(context.Background(), dest)
 	if err != nil {
 		t.Fatalf("DialConn with the new password: %v", err)
+	}
+	defer conn2.Close()
+	if err := echoRoundTrip(t, conn2, "hello-again"); err != nil {
+		t.Fatalf("echo round trip after hot update: %v", err)
+	}
+}
+
+// TestHysteriaRoundTripAndHotUpdate exercises Hysteria v1 (not to be
+// confused with TestHysteria2RoundTripAndHotUpdate above, a separate
+// protocol) - same real-client-against-the-real-fork shape, auth string in
+// place of hysteria2's password, and a mandatory declared bandwidth
+// (SendBPS/ReceiveBPS) sing-quic/hysteria.Client refuses to start without.
+func TestHysteriaRoundTripAndHotUpdate(t *testing.T) {
+	certPEM, keyPEM := selfSignedCert(t)
+	port := freePort(t)
+	opts := option.Options{
+		Inbounds: []option.Inbound{{
+			Type: "hysteria", Tag: forkTag,
+			Options: &option.HysteriaInboundOptions{
+				ListenOptions: quicListenOptions(port),
+				UpMbps:        100,
+				DownMbps:      100,
+				Users:         []option.HysteriaUser{{Name: "alice", AuthString: "auth-v1"}},
+				InboundTLSOptionsContainer: option.InboundTLSOptionsContainer{TLS: &option.InboundTLSOptions{
+					Enabled: true, Certificate: badoption.Listable[string]{certPEM}, Key: badoption.Listable[string]{keyPEM},
+				}},
+			},
+		}},
+		Outbounds: []option.Outbound{{Type: "direct", Tag: "direct-out", Options: &option.DirectOutboundOptions{}}},
+		Route:     &option.RouteOptions{Final: "direct-out"},
+	}
+	mgr := traffic.NewManager()
+	node, err := New(context.Background(), opts, mgr)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := node.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { node.Close() })
+
+	echoAddr := startEchoServer(t)
+	dest := dialDest(t, echoAddr)
+
+	newClient := func(auth string) *quichysteria.Client {
+		c, err := quichysteria.NewClient(quichysteria.ClientOptions{
+			Context: context.Background(), Dialer: N.SystemDialer, Logger: logger.NOP(),
+			ServerAddress: M.Socksaddr{Addr: netip.MustParseAddr("127.0.0.1"), Port: uint16(port)},
+			SendBPS:       100 * quichysteria.MbpsToBps, ReceiveBPS: 100 * quichysteria.MbpsToBps,
+			Password: auth, TLSConfig: quicClientTLS(t),
+		})
+		if err != nil {
+			t.Fatalf("hysteria NewClient: %v", err)
+		}
+		t.Cleanup(func() { c.CloseWithError(nil) })
+		return c
+	}
+
+	// Wrong auth is rejected, not silently proxied.
+	if _, err := newClient("wrong").DialConn(context.Background(), dest); err == nil {
+		t.Error("a wrong auth string was accepted")
+	}
+
+	client := newClient("auth-v1")
+	conn, err := client.DialConn(context.Background(), dest)
+	if err != nil {
+		t.Fatalf("DialConn with the real auth string: %v", err)
+	}
+	if err := echoRoundTrip(t, conn, "hello-hysteria"); err != nil {
+		t.Fatalf("echo round trip: %v", err)
+	}
+	conn.Close()
+
+	waitPresence(t, mgr, "alice online then offline", func(s traffic.PresenceSnapshot) bool { return s.Total == 0 })
+	if usage := mgr.Drain()["alice"]; usage.Up == 0 || usage.Down == 0 {
+		t.Errorf("traffic not counted for alice: %+v", usage)
+	}
+
+	// Hot update: the running listener gets a new auth string with no
+	// restart - the whole point of this fork existing.
+	in, err := runningInbound[*forkedhysteria.Inbound](node, forkTag, "Hysteria")
+	if err != nil {
+		t.Fatalf("look up the running inbound: %v", err)
+	}
+	in.UpdateUsers([]option.HysteriaUser{{Name: "alice", AuthString: "auth-v2"}})
+
+	if _, err := newClient("auth-v1").DialConn(context.Background(), dest); err == nil {
+		t.Error("the old auth string still works after UpdateUsers")
+	}
+	conn2, err := newClient("auth-v2").DialConn(context.Background(), dest)
+	if err != nil {
+		t.Fatalf("DialConn with the new auth string: %v", err)
 	}
 	defer conn2.Close()
 	if err := echoRoundTrip(t, conn2, "hello-again"); err != nil {
