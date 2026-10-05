@@ -175,54 +175,115 @@ func SubscriptionRevokedMessage(username, byUsername string, belongsTo *string) 
 // availability. up is the new state. Has no owning-admin concept, like
 // LoginMessage: this is fleet-wide, not tied to one reseller's users.
 //
+// Written in Persian, by explicit admin request - the one deliberate
+// exception to this package's otherwise-English message convention
+// (LoginMessage etc.): this is the alert an operator actually has to read
+// and act on fastest, so it gets the detail and the language that makes
+// that fastest for them, even though every other message here stays
+// English.
+//
 // domain narrows down WHERE a down component's fault most likely sits
 // (see tunnelhealth.DialProbe's own doc comment for how a WireGuard
 // tunnel's probe tells these apart; relayhealth never sets it, since a
 // relay probe has no "exit vs. node" distinction to make) - rendered as a
-// short, actionable sentence via domainReason so an admin does not have
-// to guess whether to go fix this host, its tunnel, or wait on a
-// third-party provider. downFor is the exact time the component was down,
-// only meaningful (non-zero) on a recovery.
+// full Persian sentence via domainReasonFA so an admin does not have to
+// guess whether to go fix this host, its own tunnel config, or just wait
+// on a third-party exit provider (e.g. Mullvad). downFor is the exact
+// time the component was down, only meaningful (non-zero) on a recovery.
 func InfraAlertMessage(kind, name, detail string, up bool, domain string, downFor time.Duration) string {
-	icon, label := "🔴", "Down"
+	icon, status := "🔴", "قطع شد ❌"
+	hashVerb := "قطع"
 	if up {
-		icon, label = "🟢", "Recovered"
+		icon, status, hashVerb = "🟢", "دوباره وصل شد ✅", "وصل"
 	}
+	now := time.Now().Format("15:04:05 2006-01-02")
+
 	msg := fmt.Sprintf(
-		"%s <b>#Infra%s</b>\n"+
+		"%s <b>#%s_%s</b>\n"+
 			"➖➖➖➖➖➖➖➖➖\n"+
-			"<b>%s</b> : <code>%s</code>",
-		icon, label, html.EscapeString(kind), html.EscapeString(name),
+			"<b>نوع</b> : %s\n"+
+			"<b>نام</b> : <code>%s</code>\n"+
+			"<b>وضعیت</b> : %s",
+		icon, infraHashtagFA(kind), hashVerb,
+		html.EscapeString(infraKindFA(kind)), html.EscapeString(name), status,
 	)
 	if up {
 		if downFor > 0 {
-			msg += fmt.Sprintf("\n<b>Was down</b> : <code>%s</code>", downFor.Round(time.Second).String())
+			msg += fmt.Sprintf("\n<b>مدت قطعی</b> : <code>%s</code>", persianDuration(downFor))
 		}
+		msg += fmt.Sprintf("\n<b>زمان</b> : <code>%s</code>", now)
 		return msg
 	}
-	if reason := domainReason(domain); reason != "" {
-		msg += fmt.Sprintf("\n<b>Likely cause</b> : <code>%s</code>", html.EscapeString(reason))
+	if reason := domainReasonFA(domain); reason != "" {
+		msg += fmt.Sprintf("\n<b>علت احتمالی</b> : %s", html.EscapeString(reason))
 	}
 	if detail != "" {
-		msg += fmt.Sprintf("\n<b>Error</b> : <code>%s</code>", html.EscapeString(detail))
+		msg += fmt.Sprintf("\n<b>خطای خام</b> : <code>%s</code>", html.EscapeString(detail))
 	}
+	msg += fmt.Sprintf("\n<b>زمان</b> : <code>%s</code>", now)
 	return msg
 }
 
-// domainReason turns a tunnelhealth fault domain into a short, actionable
+// infraKindFA/infraHashtagFA translate the two literal kind strings this
+// codebase ever passes ("WireGuard tunnel", "Relay" - see
+// cmd/panel/main.go's own two call sites) into a Persian noun and a
+// hashtag-safe (no spaces) Persian slug respectively. An unrecognized
+// kind - defensive only, nothing in this codebase ever passes one - falls
+// back to the raw string so a future third kind still renders instead of
+// going blank.
+func infraKindFA(kind string) string {
+	switch kind {
+	case "WireGuard tunnel":
+		return "تانل وایرگارد"
+	case "Relay":
+		return "رلهٔ تانل"
+	default:
+		return kind
+	}
+}
+
+func infraHashtagFA(kind string) string {
+	switch kind {
+	case "WireGuard tunnel":
+		return "تانل"
+	case "Relay":
+		return "رله"
+	default:
+		return "زیرساخت"
+	}
+}
+
+// domainReasonFA turns a tunnelhealth fault domain into a full Persian
 // sentence - see InfraAlertMessage's own doc comment. An empty or
 // unrecognized domain (relayhealth's own alerts, which have no such
 // concept) renders nothing extra.
-func domainReason(domain string) string {
+func domainReasonFA(domain string) string {
 	switch domain {
 	case "tunnel":
-		return "This host's own tunnel interface/config is missing - fix it here, not the remote exit"
+		return "رابط/کانفیگ تانل روی همین سرور وجود ندارد یا بالا نیامده - مشکل از سمت ملوداد/اکسیت نیست، باید همین‌جا بررسی شود"
 	case "exit":
-		return "This host's own internet is fine - the tunnel's remote exit (e.g. Mullvad) is not responding or not forwarding traffic"
+		return "اینترنت خود این سرور سالم است، ولی طرف مقابل تانل (معمولاً Mullvad) پاسخ نمی‌دهد یا ترافیک را فوروارد نمی‌کند"
 	case "node":
-		return "This host has no working internet/DNS at all right now - every tunnel on it will show the same fault"
+		return "این سرور در حال حاضر هیچ اینترنت/DNS سالمی ندارد - این یک مشکل کلی سرور است، نه مربوط به یک تانل خاص (احتمالاً بقیهٔ تانل‌های همین سرور هم قطع نشان داده می‌شوند)"
 	default:
 		return ""
+	}
+}
+
+// persianDuration renders a downtime the same way the dashboard's own
+// formatDuration does (hours/minutes/seconds, Latin digits kept as-is -
+// matching every numeric/code value elsewhere in this message), just with
+// Persian unit letters instead of Go's "h"/"m"/"s".
+func persianDuration(d time.Duration) string {
+	s := int(d.Round(time.Second).Seconds())
+	h, m, sec := s/3600, (s%3600)/60, s%60
+	switch {
+	case h > 0:
+		return fmt.Sprintf("%d ساعت %d دقیقه %d ثانیه", h, m, sec)
+	case m > 0:
+		return fmt.Sprintf("%d دقیقه %d ثانیه", m, sec)
+	default:
+		return fmt.Sprintf("%d ثانیه", sec)
 	}
 }
 

@@ -134,43 +134,71 @@ func SubscriptionRevokedPayload(username, byUsername string, belongsTo *string) 
 	}}}
 }
 
-// InfraAlertPayload mirrors telegram.InfraAlertMessage for Discord.
-// InfraAlertPayload mirrors telegram.InfraAlertMessage's own fields - see
-// that function's doc comment for what domain/downFor mean.
+// InfraAlertPayload mirrors telegram.InfraAlertMessage's own fields and,
+// by the same explicit admin request, its Persian wording - see that
+// function's own doc comment for what domain/downFor mean and why this is
+// the one message in either package not in English.
 func InfraAlertPayload(kind, name, detail string, up bool, domain string, downFor time.Duration) EmbedPayload {
-	title, color := ":red_circle: "+kind+" down", 0xff0000
+	kindFA := infraKindFA(kind)
+	title, color := ":red_circle: "+kindFA+" قطع شد", 0xff0000
 	if up {
-		title, color = ":green_circle: "+kind+" recovered", 0x00ff00
+		title, color = ":green_circle: "+kindFA+" دوباره وصل شد", 0x00ff00
 	}
-	desc := "**" + kind + ":** " + name
+	desc := "**" + kindFA + ":** " + name
 	if up {
 		if downFor > 0 {
-			desc += "\n**Was down:** " + downFor.Round(time.Second).String()
+			desc += "\n**مدت قطعی:** " + infraPersianDuration(downFor)
 		}
 		return EmbedPayload{Embeds: []Embed{{Title: title, Description: desc, Color: color}}}
 	}
-	if reason := infraDomainReason(domain); reason != "" {
-		desc += "\n**Likely cause:** " + reason
+	if reason := infraDomainReasonFA(domain); reason != "" {
+		desc += "\n**علت احتمالی:** " + reason
 	}
 	if detail != "" {
-		desc += "\n**Error:** " + detail
+		desc += "\n**خطای خام:** " + detail
 	}
 	return EmbedPayload{Embeds: []Embed{{Title: title, Description: desc, Color: color}}}
 }
 
-// infraDomainReason mirrors telegram.domainReason - kept as a separate
-// copy rather than shared, matching this package's existing standalone
+// infraKindFA mirrors telegram.infraKindFA - kept as a separate copy
+// rather than shared, matching this package's existing standalone
 // (import-free of internal/telegram) message-building style.
-func infraDomainReason(domain string) string {
+func infraKindFA(kind string) string {
+	switch kind {
+	case "WireGuard tunnel":
+		return "تانل وایرگارد"
+	case "Relay":
+		return "رلهٔ تانل"
+	default:
+		return kind
+	}
+}
+
+// infraDomainReasonFA mirrors telegram.domainReasonFA.
+func infraDomainReasonFA(domain string) string {
 	switch domain {
 	case "tunnel":
-		return "This host's own tunnel interface/config is missing - fix it here, not the remote exit"
+		return "رابط/کانفیگ تانل روی همین سرور وجود ندارد یا بالا نیامده - مشکل از سمت ملوداد/اکسیت نیست، باید همین‌جا بررسی شود"
 	case "exit":
-		return "This host's own internet is fine - the tunnel's remote exit (e.g. Mullvad) is not responding or not forwarding traffic"
+		return "اینترنت خود این سرور سالم است، ولی طرف مقابل تانل (معمولاً Mullvad) پاسخ نمی‌دهد یا ترافیک را فوروارد نمی‌کند"
 	case "node":
-		return "This host has no working internet/DNS at all right now - every tunnel on it will show the same fault"
+		return "این سرور در حال حاضر هیچ اینترنت/DNS سالمی ندارد - این یک مشکل کلی سرور است، نه مربوط به یک تانل خاص"
 	default:
 		return ""
+	}
+}
+
+// infraPersianDuration mirrors telegram.persianDuration.
+func infraPersianDuration(d time.Duration) string {
+	s := int(d.Round(time.Second).Seconds())
+	h, m, sec := s/3600, (s%3600)/60, s%60
+	switch {
+	case h > 0:
+		return fmt.Sprintf("%d ساعت %d دقیقه %d ثانیه", h, m, sec)
+	case m > 0:
+		return fmt.Sprintf("%d دقیقه %d ثانیه", m, sec)
+	default:
+		return fmt.Sprintf("%d ثانیه", sec)
 	}
 }
 
