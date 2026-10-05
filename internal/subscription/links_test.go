@@ -14,7 +14,7 @@ func TestVLESSLinkTLS(t *testing.T) {
 	in := EffectiveInbound{Network: "tcp", HeaderType: "", Port: 443, Security: "tls", SNI: "example.com", Fingerprint: "chrome", ALPN: "h2"}
 	settings := proxysettings.Settings{Type: proxysettings.VLESS, VLESS: &proxysettings.VLESSSettings{ID: "uuid-1", Flow: proxysettings.FlowVision}}
 
-	link, err := BuildLink("My Server", "1.2.3.4", in, settings)
+	link, err := BuildLink("My Server", "1.2.3.4", in, settings, "")
 	if err != nil {
 		t.Fatalf("BuildLink: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestVLESSLinkFlowOmittedOnNonTCP(t *testing.T) {
 	in := EffectiveInbound{Network: "ws", Port: 443, Security: "tls", SNI: "example.com", Path: "/ws", HostHeader: "example.com"}
 	settings := proxysettings.Settings{Type: proxysettings.VLESS, VLESS: &proxysettings.VLESSSettings{ID: "uuid-1", Flow: proxysettings.FlowVision}}
 
-	link, _ := BuildLink("r", "1.2.3.4", in, settings)
+	link, _ := BuildLink("r", "1.2.3.4", in, settings, "")
 	q := parseLinkQuery(t, link)
 	if q.Has("flow") {
 		t.Errorf("flow present on a ws transport, want omitted: %s", link)
@@ -57,7 +57,7 @@ func TestVLESSLinkReality(t *testing.T) {
 	in := EffectiveInbound{Network: "tcp", Port: 443, Security: "reality", SNI: "www.microsoft.com", Fingerprint: "chrome", RealityPublicKey: "pubkey123", RealityShortID: "ab12"}
 	settings := proxysettings.Settings{Type: proxysettings.VLESS, VLESS: &proxysettings.VLESSSettings{ID: "uuid-1"}}
 
-	link, _ := BuildLink("r", "1.2.3.4", in, settings)
+	link, _ := BuildLink("r", "1.2.3.4", in, settings, "")
 	q := parseLinkQuery(t, link)
 	if q.Get("pbk") != "pubkey123" || q.Get("sid") != "ab12" || q.Get("sni") != "www.microsoft.com" {
 		t.Errorf("reality params missing/wrong: %s", link)
@@ -71,7 +71,7 @@ func TestTrojanLinkPasswordEscaped(t *testing.T) {
 	in := EffectiveInbound{Network: "tcp", Port: 443, Security: "tls", SNI: "example.com"}
 	settings := proxysettings.Settings{Type: proxysettings.Trojan, Trojan: &proxysettings.TrojanSettings{Password: "p@ss word"}}
 
-	link, _ := BuildLink("r", "1.2.3.4", in, settings)
+	link, _ := BuildLink("r", "1.2.3.4", in, settings, "")
 	if !strings.HasPrefix(link, "trojan://p%40ss%20word@1.2.3.4:443?") {
 		t.Errorf("password not percent-encoded correctly: %s", link)
 	}
@@ -81,7 +81,7 @@ func TestVMessLinkJSON(t *testing.T) {
 	in := EffectiveInbound{Network: "ws", HeaderType: "none", Port: 8080, Security: "none", Path: "/vm", HostHeader: "cdn.example.com"}
 	settings := proxysettings.Settings{Type: proxysettings.VMess, VMess: &proxysettings.VMessSettings{ID: "vmess-uuid"}}
 
-	link, err := BuildLink("VMess Server", "5.6.7.8", in, settings)
+	link, err := BuildLink("VMess Server", "5.6.7.8", in, settings, "")
 	if err != nil {
 		t.Fatalf("BuildLink: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestShadowsocksLink(t *testing.T) {
 	in := EffectiveInbound{Port: 8388}
 	settings := proxysettings.Settings{Type: proxysettings.Shadowsocks, Shadowsocks: &proxysettings.ShadowsocksSettings{Password: "secret", Method: proxysettings.Chacha20Poly1305}}
 
-	link, err := BuildLink("SS Node", "9.9.9.9", in, settings)
+	link, err := BuildLink("SS Node", "9.9.9.9", in, settings, "")
 	if err != nil {
 		t.Fatalf("BuildLink: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestHysteria2Link(t *testing.T) {
 	in := EffectiveInbound{Port: 443, SNI: "example.com", AllowInsecure: true, Hysteria2ObfsPassword: "obfs-pw"}
 	settings := proxysettings.Settings{Type: proxysettings.Hysteria2, Hysteria2: &proxysettings.Hysteria2Settings{Password: "user-pw"}}
 
-	link, err := BuildLink("HY2 Node", "5.6.7.8", in, settings)
+	link, err := BuildLink("HY2 Node", "5.6.7.8", in, settings, "")
 	if err != nil {
 		t.Fatalf("BuildLink: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestHysteria2LinkOmitsObfsWhenUnset(t *testing.T) {
 	in := EffectiveInbound{Port: 443, SNI: "example.com"}
 	settings := proxysettings.Settings{Type: proxysettings.Hysteria2, Hysteria2: &proxysettings.Hysteria2Settings{Password: "user-pw"}}
 
-	link, err := BuildLink("HY2 Node", "5.6.7.8", in, settings)
+	link, err := BuildLink("HY2 Node", "5.6.7.8", in, settings, "")
 	if err != nil {
 		t.Fatalf("BuildLink: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestTUICLink(t *testing.T) {
 	in := EffectiveInbound{Port: 443, SNI: "example.com", CongestionControl: "bbr"}
 	settings := proxysettings.Settings{Type: proxysettings.TUIC, TUIC: &proxysettings.TUICSettings{ID: "uuid-1", Password: "p@ss:w0rd"}}
 
-	link, err := BuildLink("TUIC Node", "5.6.7.8", in, settings)
+	link, err := BuildLink("TUIC Node", "5.6.7.8", in, settings, "")
 	if err != nil {
 		t.Fatalf("BuildLink: %v", err)
 	}
@@ -195,12 +195,42 @@ func TestTUICLinkDefaultsCongestionControlToCubic(t *testing.T) {
 	in := EffectiveInbound{Port: 443, SNI: "example.com"}
 	settings := proxysettings.Settings{Type: proxysettings.TUIC, TUIC: &proxysettings.TUICSettings{ID: "uuid-1", Password: "pw"}}
 
-	link, err := BuildLink("TUIC Node", "5.6.7.8", in, settings)
+	link, err := BuildLink("TUIC Node", "5.6.7.8", in, settings, "")
 	if err != nil {
 		t.Fatalf("BuildLink: %v", err)
 	}
 	if got := parseLinkQuery(t, link).Get("congestion_control"); got != "cubic" {
 		t.Errorf("congestion_control = %q, want the node's own default %q", got, "cubic")
+	}
+}
+
+func TestNaiveLinkOverTLS(t *testing.T) {
+	in := EffectiveInbound{Port: 443, Security: "tls", AllowInsecure: true}
+	settings := proxysettings.Settings{Type: proxysettings.Naive, Naive: &proxysettings.NaiveSettings{Password: "user-pw"}}
+
+	link, err := BuildLink("Naive Node", "5.6.7.8", in, settings, "zz_claude_naive")
+	if err != nil {
+		t.Fatalf("BuildLink: %v", err)
+	}
+	if !strings.HasPrefix(link, "naive+https://zz_claude_naive:user-pw@5.6.7.8:443?") {
+		t.Fatalf("unexpected naive link: %s", link)
+	}
+	q := parseLinkQuery(t, link)
+	if q.Get("padding") != "true" || q.Get("insecure") != "1" {
+		t.Errorf("missing padding/insecure query params: %s", link)
+	}
+}
+
+func TestNaiveLinkOverPlainHTTPHasNoSchemedSuffixOrQuery(t *testing.T) {
+	in := EffectiveInbound{Port: 8080, Security: "none"}
+	settings := proxysettings.Settings{Type: proxysettings.Naive, Naive: &proxysettings.NaiveSettings{Password: "user-pw"}}
+
+	link, err := BuildLink("Naive Node", "5.6.7.8", in, settings, "zz_claude_naive")
+	if err != nil {
+		t.Fatalf("BuildLink: %v", err)
+	}
+	if link != "naive://zz_claude_naive:user-pw@5.6.7.8:8080#Naive%20Node" {
+		t.Errorf("unexpected plain-HTTP naive link: %s", link)
 	}
 }
 

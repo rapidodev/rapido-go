@@ -32,7 +32,8 @@ export type ProtocolOption =
   | "tuic"
   | "anytls"
   | "snell"
-  | "hysteria";
+  | "hysteria"
+  | "naive";
 
 // What security a protocol can carry, and the sensible unattended default
 // for the bulk action. hysteria2/tuic/anytls/hysteria are TLS-mandatory at
@@ -56,6 +57,7 @@ const PROTOCOLS: { value: ProtocolOption; security: "none" | "tls"; securityLock
   { value: "anytls", security: "tls", securityLocked: true, bulkEligible: true },
   { value: "snell", security: "none", securityLocked: true, bulkEligible: true },
   { value: "hysteria", security: "tls", securityLocked: true, bulkEligible: false },
+  { value: "naive", security: "tls", securityLocked: false, bulkEligible: true },
 ];
 
 const BULK_PROTOCOLS = PROTOCOLS.filter((p) => p.bulkEligible);

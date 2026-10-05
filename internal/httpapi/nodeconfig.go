@@ -270,6 +270,8 @@ func (h *Handler) loadNodeConfigSnapshot(ctx context.Context, version int64) (*n
 			spec.Password = settings.AnyTLS.Password
 		case "hysteria":
 			spec.Password = settings.Hysteria.AuthString
+		case "naive":
+			spec.Password = settings.Naive.Password
 		default:
 			continue
 		}

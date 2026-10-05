@@ -25,11 +25,12 @@ const (
 	Snell       ProxyType = "snell"
 	AnyTLS      ProxyType = "anytls"
 	Hysteria    ProxyType = "hysteria"
+	Naive       ProxyType = "naive"
 )
 
 func (t ProxyType) Valid() bool {
 	switch t {
-	case VMess, VLESS, Trojan, Shadowsocks, Hysteria2, TUIC, Snell, AnyTLS, Hysteria:
+	case VMess, VLESS, Trojan, Shadowsocks, Hysteria2, TUIC, Snell, AnyTLS, Hysteria, Naive:
 		return true
 	}
 	return false
@@ -66,6 +67,7 @@ type Settings struct {
 	Snell       *SnellSettings
 	AnyTLS      *AnyTLSSettings
 	Hysteria    *HysteriaSettings
+	Naive       *NaiveSettings
 }
 
 type VMessSettings struct {
@@ -123,6 +125,14 @@ type AnyTLSSettings struct {
 // to match rather than reusing "password" the way Hysteria2Settings does.
 type HysteriaSettings struct {
 	AuthString string `json:"auth_str"`
+}
+
+// NaiveSettings has no flow/method sibling, same as Hysteria2Settings -
+// the account's own Name is what sing.common.auth.User.Username carries
+// (see internal/nodecore/naive's own doc comment), so the only real secret
+// left to generate here is the password half of that pair.
+type NaiveSettings struct {
+	Password string `json:"password"`
 }
 
 // randomPassword mirrors app/utils/system.py's random_password:
@@ -291,6 +301,18 @@ func parse(proxyType ProxyType, raw json.RawMessage, coerceVisionFlow bool) (Set
 		}
 		return Settings{Type: Hysteria, Hysteria: &s}, nil
 
+	case Naive:
+		var s NaiveSettings
+		if hasSettings(raw) {
+			if err := json.Unmarshal(raw, &s); err != nil {
+				return Settings{}, fmt.Errorf("proxysettings: invalid naive settings: %w", err)
+			}
+		}
+		if s.Password == "" {
+			s.Password = randomPassword()
+		}
+		return Settings{Type: Naive, Naive: &s}, nil
+
 	default:
 		return Settings{}, fmt.Errorf("proxysettings: unknown proxy type %q", proxyType)
 	}
@@ -332,6 +354,8 @@ func (s Settings) MarshalJSON() ([]byte, error) {
 		return json.Marshal(s.AnyTLS)
 	case Hysteria:
 		return json.Marshal(s.Hysteria)
+	case Naive:
+		return json.Marshal(s.Naive)
 	default:
 		return nil, fmt.Errorf("proxysettings: unknown proxy type %q", s.Type)
 	}
@@ -361,5 +385,7 @@ func (s *Settings) Revoke() {
 		s.AnyTLS.Password = randomPassword()
 	case Hysteria:
 		s.Hysteria.AuthString = randomPassword()
+	case Naive:
+		s.Naive.Password = randomPassword()
 	}
 }

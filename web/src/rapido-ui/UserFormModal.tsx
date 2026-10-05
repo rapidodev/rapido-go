@@ -46,6 +46,7 @@ const PROTOCOL_ORDER: ProtocolType[] = [
   "snell",
   "anytls",
   "hysteria",
+  "naive",
 ];
 
 const STATUSES: Status[] = ["active", "on_hold", "limited", "expired", "disabled"];
