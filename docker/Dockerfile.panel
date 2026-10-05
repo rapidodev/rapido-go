@@ -83,6 +83,13 @@ FROM gobase AS gosrc
 WORKDIR /src
 COPY --from=sqlc /go/bin/sqlc /usr/local/bin/sqlc
 COPY go.mod go.sum ./
+# third_party/ before `go mod download`: go.mod's own replace directive for
+# github.com/sagernet/sing-shadowtls points at a local path there (see that
+# directory's own doc comment for why it's vendored+patched rather than a
+# real module dependency) - `go mod download` resolves every replace target
+# it finds, local ones included, so the directory has to already exist in
+# the build context at this step or the command fails outright.
+COPY third_party/ third_party/
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
 COPY sqlc.yaml ./
