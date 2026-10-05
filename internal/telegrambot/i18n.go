@@ -92,6 +92,9 @@ var catalogs = map[lang]map[string]string{
 		"nodes.more":       "… و %d نود دیگر",
 		"wg.down":          "قطع",
 		"wg.missing":       "وجود ندارد",
+		"wg.domain.tunnel": "کانفیگ محلی",
+		"wg.domain.exit":   "سمت Mullvad/اکسیت",
+		"wg.domain.node":   "اینترنت خود نود",
 
 		"users.menu":        "👥 <b>کاربران</b>\nیک فیلتر انتخاب کنید، یا بخشی از نام کاربری را بفرستید تا جستجو شود.",
 		"flt.all":           "همه",
@@ -250,6 +253,9 @@ var catalogs = map[lang]map[string]string{
 		"nodes.more":       "… and %d more node(s)",
 		"wg.down":          "down",
 		"wg.missing":       "missing",
+		"wg.domain.tunnel": "local config",
+		"wg.domain.exit":   "Mullvad/exit side",
+		"wg.domain.node":   "this node's own internet",
 
 		"users.menu":        "👥 <b>Users</b>\nPick a filter, or send part of a username to search.",
 		"flt.all":           "All",
