@@ -11,7 +11,7 @@ func TestSingBoxOutboundVLESSReality(t *testing.T) {
 	in := EffectiveInbound{Network: "tcp", Port: 443, Security: "reality", SNI: "www.microsoft.com", Fingerprint: "chrome", RealityPublicKey: "pub", RealityShortID: "sid1"}
 	settings := proxysettings.Settings{Type: proxysettings.VLESS, VLESS: &proxysettings.VLESSSettings{ID: "uuid-1", Flow: proxysettings.FlowVision}}
 
-	out, err := SingBoxOutbound("My Node", "1.2.3.4", in, settings)
+	out, err := SingBoxOutbound("My Node", "1.2.3.4", in, settings, "")
 	if err != nil {
 		t.Fatalf("SingBoxOutbound: %v", err)
 	}
@@ -32,7 +32,7 @@ func TestSingBoxOutboundHysteria2(t *testing.T) {
 	in := EffectiveInbound{Network: "tcp", Port: 443, Security: "tls", SNI: "example.com", UpMbps: 50, DownMbps: 200, Hysteria2ObfsPassword: "obfs-pw"}
 	settings := proxysettings.Settings{Type: proxysettings.Hysteria2, Hysteria2: &proxysettings.Hysteria2Settings{Password: "pw"}}
 
-	out, err := SingBoxOutbound("HY2", "1.2.3.4", in, settings)
+	out, err := SingBoxOutbound("HY2", "1.2.3.4", in, settings, "")
 	if err != nil {
 		t.Fatalf("SingBoxOutbound: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestSingBoxOutboundTUIC(t *testing.T) {
 	in := EffectiveInbound{Network: "tcp", Port: 443, Security: "tls", SNI: "example.com", CongestionControl: "bbr", ZeroRTTHandshake: true}
 	settings := proxysettings.Settings{Type: proxysettings.TUIC, TUIC: &proxysettings.TUICSettings{ID: "uuid-1", Password: "pw"}}
 
-	out, err := SingBoxOutbound("TUIC", "1.2.3.4", in, settings)
+	out, err := SingBoxOutbound("TUIC", "1.2.3.4", in, settings, "")
 	if err != nil {
 		t.Fatalf("SingBoxOutbound: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestSingBoxOutboundSnell(t *testing.T) {
 	in := EffectiveInbound{Network: "tcp", Port: 2000, SnellPSK: "correct-horse-battery-staple", SnellV6Mode: "unshaped"}
 	settings := proxysettings.Settings{Type: proxysettings.Snell, Snell: &proxysettings.SnellSettings{UserKey: "key-1"}}
 
-	out, err := SingBoxOutbound("Snell", "1.2.3.4", in, settings)
+	out, err := SingBoxOutbound("Snell", "1.2.3.4", in, settings, "")
 	if err != nil {
 		t.Fatalf("SingBoxOutbound: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestSingBoxOutboundSnellOmitsModeWhenDefault(t *testing.T) {
 	in := EffectiveInbound{Network: "tcp", Port: 2000, SnellPSK: "correct-horse-battery-staple"}
 	settings := proxysettings.Settings{Type: proxysettings.Snell, Snell: &proxysettings.SnellSettings{UserKey: "key-1"}}
 
-	out, err := SingBoxOutbound("Snell", "1.2.3.4", in, settings)
+	out, err := SingBoxOutbound("Snell", "1.2.3.4", in, settings, "")
 	if err != nil {
 		t.Fatalf("SingBoxOutbound: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestSingBoxOutboundTUICDefaultsCongestionControlToCubic(t *testing.T) {
 	in := EffectiveInbound{Network: "tcp", Port: 443, Security: "tls", SNI: "example.com"}
 	settings := proxysettings.Settings{Type: proxysettings.TUIC, TUIC: &proxysettings.TUICSettings{ID: "uuid-1", Password: "pw"}}
 
-	out, err := SingBoxOutbound("TUIC", "1.2.3.4", in, settings)
+	out, err := SingBoxOutbound("TUIC", "1.2.3.4", in, settings, "")
 	if err != nil {
 		t.Fatalf("SingBoxOutbound: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestSingBoxOutboundTUICDefaultsCongestionControlToCubic(t *testing.T) {
 func TestSingBoxOutboundSkipsUnsupportedTransport(t *testing.T) {
 	in := EffectiveInbound{Network: "xhttp", Port: 443}
 	settings := proxysettings.Settings{Type: proxysettings.VLESS, VLESS: &proxysettings.VLESSSettings{ID: "u"}}
-	out, err := SingBoxOutbound("t", "1.2.3.4", in, settings)
+	out, err := SingBoxOutbound("t", "1.2.3.4", in, settings, "")
 	if err != nil {
 		t.Fatalf("SingBoxOutbound: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestSingBoxOutboundSplitsMultiValueALPN(t *testing.T) {
 	in := EffectiveInbound{Network: "tcp", Port: 443, Security: "tls", SNI: "example.com", ALPN: "h2,http/1.1"}
 	settings := proxysettings.Settings{Type: proxysettings.VLESS, VLESS: &proxysettings.VLESSSettings{ID: "uuid-1"}}
 
-	out, err := SingBoxOutbound("My Node", "1.2.3.4", in, settings)
+	out, err := SingBoxOutbound("My Node", "1.2.3.4", in, settings, "")
 	if err != nil {
 		t.Fatalf("SingBoxOutbound: %v", err)
 	}

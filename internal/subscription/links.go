@@ -15,8 +15,11 @@ import (
 // for the given proxy secret on the given effective inbound - ports
 // app/subscription/v2ray.py's V2rayShareLink.add/vmess/vless/trojan/
 // shadowsocks. remark should already have its {VAR} placeholders resolved
-// (see vars.go).
-func BuildLink(remark, address string, in EffectiveInbound, settings proxysettings.Settings) (string, error) {
+// (see vars.go). username is the account's own username - every other
+// protocol's wire identity lives entirely inside settings (a UUID, a
+// password), but naive's real credential IS the account name itself (see
+// internal/nodecore/naive's own doc comment), so it alone needs this.
+func BuildLink(remark, address string, in EffectiveInbound, settings proxysettings.Settings, username string) (string, error) {
 	switch settings.Type {
 	case proxysettings.VMess:
 		return vmessLink(remark, address, in, settings.VMess), nil
@@ -32,6 +35,8 @@ func BuildLink(remark, address string, in EffectiveInbound, settings proxysettin
 		return tuicLink(remark, address, in, settings.TUIC), nil
 	case proxysettings.Hysteria:
 		return hysteriaLink(remark, address, in, settings.Hysteria), nil
+	case proxysettings.Naive:
+		return naiveLink(remark, address, in, settings.Naive, username), nil
 	default:
 		return "", fmt.Errorf("subscription: unknown proxy type %q", settings.Type)
 	}
@@ -206,6 +211,27 @@ func hysteriaLink(remark, address string, in EffectiveInbound, s *proxysettings.
 		q.Set("obfs", in.HysteriaObfsPassword)
 	}
 	return fmt.Sprintf("hysteria://%s:%d?%s#%s", address, in.Port, q.Encode(), url.PathEscape(remark))
+}
+
+// naiveLink builds the naive-proxy project's own documented share-link
+// format (naive+https://user:pass@host:port?padding=true) - unlike every
+// other link in this file, security here is genuinely optional (naive can
+// run over plain HTTP), so this omits the scheme's "+https" suffix and the
+// query string entirely when Security isn't "tls" rather than guessing at
+// what a plain-HTTP naive link should look like.
+func naiveLink(remark, address string, in EffectiveInbound, s *proxysettings.NaiveSettings, username string) string {
+	scheme := "naive"
+	var query string
+	if in.Security == "tls" {
+		scheme = "naive+https"
+		q := url.Values{"padding": {"true"}}
+		if in.AllowInsecure {
+			q.Set("insecure", "1")
+		}
+		query = "?" + q.Encode()
+	}
+	userinfo := fmt.Sprintf("%s:%s", url.PathEscape(username), url.PathEscape(s.Password))
+	return fmt.Sprintf("%s://%s@%s:%d%s#%s", scheme, userinfo, address, in.Port, query, url.PathEscape(remark))
 }
 
 func tuicLink(remark, address string, in EffectiveInbound, s *proxysettings.TUICSettings) string {

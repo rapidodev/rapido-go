@@ -414,7 +414,7 @@ func (h *Handler) forEachUserHost(ctx context.Context, user generated.User, fn f
 func (h *Handler) buildUserLinks(ctx context.Context, user generated.User) ([]string, error) {
 	var links []string
 	err := h.forEachUserHost(ctx, user, func(protocol string, settings proxysettings.Settings, remark, address string, eff subscription.EffectiveInbound) {
-		link, err := subscription.BuildLink(remark, address, eff, settings)
+		link, err := subscription.BuildLink(remark, address, eff, settings, user.Username)
 		if err == nil {
 			links = append(links, link)
 		}
@@ -425,7 +425,7 @@ func (h *Handler) buildUserLinks(ctx context.Context, user generated.User) ([]st
 func (h *Handler) buildUserSingBoxOutbounds(ctx context.Context, user generated.User) ([]map[string]any, error) {
 	var outbounds []map[string]any
 	err := h.forEachUserHost(ctx, user, func(protocol string, settings proxysettings.Settings, remark, address string, eff subscription.EffectiveInbound) {
-		out, err := subscription.SingBoxOutbound(remark, address, eff, settings)
+		out, err := subscription.SingBoxOutbound(remark, address, eff, settings, user.Username)
 		if err == nil && out != nil {
 			outbounds = append(outbounds, out)
 		}

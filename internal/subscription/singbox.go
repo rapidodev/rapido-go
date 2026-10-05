@@ -14,7 +14,7 @@ import (
 // this data (kcp, splithttp/xhttp, quic with a header type) - the caller
 // should simply skip those hosts, matching the Python original's silent
 // exclusion.
-func SingBoxOutbound(tag, address string, in EffectiveInbound, settings proxysettings.Settings) (map[string]any, error) {
+func SingBoxOutbound(tag, address string, in EffectiveInbound, settings proxysettings.Settings, username string) (map[string]any, error) {
 	switch in.Network {
 	case "kcp", "splithttp", "xhttp":
 		return nil, nil
@@ -79,6 +79,9 @@ func SingBoxOutbound(tag, address string, in EffectiveInbound, settings proxyset
 		if in.HysteriaObfsPassword != "" {
 			out["obfs"] = in.HysteriaObfsPassword
 		}
+	case proxysettings.Naive:
+		out["username"] = username
+		out["password"] = settings.Naive.Password
 	default:
 		return nil, fmt.Errorf("subscription: unknown proxy type %q", settings.Type)
 	}
@@ -96,7 +99,7 @@ func SingBoxOutbound(tag, address string, in EffectiveInbound, settings proxyset
 	// its own idle-session pooling is the closest thing it has) - see this
 	// function's own doc comment on the QUIC pair's mandatory TLS for why
 	// they're otherwise built like every classic TCP-family type above.
-	if settings.Type == proxysettings.Hysteria2 || settings.Type == proxysettings.TUIC || settings.Type == proxysettings.Snell || settings.Type == proxysettings.AnyTLS || settings.Type == proxysettings.Hysteria {
+	if settings.Type == proxysettings.Hysteria2 || settings.Type == proxysettings.TUIC || settings.Type == proxysettings.Snell || settings.Type == proxysettings.AnyTLS || settings.Type == proxysettings.Hysteria || settings.Type == proxysettings.Naive {
 		return out, nil
 	}
 	// Python's SingBoxConfiguration.make_outbound sets this block on EVERY

@@ -30,6 +30,7 @@ import (
 	sbox "github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-shadowsocks/shadowaead"
 	"github.com/sagernet/sing-shadowsocks/shadowaead_2022"
+	"github.com/sagernet/sing/common/auth"
 	"github.com/sagernet/sing/common/json/badoption"
 
 	"github.com/legendary1205/rapido-go/internal/hostmetrics"
@@ -671,7 +672,7 @@ func (s *server) handleUpdateUsers(w http.ResponseWriter, r *http.Request) {
 // its user list replaced on the running listener.
 func hotUpdatableProtocol(protocol string) bool {
 	switch protocol {
-	case "vless", "vmess", "trojan", "shadowsocks", "hysteria2", "tuic", "snell", "anytls", "hysteria":
+	case "vless", "vmess", "trojan", "shadowsocks", "hysteria2", "tuic", "snell", "anytls", "hysteria", "naive":
 		return true
 	}
 	return false
@@ -945,6 +946,31 @@ func buildOptionsPlan(req startRequest) (sbox.Options, nodePlan, error) {
 					UpMbps:                     int(in.UpMbps),
 					DownMbps:                   int(in.DownMbps),
 					Obfs:                       in.HysteriaObfsPassword,
+					Users:                      users,
+					InboundTLSOptionsContainer: sbox.InboundTLSOptionsContainer{TLS: tlsOpts},
+				}})
+			case "naive":
+				// TCP-only for now (see internal/nodecore/naive's own doc
+				// comment on why UDP/HTTP3 is rejected). TLS is genuinely
+				// optional here, unlike every QUIC-based case above - tlsOpts
+				// is nil whenever the admin didn't configure security="tls"
+				// for this inbound, and naive's own NewInbound handles that
+				// correctly (plain HTTP CONNECT).
+				//
+				// Network must be set explicitly to "tcp": sing-box's own
+				// option.NetworkList.Build() treats a blank value as "tcp AND
+				// udp" (NOT "tcp only"), and this fork's NewInbound rejects
+				// any options carrying udp outright - leaving this unset
+				// would make every real naive inbound fail to start. Caught
+				// by internal/nodecore/naive's own unit test before this
+				// ever reached a real node.
+				users := make([]auth.User, 0, len(in.Users))
+				for _, u := range in.Users {
+					users = append(users, auth.User{Username: u.Name, Password: u.Password})
+				}
+				inbounds = append(inbounds, sbox.Inbound{Type: "naive", Tag: tag, Options: &sbox.NaiveInboundOptions{
+					ListenOptions:              listenOptions,
+					Network:                    "tcp",
 					Users:                      users,
 					InboundTLSOptionsContainer: sbox.InboundTLSOptionsContainer{TLS: tlsOpts},
 				}})

@@ -33,6 +33,11 @@ import (
 // for it - sing-box format (BuildSingBoxOutbound) is this protocol's real,
 // fully-supported target, matching the same client ecosystem the protocol
 // itself was built for (see internal/nodecore/anytls's own doc comment).
+//
+// Naive also falls through to the default exclusion, same reasoning as
+// AnyTLS: Naive is a sing-box/Chromium-ecosystem protocol Clash Meta has
+// never picked up, so sing-box format and the dedicated naive+https:// link
+// (BuildLink) are its real targets.
 func ClashProxy(remark, address string, in EffectiveInbound, settings proxysettings.Settings, isMeta bool) (map[string]any, error) {
 	switch in.Network {
 	case "kcp", "splithttp", "xhttp":

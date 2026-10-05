@@ -6,10 +6,12 @@ import (
 
 	box "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common/auth"
 
 	forkedanytls "github.com/legendary1205/rapido-go/internal/nodecore/anytls"
 	forkedhysteria "github.com/legendary1205/rapido-go/internal/nodecore/hysteria"
 	forkedhysteria2 "github.com/legendary1205/rapido-go/internal/nodecore/hysteria2"
+	forkednaive "github.com/legendary1205/rapido-go/internal/nodecore/naive"
 	forkedshadowsocks "github.com/legendary1205/rapido-go/internal/nodecore/shadowsocks"
 	forkedsnell "github.com/legendary1205/rapido-go/internal/nodecore/snell"
 	"github.com/legendary1205/rapido-go/internal/nodecore/traffic"
@@ -128,6 +130,10 @@ func (n *Node) UpdateUsers(tag, protocol string, users []User) error {
 		return n.UpdateHysteriaUsers(tag, mapUsers(users, func(u User) option.HysteriaUser {
 			return option.HysteriaUser{Name: u.Name, AuthString: u.Password}
 		}))
+	case "naive":
+		return n.UpdateNaiveUsers(tag, mapUsers(users, func(u User) auth.User {
+			return auth.User{Username: u.Name, Password: u.Password}
+		}))
 	default:
 		return fmt.Errorf("nodecore: unsupported protocol %q", protocol)
 	}
@@ -211,6 +217,21 @@ func (n *Node) UpdateHysteria2Users(tag string, users []option.Hysteria2User) er
 // confused with UpdateHysteria2Users above, a separate protocol).
 func (n *Node) UpdateHysteriaUsers(tag string, users []option.HysteriaUser) error {
 	in, err := runningInbound[*forkedhysteria.Inbound](n, tag, "Hysteria")
+	if err != nil {
+		return err
+	}
+	in.UpdateUsers(users)
+	return nil
+}
+
+// UpdateNaiveUsers is UpdateUsers for a Naive inbound - unlike every other
+// Update*Users method here, this one never fails on a missing/mismatched
+// inbound type the way a Service[U]-backed fork's hot path might, since
+// internal/nodecore/naive's UpdateUsers takes a plain []auth.User and
+// atomically swaps the whole authenticator (see that package's own doc
+// comment on why there is no library mutator to call into here).
+func (n *Node) UpdateNaiveUsers(tag string, users []auth.User) error {
+	in, err := runningInbound[*forkednaive.Inbound](n, tag, "Naive")
 	if err != nil {
 		return err
 	}
