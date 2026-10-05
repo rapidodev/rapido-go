@@ -38,7 +38,14 @@ type monitoringTunnelDTO struct {
 	HandshakeAgeSeconds *float64 `json:"handshake_age_seconds"`
 	ProbeMS             *float64 `json:"probe_ms"`
 	Error               string   `json:"error,omitempty"`
-	FallbackActive      bool     `json:"fallback_active"`
+	// Since is when Up last changed; DownForSeconds, present only while
+	// down, is how long ago that was. Domain narrows down where the fault
+	// most likely sits ("tunnel"/"exit"/"node") - see
+	// tunnelhealth.DialProbe's own doc comment.
+	Since          *time.Time `json:"since,omitempty"`
+	DownForSeconds *float64   `json:"down_for_seconds,omitempty"`
+	Domain         string     `json:"domain,omitempty"`
+	FallbackActive bool       `json:"fallback_active"`
 }
 
 type monitoringHostDTO struct {
@@ -88,12 +95,14 @@ type hostMetricPayload struct {
 		Up   bool   `json:"up"`
 		// Absent in samples stored before the node reported it, when only
 		// interfaces that existed were listed at all - so absent means true.
-		Present        *bool    `json:"present"`
-		RxBytes        int64    `json:"rx_bytes"`
-		TxBytes        int64    `json:"tx_bytes"`
-		ProbeMS        *float64 `json:"probe_ms"`
-		Error          string   `json:"error"`
-		FallbackActive bool     `json:"fallback_active"`
+		Present        *bool      `json:"present"`
+		RxBytes        int64      `json:"rx_bytes"`
+		TxBytes        int64      `json:"tx_bytes"`
+		ProbeMS        *float64   `json:"probe_ms"`
+		Error          string     `json:"error"`
+		Since          *time.Time `json:"since,omitempty"`
+		Domain         string     `json:"domain,omitempty"`
+		FallbackActive bool       `json:"fallback_active"`
 		Peers          []struct {
 			LastHandshakeAgeSeconds *float64 `json:"last_handshake_age_seconds"`
 		} `json:"peers"`
@@ -149,6 +158,11 @@ func toMonitoringHostDTO(name, address string, nodeID *int32, m *generated.HostM
 					Name: t.Name, Up: t.Up, Present: t.Present == nil || *t.Present,
 					RxBytes: t.RxBytes, TxBytes: t.TxBytes,
 					ProbeMS: t.ProbeMS, Error: t.Error, FallbackActive: t.FallbackActive,
+					Since: t.Since, Domain: t.Domain,
+				}
+				if !t.Up && t.Since != nil {
+					secs := time.Since(*t.Since).Seconds()
+					tunnel.DownForSeconds = &secs
 				}
 				// The freshest handshake of any peer is the tunnel's: one
 				// stale peer among several says nothing about the path in use.

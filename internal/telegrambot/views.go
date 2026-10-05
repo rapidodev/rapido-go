@@ -326,7 +326,14 @@ func (r *request) tunnelLine(tunnels []tunnelDTO) string {
 		case !t.Present:
 			parts = append(parts, "❌ "+name+" ("+r.t("wg.missing")+")")
 		case !t.Up:
-			parts = append(parts, "❌ "+name+" ("+r.t("wg.down")+")")
+			detail := r.t("wg.down")
+			if t.DownForSeconds != nil {
+				detail += " " + shortAge(*t.DownForSeconds)
+			}
+			if t.Domain != "" {
+				detail += ", " + r.t("wg.domain."+t.Domain)
+			}
+			parts = append(parts, "❌ "+name+" ("+detail+")")
 		case t.HandshakeAgeSeconds != nil:
 			parts = append(parts, "✅ "+name+" ("+shortAge(*t.HandshakeAgeSeconds)+")")
 		default:

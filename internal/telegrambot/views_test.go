@@ -149,6 +149,20 @@ func TestTunnelLineNamesTheTunnelThatIsDown(t *testing.T) {
 	mustNotContain(t, line, "<x>")
 }
 
+// TestTunnelLineReportsDowntimeAndFaultDomain is the bot's own version of
+// what an InfraAlert recovery/down message already says - an admin
+// opening the Nodes screen mid-outage should see the same exact downtime
+// and the same fault domain (this host's own config vs. the tunnel's
+// remote exit vs. this host having no internet at all), not just "down".
+func TestTunnelLineReportsDowntimeAndFaultDomain(t *testing.T) {
+	r := viewRequest(langEN)
+	downFor := 76.0
+	line := r.tunnelLine([]tunnelDTO{
+		{Name: "wg-uae", Up: false, Present: true, DownForSeconds: &downFor, Domain: "exit"},
+	})
+	mustContain(t, line, "❌ wg-uae (down 76s, Mullvad/exit side)")
+}
+
 func TestShortAge(t *testing.T) {
 	cases := map[float64]string{-5: "0s", 12: "12s", 89: "89s", 120: "2m", 5000: "83m", 7200: "2h", 200000: "2d"}
 	for in, want := range cases {

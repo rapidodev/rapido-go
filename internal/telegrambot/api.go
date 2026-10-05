@@ -158,6 +158,12 @@ type tunnelDTO struct {
 	Present             bool     `json:"present"`
 	HandshakeAgeSeconds *float64 `json:"handshake_age_seconds"`
 	Error               string   `json:"error"`
+	// DownForSeconds (only present while down) and Domain ("tunnel"/
+	// "exit"/"node" - see tunnelhealth.DialProbe's own doc comment) let
+	// tunnelLine below say not just that a tunnel is down, but for how
+	// long and where the fault most likely sits.
+	DownForSeconds *float64 `json:"down_for_seconds"`
+	Domain         string   `json:"domain"`
 }
 
 type hostDTO struct {
