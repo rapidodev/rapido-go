@@ -19,6 +19,11 @@ import (
 // protocol's wire identity lives entirely inside settings (a UUID, a
 // password), but naive's real credential IS the account name itself (see
 // internal/nodecore/naive's own doc comment), so it alone needs this.
+//
+// ShadowTLS has no case here, same as AnyTLS on the Clash side but for a
+// different reason: its wire shape is a chained pair of outbounds (see
+// SingBoxOutbound's own doc comment), which no single share-link scheme
+// can represent - sing-box format is the only target that can.
 func BuildLink(remark, address string, in EffectiveInbound, settings proxysettings.Settings, username string) (string, error) {
 	switch settings.Type {
 	case proxysettings.VMess:

@@ -35,6 +35,7 @@ import (
 
 	"github.com/legendary1205/rapido-go/internal/hostmetrics"
 	"github.com/legendary1205/rapido-go/internal/nodecore"
+	forkedshadowtls "github.com/legendary1205/rapido-go/internal/nodecore/shadowtls"
 	"github.com/legendary1205/rapido-go/internal/nodecore/traffic"
 	"github.com/legendary1205/rapido-go/internal/nodelog"
 	"github.com/legendary1205/rapido-go/internal/tunnelhealth"
@@ -433,6 +434,13 @@ type inboundSpec struct {
 	// HysteriaObfsPassword only applies to protocol="hysteria" (v1) - UpMbps/
 	// DownMbps above are shared with hysteria2 but required for this one.
 	HysteriaObfsPassword string `json:"hysteria_obfs_password,omitempty"`
+	// ShadowTLSInnerMethod/ShadowTLSInnerPassword only apply to
+	// protocol="shadowtls" - the embedded inner shadowsocks-2022 layer's
+	// inbound-level method+PSK (see internal/nodecore/shadowtls's own doc
+	// comment for why this protocol alone needs one despite having its own
+	// per-user credential too).
+	ShadowTLSInnerMethod   string `json:"shadowtls_inner_method,omitempty"`
+	ShadowTLSInnerPassword string `json:"shadowtls_inner_password,omitempty"`
 }
 
 func (in inboundSpec) ports() []uint16 {
@@ -672,7 +680,7 @@ func (s *server) handleUpdateUsers(w http.ResponseWriter, r *http.Request) {
 // its user list replaced on the running listener.
 func hotUpdatableProtocol(protocol string) bool {
 	switch protocol {
-	case "vless", "vmess", "trojan", "shadowsocks", "hysteria2", "tuic", "snell", "anytls", "hysteria", "naive":
+	case "vless", "vmess", "trojan", "shadowsocks", "hysteria2", "tuic", "snell", "anytls", "hysteria", "naive", "shadowtls":
 		return true
 	}
 	return false
@@ -973,6 +981,25 @@ func buildOptionsPlan(req startRequest) (sbox.Options, nodePlan, error) {
 					Network:                    "tcp",
 					Users:                      users,
 					InboundTLSOptionsContainer: sbox.InboundTLSOptionsContainer{TLS: tlsOpts},
+				}})
+			case "shadowtls":
+				// v3-only (see internal/nodecore/shadowtls's own doc
+				// comment) - no TLS block of its own, ShadowTLS relays the
+				// raw handshake rather than terminating TLS itself. Uses
+				// that package's OWN options type, not sbox's upstream
+				// ShadowTLSInboundOptions - this fork pairs the outer
+				// handshake with an embedded shadowsocks-2022 inner data
+				// layer, whose inbound-level method+PSK that upstream
+				// struct has no field for at all.
+				users := make([]sbox.ShadowTLSUser, 0, len(in.Users))
+				for _, u := range in.Users {
+					users = append(users, sbox.ShadowTLSUser{Name: u.Name, Password: u.Password})
+				}
+				inbounds = append(inbounds, sbox.Inbound{Type: "shadowtls", Tag: tag, Options: &forkedshadowtls.InboundOptions{
+					ListenOptions: listenOptions,
+					Users:         users,
+					InnerMethod:   in.ShadowTLSInnerMethod,
+					InnerPassword: in.ShadowTLSInnerPassword,
 				}})
 			}
 		}

@@ -33,7 +33,8 @@ export type ProtocolOption =
   | "anytls"
   | "snell"
   | "hysteria"
-  | "naive";
+  | "naive"
+  | "shadowtls";
 
 // What security a protocol can carry, and the sensible unattended default
 // for the bulk action. hysteria2/tuic/anytls/hysteria are TLS-mandatory at
@@ -47,6 +48,15 @@ export type ProtocolOption =
 // a wrong guess makes the protocol connect but be unusably slow/broken, not
 // obviously rejected - so the unattended bulk action leaves it out and only
 // the single-create form (where the admin types real numbers) offers it.
+//
+// shadowtls is "none"/locked for the same reason as snell: this table's
+// security/tls_* columns describe a certificate the SERVER inbound would
+// terminate itself, and ShadowTLS never does that (it relays a real TLS
+// handshake instead - see internal/nodecore/shadowtls's own doc comment),
+// so there is nothing for this table's own TLS machinery to hold. The
+// subscription format's own TLS block (the disguise SNI a client dials)
+// comes from the HOST's security instead - a separate, later step on the
+// Hosts page, same as picking a real domain for any other protocol.
 const PROTOCOLS: { value: ProtocolOption; security: "none" | "tls"; securityLocked: boolean; bulkEligible: boolean }[] = [
   { value: "vmess", security: "tls", securityLocked: false, bulkEligible: true },
   { value: "vless", security: "tls", securityLocked: false, bulkEligible: true },
@@ -58,6 +68,7 @@ const PROTOCOLS: { value: ProtocolOption; security: "none" | "tls"; securityLock
   { value: "snell", security: "none", securityLocked: true, bulkEligible: true },
   { value: "hysteria", security: "tls", securityLocked: true, bulkEligible: false },
   { value: "naive", security: "tls", securityLocked: false, bulkEligible: true },
+  { value: "shadowtls", security: "none", securityLocked: true, bulkEligible: true },
 ];
 
 const BULK_PROTOCOLS = PROTOCOLS.filter((p) => p.bulkEligible);
@@ -73,7 +84,15 @@ type FormValues = {
   security: "none" | "tls";
   upMbps: string;
   downMbps: string;
+  shadowtlsInnerMethod: string;
+  shadowtlsInnerPassword: string;
 };
+
+// The three shadowsocks-2022 AEAD methods this fork's embedded inner layer
+// accepts (internal/httpapi/inbounds.go's shadowTLSInnerKeyLength) - AES-GCM
+// first since that is also the server's own one-click default (AES-NI is
+// available on effectively every modern server CPU).
+const SHADOWTLS_INNER_METHODS = ["2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305"];
 
 const defaultTag = (protocol: ProtocolOption) => `${protocol}-main`;
 
@@ -89,6 +108,8 @@ export const QuickAddInboundModal: FC<{ onClose: () => void; onCreated: () => vo
     security: "tls",
     upMbps: "",
     downMbps: "",
+    shadowtlsInnerMethod: SHADOWTLS_INNER_METHODS[0],
+    shadowtlsInnerPassword: "",
   });
   const [error, setError] = useState("");
   const createInbound = useCreateInboundMutation();
@@ -110,6 +131,7 @@ export const QuickAddInboundModal: FC<{ onClose: () => void; onCreated: () => vo
   const upMbps = Number(values.upMbps);
   const downMbps = Number(values.downMbps);
   const isHysteria = values.protocol === "hysteria";
+  const isShadowtls = values.protocol === "shadowtls";
   const canSubmit =
     !!values.tag.trim() &&
     Number.isInteger(port) &&
@@ -125,6 +147,14 @@ export const QuickAddInboundModal: FC<{ onClose: () => void; onCreated: () => vo
       port,
       security: values.security,
       ...(isHysteria ? { up_mbps: upMbps, down_mbps: downMbps } : {}),
+      ...(isShadowtls ? { shadowtls_inner_method: values.shadowtlsInnerMethod } : {}),
+      // Left out entirely (not sent as an empty string) when the admin
+      // didn't type one, so the server's own random-key generation
+      // (handleCreateInbound) still kicks in - same contract the omitted
+      // snell_psk/hysteria_obfs_password already rely on.
+      ...(isShadowtls && values.shadowtlsInnerPassword.trim()
+        ? { shadowtls_inner_password: values.shadowtlsInnerPassword.trim() }
+        : {}),
     };
     createInbound.mutate(body, {
       onSuccess: onCreated,
@@ -183,9 +213,40 @@ export const QuickAddInboundModal: FC<{ onClose: () => void; onCreated: () => vo
               ? t("rapido.inbounds.quickAdd.tlsAutoHint")
               : values.protocol === "snell"
               ? t("rapido.inbounds.quickAdd.snellAutoHint")
+              : isShadowtls
+              ? t("rapido.inbounds.quickAdd.shadowtlsAutoHint")
               : null}
           </span>
         </label>
+
+        {isShadowtls && (
+          <div className="flex flex-col gap-3">
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-rapido-muted">{t("rapido.inbounds.quickAdd.shadowtlsInnerMethod")}</span>
+              <Select
+                className="w-full"
+                dir="ltr"
+                value={values.shadowtlsInnerMethod}
+                onChange={(e) => setValues((v) => ({ ...v, shadowtlsInnerMethod: e.target.value }))}
+              >
+                {SHADOWTLS_INNER_METHODS.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </Select>
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-rapido-muted">{t("rapido.inbounds.quickAdd.shadowtlsInnerPassword")}</span>
+              <Input
+                dir="ltr"
+                value={values.shadowtlsInnerPassword}
+                placeholder={t("rapido.inbounds.quickAdd.shadowtlsInnerPasswordPlaceholder")}
+                onChange={(e) => setValues((v) => ({ ...v, shadowtlsInnerPassword: e.target.value }))}
+              />
+            </label>
+          </div>
+        )}
 
         {isHysteria && (
           <div className="grid grid-cols-2 gap-3">

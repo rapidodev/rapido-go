@@ -11,7 +11,7 @@ func TestSingBoxOutboundVLESSReality(t *testing.T) {
 	in := EffectiveInbound{Network: "tcp", Port: 443, Security: "reality", SNI: "www.microsoft.com", Fingerprint: "chrome", RealityPublicKey: "pub", RealityShortID: "sid1"}
 	settings := proxysettings.Settings{Type: proxysettings.VLESS, VLESS: &proxysettings.VLESSSettings{ID: "uuid-1", Flow: proxysettings.FlowVision}}
 
-	out, err := SingBoxOutbound("My Node", "1.2.3.4", in, settings, "")
+	out, _, err := SingBoxOutbound("My Node", "1.2.3.4", in, settings, "")
 	if err != nil {
 		t.Fatalf("SingBoxOutbound: %v", err)
 	}
@@ -32,7 +32,7 @@ func TestSingBoxOutboundHysteria2(t *testing.T) {
 	in := EffectiveInbound{Network: "tcp", Port: 443, Security: "tls", SNI: "example.com", UpMbps: 50, DownMbps: 200, Hysteria2ObfsPassword: "obfs-pw"}
 	settings := proxysettings.Settings{Type: proxysettings.Hysteria2, Hysteria2: &proxysettings.Hysteria2Settings{Password: "pw"}}
 
-	out, err := SingBoxOutbound("HY2", "1.2.3.4", in, settings, "")
+	out, _, err := SingBoxOutbound("HY2", "1.2.3.4", in, settings, "")
 	if err != nil {
 		t.Fatalf("SingBoxOutbound: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestSingBoxOutboundTUIC(t *testing.T) {
 	in := EffectiveInbound{Network: "tcp", Port: 443, Security: "tls", SNI: "example.com", CongestionControl: "bbr", ZeroRTTHandshake: true}
 	settings := proxysettings.Settings{Type: proxysettings.TUIC, TUIC: &proxysettings.TUICSettings{ID: "uuid-1", Password: "pw"}}
 
-	out, err := SingBoxOutbound("TUIC", "1.2.3.4", in, settings, "")
+	out, _, err := SingBoxOutbound("TUIC", "1.2.3.4", in, settings, "")
 	if err != nil {
 		t.Fatalf("SingBoxOutbound: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestSingBoxOutboundSnell(t *testing.T) {
 	in := EffectiveInbound{Network: "tcp", Port: 2000, SnellPSK: "correct-horse-battery-staple", SnellV6Mode: "unshaped"}
 	settings := proxysettings.Settings{Type: proxysettings.Snell, Snell: &proxysettings.SnellSettings{UserKey: "key-1"}}
 
-	out, err := SingBoxOutbound("Snell", "1.2.3.4", in, settings, "")
+	out, _, err := SingBoxOutbound("Snell", "1.2.3.4", in, settings, "")
 	if err != nil {
 		t.Fatalf("SingBoxOutbound: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestSingBoxOutboundSnellOmitsModeWhenDefault(t *testing.T) {
 	in := EffectiveInbound{Network: "tcp", Port: 2000, SnellPSK: "correct-horse-battery-staple"}
 	settings := proxysettings.Settings{Type: proxysettings.Snell, Snell: &proxysettings.SnellSettings{UserKey: "key-1"}}
 
-	out, err := SingBoxOutbound("Snell", "1.2.3.4", in, settings, "")
+	out, _, err := SingBoxOutbound("Snell", "1.2.3.4", in, settings, "")
 	if err != nil {
 		t.Fatalf("SingBoxOutbound: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestSingBoxOutboundTUICDefaultsCongestionControlToCubic(t *testing.T) {
 	in := EffectiveInbound{Network: "tcp", Port: 443, Security: "tls", SNI: "example.com"}
 	settings := proxysettings.Settings{Type: proxysettings.TUIC, TUIC: &proxysettings.TUICSettings{ID: "uuid-1", Password: "pw"}}
 
-	out, err := SingBoxOutbound("TUIC", "1.2.3.4", in, settings, "")
+	out, _, err := SingBoxOutbound("TUIC", "1.2.3.4", in, settings, "")
 	if err != nil {
 		t.Fatalf("SingBoxOutbound: %v", err)
 	}
@@ -121,10 +121,61 @@ func TestSingBoxOutboundTUICDefaultsCongestionControlToCubic(t *testing.T) {
 	}
 }
 
+// TestSingBoxOutboundShadowTLSReturnsAChainedPair proves the one real
+// structural difference this protocol has from every other case in this
+// file: ShadowTLS has no destination of its own (see
+// internal/nodecore/shadowtls's own doc comment), so the real sing-box
+// client shape is a shadowsocks-2022 outbound the user selects, whose own
+// dialer is replaced entirely by "detour" into a second, hidden
+// shadowtls outbound that does the actual dial.
+func TestSingBoxOutboundShadowTLSReturnsAChainedPair(t *testing.T) {
+	in := EffectiveInbound{Network: "tcp", Port: 443, Security: "tls", SNI: "example.com", ShadowTLSInnerMethod: "2022-blake3-aes-128-gcm", ShadowTLSInnerPassword: "inner-psk"}
+	settings := proxysettings.Settings{Type: proxysettings.ShadowTLS, ShadowTLS: &proxysettings.ShadowTLSSettings{Password: "outer-pw"}}
+
+	out, hidden, err := SingBoxOutbound("MyNode", "1.2.3.4", in, settings, "")
+	if err != nil {
+		t.Fatalf("SingBoxOutbound: %v", err)
+	}
+	if out["type"] != "shadowsocks" || out["method"] != "2022-blake3-aes-128-gcm" || out["password"] != "inner-psk" {
+		t.Errorf("primary (user-selected) outbound wrong: %+v", out)
+	}
+	if _, present := out["server"]; present {
+		t.Errorf("the visible outbound must have no server of its own (detour replaces it): %+v", out)
+	}
+	if _, present := out["server_port"]; present {
+		t.Errorf("the visible outbound must have no server_port of its own (detour replaces it): %+v", out)
+	}
+	detourTag, _ := out["detour"].(string)
+	if detourTag == "" {
+		t.Fatalf("expected a detour tag pointing at the hidden outbound: %+v", out)
+	}
+	if len(hidden) != 1 {
+		t.Fatalf("expected exactly one hidden outbound, got %d: %+v", len(hidden), hidden)
+	}
+	glue := hidden[0]
+	if glue["tag"] != detourTag {
+		t.Errorf("hidden outbound's tag %v does not match the visible outbound's detour %v", glue["tag"], detourTag)
+	}
+	if glue["type"] != "shadowtls" || glue["version"] != 3 || glue["password"] != "outer-pw" ||
+		glue["server"] != "1.2.3.4" || glue["server_port"] != 443 {
+		t.Errorf("hidden shadowtls outbound wrong: %+v", glue)
+	}
+	tls, ok := glue["tls"].(map[string]any)
+	if !ok || tls["server_name"] != "example.com" {
+		t.Errorf("hidden outbound should carry the TLS block, not the visible one: %+v", glue)
+	}
+	if _, present := out["tls"]; present {
+		t.Errorf("the visible shadowsocks outbound must carry no TLS block of its own: %+v", out)
+	}
+	if _, present := out["multiplex"]; present {
+		t.Errorf("shadowtls has no multiplex field on the visible outbound: %+v", out)
+	}
+}
+
 func TestSingBoxOutboundSkipsUnsupportedTransport(t *testing.T) {
 	in := EffectiveInbound{Network: "xhttp", Port: 443}
 	settings := proxysettings.Settings{Type: proxysettings.VLESS, VLESS: &proxysettings.VLESSSettings{ID: "u"}}
-	out, err := SingBoxOutbound("t", "1.2.3.4", in, settings, "")
+	out, _, err := SingBoxOutbound("t", "1.2.3.4", in, settings, "")
 	if err != nil {
 		t.Fatalf("SingBoxOutbound: %v", err)
 	}
@@ -137,7 +188,7 @@ func TestSingBoxConfigIsValidJSONWithSelector(t *testing.T) {
 	raw, err := SingBoxConfig([]map[string]any{
 		{"type": "vless", "tag": "node-a"},
 		{"type": "trojan", "tag": "node-b"},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("SingBoxConfig: %v", err)
 	}
@@ -158,13 +209,41 @@ func TestSingBoxConfigIsValidJSONWithSelector(t *testing.T) {
 	}
 }
 
+// TestSingBoxConfigHidesGlueOutboundsFromSelector proves hidden outbounds
+// (ShadowTLS's own detour target - see SingBoxOutbound's own doc comment)
+// land in the document's outbounds array, so sing-box can resolve the
+// detour tag, but never in the selector's own list, so a client never
+// offers one as something to pick directly.
+func TestSingBoxConfigHidesGlueOutboundsFromSelector(t *testing.T) {
+	raw, err := SingBoxConfig(
+		[]map[string]any{{"type": "shadowsocks", "tag": "node-a", "detour": "node-a-tls"}},
+		[]map[string]any{{"type": "shadowtls", "tag": "node-a-tls"}},
+	)
+	if err != nil {
+		t.Fatalf("SingBoxConfig: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("output is not valid JSON: %v", err)
+	}
+	outbounds, ok := doc["outbounds"].([]any)
+	if !ok || len(outbounds) != 4 { // visible + hidden + selector + direct
+		t.Fatalf("expected 4 outbounds (visible + hidden + selector + direct), got %+v", doc["outbounds"])
+	}
+	selector := outbounds[2].(map[string]any)
+	tags, _ := selector["outbounds"].([]any)
+	if len(tags) != 1 || tags[0] != "node-a" {
+		t.Errorf("selector should list only the visible outbound, got %+v", tags)
+	}
+}
+
 // TestSingBoxConfigHasAWorkingStandaloneRoute is a regression test for a
 // real production bug: without an inbound and a default route, the document
 // this function renders dialed fine for a client's own per-outbound latency
 // probe (which needs neither) but never actually captured or routed any of
 // the device's real traffic - see this function's own doc comment.
 func TestSingBoxConfigHasAWorkingStandaloneRoute(t *testing.T) {
-	raw, err := SingBoxConfig([]map[string]any{{"type": "vless", "tag": "node-a"}})
+	raw, err := SingBoxConfig([]map[string]any{{"type": "vless", "tag": "node-a"}}, nil)
 	if err != nil {
 		t.Fatalf("SingBoxConfig: %v", err)
 	}
@@ -242,7 +321,7 @@ func TestSingBoxOutboundSplitsMultiValueALPN(t *testing.T) {
 	in := EffectiveInbound{Network: "tcp", Port: 443, Security: "tls", SNI: "example.com", ALPN: "h2,http/1.1"}
 	settings := proxysettings.Settings{Type: proxysettings.VLESS, VLESS: &proxysettings.VLESSSettings{ID: "uuid-1"}}
 
-	out, err := SingBoxOutbound("My Node", "1.2.3.4", in, settings, "")
+	out, _, err := SingBoxOutbound("My Node", "1.2.3.4", in, settings, "")
 	if err != nil {
 		t.Fatalf("SingBoxOutbound: %v", err)
 	}

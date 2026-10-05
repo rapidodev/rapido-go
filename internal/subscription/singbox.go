@@ -10,14 +10,20 @@ import (
 
 // SingBoxOutbound builds one sing-box outbound object for a proxy+host,
 // porting app/subscription/singbox.py's SingBoxConfiguration.add. Returns
-// nil, nil for network types sing-box's outbound side can't represent from
-// this data (kcp, splithttp/xhttp, quic with a header type) - the caller
-// should simply skip those hosts, matching the Python original's silent
-// exclusion.
-func SingBoxOutbound(tag, address string, in EffectiveInbound, settings proxysettings.Settings, username string) (map[string]any, error) {
+// nil, nil, nil for network types sing-box's outbound side can't represent
+// from this data (kcp, splithttp/xhttp, quic with a header type) - the
+// caller should simply skip those hosts, matching the Python original's
+// silent exclusion.
+//
+// The second return value is normally empty. ShadowTLS is the one
+// exception: see this function's own ShadowTLS case for why it needs a
+// second, hidden "glue" outbound alongside the one it returns as its
+// primary value, and SingBoxConfig's own doc comment for how the two are
+// told apart in the finished document.
+func SingBoxOutbound(tag, address string, in EffectiveInbound, settings proxysettings.Settings, username string) (map[string]any, []map[string]any, error) {
 	switch in.Network {
 	case "kcp", "splithttp", "xhttp":
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	out := map[string]any{
@@ -82,8 +88,35 @@ func SingBoxOutbound(tag, address string, in EffectiveInbound, settings proxyset
 	case proxysettings.Naive:
 		out["username"] = username
 		out["password"] = settings.Naive.Password
+	case proxysettings.ShadowTLS:
+		// ShadowTLS has no destination of its own to represent as a plain
+		// sing-box outbound (see internal/nodecore/shadowtls's own doc
+		// comment) - the real client shape for it is always a PAIR of
+		// outbounds: a shadowsocks-2022 outbound the user actually selects
+		// (method/password shared by every user of this inbound, not
+		// per-user - EffectiveInbound's ShadowTLSInner* fields), whose own
+		// dialer is replaced entirely by "detour" into a second, hidden
+		// outbound that performs the real TLS-disguised dial. The hidden
+		// one is returned as this function's second value so SingBoxConfig
+		// can include it in the document without also offering it as a
+		// user-selectable choice.
+		glueTag := tag + "-tls"
+		glue := map[string]any{
+			"type": "shadowtls", "tag": glueTag, "server": address, "server_port": in.Port,
+			"version": 3, "password": settings.ShadowTLS.Password,
+		}
+		if tls := singBoxTLS(in); tls != nil {
+			glue["tls"] = tls
+		}
+		delete(out, "server")
+		delete(out, "server_port")
+		out["type"] = "shadowsocks"
+		out["method"] = in.ShadowTLSInnerMethod
+		out["password"] = in.ShadowTLSInnerPassword
+		out["detour"] = glueTag
+		return out, []map[string]any{glue}, nil
 	default:
-		return nil, fmt.Errorf("subscription: unknown proxy type %q", settings.Type)
+		return nil, nil, fmt.Errorf("subscription: unknown proxy type %q", settings.Type)
 	}
 
 	if transport := singBoxTransport(in); transport != nil {
@@ -100,7 +133,7 @@ func SingBoxOutbound(tag, address string, in EffectiveInbound, settings proxyset
 	// function's own doc comment on the QUIC pair's mandatory TLS for why
 	// they're otherwise built like every classic TCP-family type above.
 	if settings.Type == proxysettings.Hysteria2 || settings.Type == proxysettings.TUIC || settings.Type == proxysettings.Snell || settings.Type == proxysettings.AnyTLS || settings.Type == proxysettings.Hysteria || settings.Type == proxysettings.Naive {
-		return out, nil
+		return out, nil, nil
 	}
 	// Python's SingBoxConfiguration.make_outbound sets this block on EVERY
 	// outbound unconditionally (not gated by mux_enable at all), from
@@ -111,7 +144,7 @@ func SingBoxOutbound(tag, address string, in EffectiveInbound, settings proxyset
 	// this format at all - a real, faithfully-preserved quirk, not
 	// something to "fix" by making it obey the per-host toggle instead.
 	out["multiplex"] = map[string]any{"enabled": false, "protocol": "h2mux", "max_streams": 8}
-	return out, nil
+	return out, nil, nil
 }
 
 func singBoxTransport(in EffectiveInbound) map[string]any {
@@ -176,12 +209,18 @@ func singBoxTLS(in EffectiveInbound) map[string]any {
 // and version its own rule-set files; an admin wanting that can still layer
 // it on by importing this same outbounds list into their own richer
 // profile.
-func SingBoxConfig(outbounds []map[string]any) ([]byte, error) {
+//
+// hidden carries every "glue" outbound SingBoxOutbound returned alongside a
+// primary one (currently only ShadowTLS's own detour target) - included in
+// the document's outbounds array, same as every entry in outbounds, but
+// never in the selector's own tag list, so an admin's client never offers
+// it as something to pick directly.
+func SingBoxConfig(outbounds, hidden []map[string]any) ([]byte, error) {
 	tags := make([]string, 0, len(outbounds))
 	for _, o := range outbounds {
 		tags = append(tags, o["tag"].(string))
 	}
-	allOutbounds := append(append([]map[string]any{}, outbounds...),
+	allOutbounds := append(append(append([]map[string]any{}, outbounds...), hidden...),
 		map[string]any{"type": "selector", "tag": "proxy", "outbounds": tags, "default": firstOrEmpty(tags)},
 		map[string]any{"type": "direct", "tag": "direct"},
 	)

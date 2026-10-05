@@ -12,6 +12,7 @@ import (
 	forkedhysteria "github.com/legendary1205/rapido-go/internal/nodecore/hysteria"
 	forkedhysteria2 "github.com/legendary1205/rapido-go/internal/nodecore/hysteria2"
 	forkednaive "github.com/legendary1205/rapido-go/internal/nodecore/naive"
+	forkedshadowtls "github.com/legendary1205/rapido-go/internal/nodecore/shadowtls"
 	forkedshadowsocks "github.com/legendary1205/rapido-go/internal/nodecore/shadowsocks"
 	forkedsnell "github.com/legendary1205/rapido-go/internal/nodecore/snell"
 	"github.com/legendary1205/rapido-go/internal/nodecore/traffic"
@@ -134,6 +135,10 @@ func (n *Node) UpdateUsers(tag, protocol string, users []User) error {
 		return n.UpdateNaiveUsers(tag, mapUsers(users, func(u User) auth.User {
 			return auth.User{Username: u.Name, Password: u.Password}
 		}))
+	case "shadowtls":
+		return n.UpdateShadowTLSUsers(tag, mapUsers(users, func(u User) option.ShadowTLSUser {
+			return option.ShadowTLSUser{Name: u.Name, Password: u.Password}
+		}))
 	default:
 		return fmt.Errorf("nodecore: unsupported protocol %q", protocol)
 	}
@@ -232,6 +237,20 @@ func (n *Node) UpdateHysteriaUsers(tag string, users []option.HysteriaUser) erro
 // comment on why there is no library mutator to call into here).
 func (n *Node) UpdateNaiveUsers(tag string, users []auth.User) error {
 	in, err := runningInbound[*forkednaive.Inbound](n, tag, "Naive")
+	if err != nil {
+		return err
+	}
+	in.UpdateUsers(users)
+	return nil
+}
+
+// UpdateShadowTLSUsers is UpdateUsers for a ShadowTLS inbound - see
+// internal/nodecore/shadowtls's own doc comment on why the actual hot-swap
+// happens one layer down, in the vendored+patched third_party/
+// sing-shadowtls, not via a generic Service[U] the way the QUIC family's
+// forks get for free.
+func (n *Node) UpdateShadowTLSUsers(tag string, users []option.ShadowTLSUser) error {
+	in, err := runningInbound[*forkedshadowtls.Inbound](n, tag, "ShadowTLS")
 	if err != nil {
 		return err
 	}

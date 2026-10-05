@@ -118,3 +118,9 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	lukechampine.com/blake3 v1.3.0 // indirect
 )
+
+// Vendored+patched to add a hot-swappable protocol-v3 user list - see
+// third_party/sing-shadowtls's own package doc comment (in service.go) for
+// exactly what changed and why. Everything else is upstream v0.2.1
+// verbatim.
+replace github.com/sagernet/sing-shadowtls => ./third_party/sing-shadowtls

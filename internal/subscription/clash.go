@@ -38,6 +38,12 @@ import (
 // AnyTLS: Naive is a sing-box/Chromium-ecosystem protocol Clash Meta has
 // never picked up, so sing-box format and the dedicated naive+https:// link
 // (BuildLink) are its real targets.
+//
+// ShadowTLS falls through too, for a structural reason rather than a
+// client-support one: this inbound's wire shape is a chained pair of
+// outbounds (see SingBoxOutbound's own doc comment), which a single Clash
+// proxy entry has no way to represent at all - sing-box format
+// (SingBoxOutbound/SingBoxConfig) is the only target that can.
 func ClashProxy(remark, address string, in EffectiveInbound, settings proxysettings.Settings, isMeta bool) (map[string]any, error) {
 	switch in.Network {
 	case "kcp", "splithttp", "xhttp":

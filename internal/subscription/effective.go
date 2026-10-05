@@ -69,6 +69,14 @@ type EffectiveInbound struct {
 	// distinct from hysteria2 above) - also inbound-level, no host-level
 	// override. UpMbps/DownMbps above are shared with hysteria2.
 	HysteriaObfsPassword string `json:"hysteria_obfs_password"`
+
+	// ShadowTLSInnerMethod/ShadowTLSInnerPassword only apply when Protocol
+	// is "shadowtls" - also inbound-level, no host-level override. See
+	// internal/nodecore/shadowtls's own doc comment for why this protocol
+	// needs an inbound-level secret in addition to each user's own
+	// ShadowTLS password.
+	ShadowTLSInnerMethod   string `json:"shadowtls_inner_method"`
+	ShadowTLSInnerPassword string `json:"shadowtls_inner_password"`
 }
 
 // BuildEffectiveInbound merges one Host row onto its parent Inbound row.
@@ -106,15 +114,17 @@ func BuildEffectiveInbound(inbound generated.Inbound, host generated.Host) Effec
 		Fingerprint:   fingerprint,
 		AllowInsecure: host.Allowinsecure.Valid && host.Allowinsecure.Bool,
 		MuxEnable:     host.MuxEnable, FragmentSetting: host.FragmentSetting.String, NoiseSetting: host.NoiseSetting.String,
-		RandomUserAgent:       host.RandomUserAgent,
-		Hysteria2ObfsPassword: inbound.Hysteria2ObfsPassword.String,
-		UpMbps:                int(inbound.UpMbps.Int32),
-		DownMbps:              int(inbound.DownMbps.Int32),
-		CongestionControl:     inbound.CongestionControl.String,
-		ZeroRTTHandshake:      inbound.ZeroRttHandshake,
-		SnellPSK:              inbound.SnellPsk.String,
-		SnellV6Mode:           inbound.SnellV6Mode.String,
-		HysteriaObfsPassword:  inbound.HysteriaObfsPassword.String,
+		RandomUserAgent:        host.RandomUserAgent,
+		Hysteria2ObfsPassword:  inbound.Hysteria2ObfsPassword.String,
+		UpMbps:                 int(inbound.UpMbps.Int32),
+		DownMbps:               int(inbound.DownMbps.Int32),
+		CongestionControl:      inbound.CongestionControl.String,
+		ZeroRTTHandshake:       inbound.ZeroRttHandshake,
+		SnellPSK:               inbound.SnellPsk.String,
+		SnellV6Mode:            inbound.SnellV6Mode.String,
+		HysteriaObfsPassword:   inbound.HysteriaObfsPassword.String,
+		ShadowTLSInnerMethod:   inbound.ShadowtlsInnerMethod.String,
+		ShadowTLSInnerPassword: inbound.ShadowtlsInnerPassword.String,
 	}
 	if host.UseSniAsHost {
 		e.HostHeader = e.SNI

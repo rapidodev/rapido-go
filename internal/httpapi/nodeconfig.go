@@ -128,6 +128,12 @@ type nodeConfigInboundSpec struct {
 	// instead of optional, see inbounds.go's own validation.
 	HysteriaObfsPassword string `json:"hysteria_obfs_password,omitempty"`
 
+	// ShadowTLSInnerMethod/ShadowTLSInnerPassword only apply to
+	// protocol="shadowtls" - see inbounds.go's inboundDetailDTO for what
+	// each means.
+	ShadowTLSInnerMethod   string `json:"shadowtls_inner_method,omitempty"`
+	ShadowTLSInnerPassword string `json:"shadowtls_inner_password,omitempty"`
+
 	// usersKey is which nodeConfigSnapshot.usersJSON entry holds this
 	// inbound's already-encoded Users - the protocol, or its no-flow variant
 	// (see flowApplies). Not part of the wire format.
@@ -157,14 +163,16 @@ type nodeConfigInboundWire struct {
 
 	// Same fields, same order, as nodeConfigInboundSpec above - required for
 	// the two to stay byte-identical, see this type's own doc comment.
-	Hysteria2ObfsPassword string `json:"hysteria2_obfs_password,omitempty"`
-	UpMbps                int32  `json:"up_mbps,omitempty"`
-	DownMbps              int32  `json:"down_mbps,omitempty"`
-	CongestionControl     string `json:"congestion_control,omitempty"`
-	ZeroRTTHandshake      bool   `json:"zero_rtt_handshake,omitempty"`
-	SnellPSK              string `json:"snell_psk,omitempty"`
-	SnellV6Mode           string `json:"snell_v6_mode,omitempty"`
-	HysteriaObfsPassword  string `json:"hysteria_obfs_password,omitempty"`
+	Hysteria2ObfsPassword  string `json:"hysteria2_obfs_password,omitempty"`
+	UpMbps                 int32  `json:"up_mbps,omitempty"`
+	DownMbps               int32  `json:"down_mbps,omitempty"`
+	CongestionControl      string `json:"congestion_control,omitempty"`
+	ZeroRTTHandshake       bool   `json:"zero_rtt_handshake,omitempty"`
+	SnellPSK               string `json:"snell_psk,omitempty"`
+	SnellV6Mode            string `json:"snell_v6_mode,omitempty"`
+	HysteriaObfsPassword   string `json:"hysteria_obfs_password,omitempty"`
+	ShadowTLSInnerMethod   string `json:"shadowtls_inner_method,omitempty"`
+	ShadowTLSInnerPassword string `json:"shadowtls_inner_password,omitempty"`
 }
 
 // nodeConfigResponse is the full payload a node self-applies - see
@@ -272,6 +280,8 @@ func (h *Handler) loadNodeConfigSnapshot(ctx context.Context, version int64) (*n
 			spec.Password = settings.Hysteria.AuthString
 		case "naive":
 			spec.Password = settings.Naive.Password
+		case "shadowtls":
+			spec.Password = settings.ShadowTLS.Password
 		default:
 			continue
 		}
@@ -346,6 +356,9 @@ func (h *Handler) loadNodeConfigSnapshot(ctx context.Context, version int64) (*n
 			spec.UpMbps = in.UpMbps.Int32
 			spec.DownMbps = in.DownMbps.Int32
 			spec.HysteriaObfsPassword = in.HysteriaObfsPassword.String
+		case "shadowtls":
+			spec.ShadowTLSInnerMethod = in.ShadowtlsInnerMethod.String
+			spec.ShadowTLSInnerPassword = in.ShadowtlsInnerPassword.String
 		}
 		if spec.Users == nil {
 			spec.Users = []nodeConfigUserSpec{}
@@ -402,6 +415,7 @@ func (s *nodeConfigSnapshot) render(p nodeProfile) (nodeConfigResponse, []byte, 
 			CongestionControl: in.CongestionControl, ZeroRTTHandshake: in.ZeroRTTHandshake,
 			SnellPSK: in.SnellPSK, SnellV6Mode: in.SnellV6Mode,
 			HysteriaObfsPassword: in.HysteriaObfsPassword,
+			ShadowTLSInnerMethod: in.ShadowTLSInnerMethod, ShadowTLSInnerPassword: in.ShadowTLSInnerPassword,
 		})
 	}
 
