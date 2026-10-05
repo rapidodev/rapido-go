@@ -70,6 +70,8 @@ export type InboundSyncEntry = {
   up_mbps?: number;
   down_mbps?: number;
   hysteria_obfs_password?: string;
+  shadowtls_inner_method?: string;
+  shadowtls_inner_password?: string;
 };
 
 // POST /api/inbounds's body - InboundSyncEntry plus the one extra field

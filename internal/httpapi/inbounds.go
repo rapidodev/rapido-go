@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -152,6 +154,15 @@ type inboundDetailDTO struct {
 	// hysteria2's own salamander/gecko obfs. See internal/nodecore/hysteria's
 	// own doc comment.
 	HysteriaObfsPassword string `json:"hysteria_obfs_password,omitempty"`
+
+	// ShadowTLSInnerMethod/ShadowTLSInnerPassword only apply to
+	// protocol="shadowtls" - the embedded inner shadowsocks-2022 layer's
+	// inbound-level method+PSK, shared by every user of the inbound (each
+	// user's own ShadowTLS password lives in proxies.settings jsonb
+	// instead, same split as snell_psk/UserKey above). See
+	// internal/nodecore/shadowtls's own doc comment.
+	ShadowTLSInnerMethod   string `json:"shadowtls_inner_method,omitempty"`
+	ShadowTLSInnerPassword string `json:"shadowtls_inner_password,omitempty"`
 }
 
 func toInboundDetailDTO(in generated.Inbound) inboundDetailDTO {
@@ -159,22 +170,24 @@ func toInboundDetailDTO(in generated.Inbound) inboundDetailDTO {
 	// "unset" wire value this DTO wants - no helper needed.
 	return inboundDetailDTO{
 		Tag: in.Tag, Protocol: in.Protocol, Network: in.Network, HeaderType: in.HeaderType.String,
-		Security:              in.Security,
-		RealityPrivateKey:     in.RealityPrivateKey.String,
-		RealityShortIDs:       in.RealityShortIds,
-		RealityServerName:     in.RealityServerName.String,
-		RealityServerPort:     in.RealityServerPort.Int32,
-		TLSCertificate:        in.TlsCertificate.String,
-		TLSKey:                in.TlsKey.String,
-		TLSServerName:         in.TlsServerName.String,
-		Hysteria2ObfsPassword: in.Hysteria2ObfsPassword.String,
-		UpMbps:                in.UpMbps.Int32,
-		DownMbps:              in.DownMbps.Int32,
-		CongestionControl:     in.CongestionControl.String,
-		ZeroRTTHandshake:      in.ZeroRttHandshake,
-		SnellPSK:              in.SnellPsk.String,
-		SnellV6Mode:           in.SnellV6Mode.String,
-		HysteriaObfsPassword:  in.HysteriaObfsPassword.String,
+		Security:               in.Security,
+		RealityPrivateKey:      in.RealityPrivateKey.String,
+		RealityShortIDs:        in.RealityShortIds,
+		RealityServerName:      in.RealityServerName.String,
+		RealityServerPort:      in.RealityServerPort.Int32,
+		TLSCertificate:         in.TlsCertificate.String,
+		TLSKey:                 in.TlsKey.String,
+		TLSServerName:          in.TlsServerName.String,
+		Hysteria2ObfsPassword:  in.Hysteria2ObfsPassword.String,
+		UpMbps:                 in.UpMbps.Int32,
+		DownMbps:               in.DownMbps.Int32,
+		CongestionControl:      in.CongestionControl.String,
+		ZeroRTTHandshake:       in.ZeroRttHandshake,
+		SnellPSK:               in.SnellPsk.String,
+		SnellV6Mode:            in.SnellV6Mode.String,
+		HysteriaObfsPassword:   in.HysteriaObfsPassword.String,
+		ShadowTLSInnerMethod:   in.ShadowtlsInnerMethod.String,
+		ShadowTLSInnerPassword: in.ShadowtlsInnerPassword.String,
 	}
 }
 
@@ -276,6 +289,10 @@ type inboundSyncEntry struct {
 
 	// See inboundDetailDTO's own doc comment on this field.
 	HysteriaObfsPassword string `json:"hysteria_obfs_password,omitempty"`
+
+	// See inboundDetailDTO's own doc comment on these two fields.
+	ShadowTLSInnerMethod   string `json:"shadowtls_inner_method,omitempty"`
+	ShadowTLSInnerPassword string `json:"shadowtls_inner_password,omitempty"`
 }
 
 // syncInboundEntries is the real work behind POST /api/inbounds/sync:
@@ -331,6 +348,21 @@ func (h *Handler) syncInboundEntries(ctx context.Context, entries []inboundSyncE
 				return created, &inboundValidationError{"inbound " + e.Tag + ": invalid snell_v6_mode " + e.SnellV6Mode}
 			}
 		}
+		if e.Protocol == "shadowtls" {
+			// See internal/nodecore/shadowtls's own doc comment for why
+			// this protocol alone needs a second, inbound-level secret in
+			// addition to each user's own ShadowTLS password - checked
+			// here so a bad one is a clean 422, not a node that fails to
+			// start.
+			keyLen, ok := shadowTLSInnerKeyLength[e.ShadowTLSInnerMethod]
+			if !ok {
+				return created, &inboundValidationError{"inbound " + e.Tag + ": invalid shadowtls_inner_method " + e.ShadowTLSInnerMethod}
+			}
+			psk, err := base64.StdEncoding.DecodeString(e.ShadowTLSInnerPassword)
+			if err != nil || len(psk) < keyLen {
+				return created, &inboundValidationError{fmt.Sprintf("inbound %s: shadowtls_inner_password must be a base64-encoded key of at least %d bytes for method %s", e.Tag, keyLen, e.ShadowTLSInnerMethod)}
+			}
+		}
 	}
 
 	for _, e := range entries {
@@ -352,22 +384,24 @@ func (h *Handler) syncInboundEntries(ctx context.Context, entries []inboundSyncE
 
 		row, err := h.store.Queries.UpsertInbound(ctx, generated.UpsertInboundParams{
 			Tag: e.Tag, Protocol: e.Protocol, Network: network, HeaderType: textFromPtr(normalizeZeroString(&e.HeaderType)),
-			Security:              security,
-			RealityPrivateKey:     textFromPtr(normalizeZeroString(&e.RealityPrivateKey)),
-			RealityShortIds:       e.RealityShortIDs,
-			RealityServerName:     textFromPtr(normalizeZeroString(&e.RealityServerName)),
-			RealityServerPort:     realityPortToPg(e.RealityServerPort),
-			TlsCertificate:        textFromPtr(normalizeZeroString(&e.TLSCertificate)),
-			TlsKey:                textFromPtr(normalizeZeroString(&e.TLSKey)),
-			TlsServerName:         textFromPtr(normalizeZeroString(&e.TLSServerName)),
-			Hysteria2ObfsPassword: textFromPtr(normalizeZeroString(&e.Hysteria2ObfsPassword)),
-			UpMbps:                pgInt4FromZero(e.UpMbps),
-			DownMbps:              pgInt4FromZero(e.DownMbps),
-			CongestionControl:     textFromPtr(normalizeZeroString(&e.CongestionControl)),
-			ZeroRttHandshake:      e.ZeroRTTHandshake,
-			SnellPsk:              textFromPtr(normalizeZeroString(&e.SnellPSK)),
-			SnellV6Mode:           textFromPtr(normalizeZeroString(&e.SnellV6Mode)),
-			HysteriaObfsPassword:  textFromPtr(normalizeZeroString(&e.HysteriaObfsPassword)),
+			Security:               security,
+			RealityPrivateKey:      textFromPtr(normalizeZeroString(&e.RealityPrivateKey)),
+			RealityShortIds:        e.RealityShortIDs,
+			RealityServerName:      textFromPtr(normalizeZeroString(&e.RealityServerName)),
+			RealityServerPort:      realityPortToPg(e.RealityServerPort),
+			TlsCertificate:         textFromPtr(normalizeZeroString(&e.TLSCertificate)),
+			TlsKey:                 textFromPtr(normalizeZeroString(&e.TLSKey)),
+			TlsServerName:          textFromPtr(normalizeZeroString(&e.TLSServerName)),
+			Hysteria2ObfsPassword:  textFromPtr(normalizeZeroString(&e.Hysteria2ObfsPassword)),
+			UpMbps:                 pgInt4FromZero(e.UpMbps),
+			DownMbps:               pgInt4FromZero(e.DownMbps),
+			CongestionControl:      textFromPtr(normalizeZeroString(&e.CongestionControl)),
+			ZeroRttHandshake:       e.ZeroRTTHandshake,
+			SnellPsk:               textFromPtr(normalizeZeroString(&e.SnellPSK)),
+			SnellV6Mode:            textFromPtr(normalizeZeroString(&e.SnellV6Mode)),
+			HysteriaObfsPassword:   textFromPtr(normalizeZeroString(&e.HysteriaObfsPassword)),
+			ShadowtlsInnerMethod:   textFromPtr(normalizeZeroString(&e.ShadowTLSInnerMethod)),
+			ShadowtlsInnerPassword: textFromPtr(normalizeZeroString(&e.ShadowTLSInnerPassword)),
 		})
 		if err != nil {
 			return created, fmt.Errorf("could not sync inbound %s: %w", e.Tag, err)
@@ -479,6 +513,32 @@ func (h *Handler) handleCreateInbound(c *gin.Context) {
 		}
 		e.SnellPSK = psk
 	}
+	if e.Protocol == "shadowtls" {
+		// Same one-click spirit as the snell_psk generation above: an
+		// admin adding a shadowtls inbound through the dashboard's "+ Add
+		// inbound" form shouldn't have to pick an AEAD method or hand-craft
+		// a correctly-sized base64 key for the embedded inner layer (see
+		// internal/nodecore/shadowtls's own doc comment) - defaults to the
+		// AES-GCM 2022 method (hardware-accelerated on effectively every
+		// modern server CPU) with a freshly generated key of exactly the
+		// right length, unless the caller already supplied its own.
+		if e.ShadowTLSInnerMethod == "" {
+			e.ShadowTLSInnerMethod = defaultShadowTLSInnerMethod
+		}
+		if e.ShadowTLSInnerPassword == "" {
+			keyLen, ok := shadowTLSInnerKeyLength[e.ShadowTLSInnerMethod]
+			if !ok {
+				c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": "invalid shadowtls_inner_method " + e.ShadowTLSInnerMethod})
+				return
+			}
+			key, err := generateBase64Key(keyLen)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"detail": "could not generate an inner key: " + err.Error()})
+				return
+			}
+			e.ShadowTLSInnerPassword = key
+		}
+	}
 
 	if _, err := h.syncInboundEntries(ctx, []inboundSyncEntry{e}); err != nil {
 		var verr *inboundValidationError
@@ -551,7 +611,7 @@ func realityPortToPg(port int32) pgtype.Int4 {
 
 func proxyTypeValid(protocol string) bool {
 	switch protocol {
-	case "vmess", "vless", "trojan", "shadowsocks", "hysteria2", "tuic", "snell", "anytls", "hysteria", "naive":
+	case "vmess", "vless", "trojan", "shadowsocks", "hysteria2", "tuic", "snell", "anytls", "hysteria", "naive", "shadowtls":
 		return true
 	}
 	return false
@@ -560,6 +620,38 @@ func proxyTypeValid(protocol string) bool {
 // validSnellV6Modes mirrors internal/nodecore/snell's own accepted
 // snell_v6_mode values (sing-snell's snellv6.ParseMode).
 var validSnellV6Modes = map[string]bool{"default": true, "unshaped": true, "unsafe-raw": true}
+
+// defaultShadowTLSInnerMethod is handleCreateInbound's one-click default
+// for a shadowtls inbound's embedded inner layer - AES-GCM over the
+// ChaCha20 2022 method, since AES-NI is available on effectively every
+// modern server CPU.
+const defaultShadowTLSInnerMethod = "2022-blake3-aes-128-gcm"
+
+// shadowTLSInnerKeyLength maps each shadowsocks-2022 AEAD method this
+// fork's embedded inner layer accepts to its required PSK byte length
+// (shadowaead_2022's own keySaltLength) - mirrors
+// internal/nodecore/shadowtls's own doc comment on why that layer is
+// single-key shadowsocks-2022, not the classic multi-user AEAD family
+// internal/nodecore/shadowsocks already serves.
+var shadowTLSInnerKeyLength = map[string]int{
+	"2022-blake3-aes-128-gcm":       16,
+	"2022-blake3-aes-256-gcm":       32,
+	"2022-blake3-chacha20-poly1305": 32,
+}
+
+// generateBase64Key is the shadowtls_inner_password equivalent of
+// generateReportSecret (node.go) - a fresh random secret, sized to
+// whichever shadowsocks-2022 method it will key rather than a fixed
+// length, and base64 rather than hex since that is the wire/config
+// encoding every shadowsocks-2022 client and this panel's own subscription
+// generation (internal/subscription) already expect.
+func generateBase64Key(n int) (string, error) {
+	raw := make([]byte, n)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(raw), nil
+}
 
 // pruneOrphanedProxies deletes every proxy whose protocol no longer has any
 // inbound at all - see PruneOrphanedProxies's own doc comment for why this

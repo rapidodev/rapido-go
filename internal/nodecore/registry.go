@@ -38,6 +38,7 @@ import (
 	forkedhysteria "github.com/legendary1205/rapido-go/internal/nodecore/hysteria"
 	forkedhysteria2 "github.com/legendary1205/rapido-go/internal/nodecore/hysteria2"
 	forkednaive "github.com/legendary1205/rapido-go/internal/nodecore/naive"
+	forkedshadowtls "github.com/legendary1205/rapido-go/internal/nodecore/shadowtls"
 	forkedshadowsocks "github.com/legendary1205/rapido-go/internal/nodecore/shadowsocks"
 	forkedsnell "github.com/legendary1205/rapido-go/internal/nodecore/snell"
 	forkedtrojan "github.com/legendary1205/rapido-go/internal/nodecore/trojan"
@@ -65,6 +66,7 @@ func InboundRegistry() *inbound.Registry {
 	forkedanytls.RegisterInbound(registry)
 	forkedhysteria.RegisterInbound(registry)
 	forkednaive.RegisterInbound(registry)
+	forkedshadowtls.RegisterInbound(registry)
 	return registry
 }
 

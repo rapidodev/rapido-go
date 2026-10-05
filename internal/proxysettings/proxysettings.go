@@ -26,11 +26,12 @@ const (
 	AnyTLS      ProxyType = "anytls"
 	Hysteria    ProxyType = "hysteria"
 	Naive       ProxyType = "naive"
+	ShadowTLS   ProxyType = "shadowtls"
 )
 
 func (t ProxyType) Valid() bool {
 	switch t {
-	case VMess, VLESS, Trojan, Shadowsocks, Hysteria2, TUIC, Snell, AnyTLS, Hysteria, Naive:
+	case VMess, VLESS, Trojan, Shadowsocks, Hysteria2, TUIC, Snell, AnyTLS, Hysteria, Naive, ShadowTLS:
 		return true
 	}
 	return false
@@ -68,6 +69,7 @@ type Settings struct {
 	AnyTLS      *AnyTLSSettings
 	Hysteria    *HysteriaSettings
 	Naive       *NaiveSettings
+	ShadowTLS   *ShadowTLSSettings
 }
 
 type VMessSettings struct {
@@ -132,6 +134,14 @@ type HysteriaSettings struct {
 // (see internal/nodecore/naive's own doc comment), so the only real secret
 // left to generate here is the password half of that pair.
 type NaiveSettings struct {
+	Password string `json:"password"`
+}
+
+// ShadowTLSSettings has no flow/method sibling, same as Hysteria2Settings -
+// ShadowTLS v3's own auth is a single password per user (see
+// internal/nodecore/shadowtls's own doc comment on why this panel only
+// ever runs v3).
+type ShadowTLSSettings struct {
 	Password string `json:"password"`
 }
 
@@ -313,6 +323,18 @@ func parse(proxyType ProxyType, raw json.RawMessage, coerceVisionFlow bool) (Set
 		}
 		return Settings{Type: Naive, Naive: &s}, nil
 
+	case ShadowTLS:
+		var s ShadowTLSSettings
+		if hasSettings(raw) {
+			if err := json.Unmarshal(raw, &s); err != nil {
+				return Settings{}, fmt.Errorf("proxysettings: invalid shadowtls settings: %w", err)
+			}
+		}
+		if s.Password == "" {
+			s.Password = randomPassword()
+		}
+		return Settings{Type: ShadowTLS, ShadowTLS: &s}, nil
+
 	default:
 		return Settings{}, fmt.Errorf("proxysettings: unknown proxy type %q", proxyType)
 	}
@@ -356,6 +378,8 @@ func (s Settings) MarshalJSON() ([]byte, error) {
 		return json.Marshal(s.Hysteria)
 	case Naive:
 		return json.Marshal(s.Naive)
+	case ShadowTLS:
+		return json.Marshal(s.ShadowTLS)
 	default:
 		return nil, fmt.Errorf("proxysettings: unknown proxy type %q", s.Type)
 	}
@@ -387,5 +411,7 @@ func (s *Settings) Revoke() {
 		s.Hysteria.AuthString = randomPassword()
 	case Naive:
 		s.Naive.Password = randomPassword()
+	case ShadowTLS:
+		s.ShadowTLS.Password = randomPassword()
 	}
 }

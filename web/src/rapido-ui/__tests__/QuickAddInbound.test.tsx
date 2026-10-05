@@ -97,18 +97,18 @@ describe("QuickAddInboundModal", () => {
 });
 
 describe("AddAllProtocolsButton", () => {
-  it("creates all 9 bulk-eligible protocols sequentially on distinct ports and reports the count", async () => {
+  it("creates all 10 bulk-eligible protocols sequentially on distinct ports and reports the count", async () => {
     createMutateAsync.mockResolvedValue({});
     render(<AddAllProtocolsButton onDone={vi.fn()} />);
     click(screen.getByRole("button", { name: /Add all protocols/ }));
 
-    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(9));
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(10));
 
     const ports = createMutateAsync.mock.calls.map((c) => (c[0] as CreateInboundPayload).port);
-    expect(new Set(ports).size).toBe(9); // every port distinct
+    expect(new Set(ports).size).toBe(10); // every port distinct
     expect(ports).toEqual([...ports].sort((a, b) => a - b)); // sequential, not out of order
 
-    expect(await screen.findByText(/9 created/)).toBeInTheDocument();
+    expect(await screen.findByText(/10 created/)).toBeInTheDocument();
   });
 
   it("reports per-protocol failures without stopping the rest", async () => {
@@ -120,8 +120,8 @@ describe("AddAllProtocolsButton", () => {
     render(<AddAllProtocolsButton onDone={vi.fn()} />);
     click(screen.getByRole("button", { name: /Add all protocols/ }));
 
-    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(9));
-    expect(await screen.findByText(/8 created/)).toBeInTheDocument();
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(10));
+    expect(await screen.findByText(/9 created/)).toBeInTheDocument();
     expect(screen.getByText(/port in use/)).toBeInTheDocument();
   });
 
@@ -131,7 +131,7 @@ describe("AddAllProtocolsButton", () => {
     render(<AddAllProtocolsButton onDone={onDone} />);
     click(screen.getByRole("button", { name: /Add all protocols/ }));
 
-    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(9));
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(10));
     expect(onDone).not.toHaveBeenCalled();
   });
 });

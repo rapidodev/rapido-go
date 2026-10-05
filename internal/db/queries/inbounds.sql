@@ -9,8 +9,9 @@ INSERT INTO inbounds (
     reality_private_key, reality_short_ids, reality_server_name, reality_server_port,
     tls_certificate, tls_key, tls_server_name,
     hysteria2_obfs_password, up_mbps, down_mbps, congestion_control, zero_rtt_handshake,
-    snell_psk, snell_v6_mode, hysteria_obfs_password
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+    snell_psk, snell_v6_mode, hysteria_obfs_password,
+    shadowtls_inner_method, shadowtls_inner_password
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
 ON CONFLICT (tag) DO UPDATE SET
     protocol = EXCLUDED.protocol,
     network = EXCLUDED.network,
@@ -30,7 +31,9 @@ ON CONFLICT (tag) DO UPDATE SET
     down_mbps = EXCLUDED.down_mbps,
     congestion_control = EXCLUDED.congestion_control,
     zero_rtt_handshake = EXCLUDED.zero_rtt_handshake,
-    hysteria_obfs_password = EXCLUDED.hysteria_obfs_password
+    hysteria_obfs_password = EXCLUDED.hysteria_obfs_password,
+    shadowtls_inner_method = EXCLUDED.shadowtls_inner_method,
+    shadowtls_inner_password = EXCLUDED.shadowtls_inner_password
 RETURNING *, (xmax = 0) AS inserted;
 
 -- name: GetInboundByTag :one

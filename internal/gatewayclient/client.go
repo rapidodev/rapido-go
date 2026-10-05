@@ -163,6 +163,11 @@ type EffectiveHost struct {
 	// subscription.EffectiveInbound's own doc comment.
 	HysteriaObfsPassword string `json:"hysteria_obfs_password"`
 
+	// Only meaningful for a peer host whose Protocol is "shadowtls" - see
+	// subscription.EffectiveInbound's own doc comment.
+	ShadowTLSInnerMethod   string `json:"shadowtls_inner_method"`
+	ShadowTLSInnerPassword string `json:"shadowtls_inner_password"`
+
 	// Remark is the raw, unformatted template ({USERNAME} etc. still
 	// literal) - the RECEIVING panel formats it with its own user's own
 	// variables, never this peer's, since {DATA_USAGE}/{EXPIRE_DATE}/etc.

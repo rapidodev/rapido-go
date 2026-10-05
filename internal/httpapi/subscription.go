@@ -242,9 +242,9 @@ func (h *Handler) writeSubscription(c *gin.Context, user generated.User, format 
 	var err error
 	switch format {
 	case "sing-box":
-		var outbounds []map[string]any
-		if outbounds, err = h.buildUserSingBoxOutbounds(ctx, user); err == nil {
-			raw, err = subscription.SingBoxConfig(outbounds)
+		var outbounds, hidden []map[string]any
+		if outbounds, hidden, err = h.buildUserSingBoxOutbounds(ctx, user); err == nil {
+			raw, err = subscription.SingBoxConfig(outbounds, hidden)
 		}
 	case "clash", "clash-meta":
 		raw, err = h.buildUserClashConfig(ctx, user, format == "clash-meta")
@@ -401,6 +401,7 @@ func (h *Handler) forEachUserHost(ctx context.Context, user generated.User, fn f
 			CongestionControl: ph.host.CongestionControl, ZeroRTTHandshake: ph.host.ZeroRTTHandshake,
 			SnellPSK: ph.host.SnellPSK, SnellV6Mode: ph.host.SnellV6Mode,
 			HysteriaObfsPassword: ph.host.HysteriaObfsPassword,
+			ShadowTLSInnerMethod: ph.host.ShadowTLSInnerMethod, ShadowTLSInnerPassword: ph.host.ShadowTLSInnerPassword,
 		}
 		fn(ph.host.Protocol, settings, remark, address, eff)
 	}
@@ -422,15 +423,15 @@ func (h *Handler) buildUserLinks(ctx context.Context, user generated.User) ([]st
 	return links, err
 }
 
-func (h *Handler) buildUserSingBoxOutbounds(ctx context.Context, user generated.User) ([]map[string]any, error) {
-	var outbounds []map[string]any
-	err := h.forEachUserHost(ctx, user, func(protocol string, settings proxysettings.Settings, remark, address string, eff subscription.EffectiveInbound) {
-		out, err := subscription.SingBoxOutbound(remark, address, eff, settings, user.Username)
+func (h *Handler) buildUserSingBoxOutbounds(ctx context.Context, user generated.User) (outbounds, hidden []map[string]any, err error) {
+	err = h.forEachUserHost(ctx, user, func(protocol string, settings proxysettings.Settings, remark, address string, eff subscription.EffectiveInbound) {
+		out, extra, err := subscription.SingBoxOutbound(remark, address, eff, settings, user.Username)
 		if err == nil && out != nil {
 			outbounds = append(outbounds, out)
+			hidden = append(hidden, extra...)
 		}
 	})
-	return outbounds, err
+	return outbounds, hidden, err
 }
 
 func (h *Handler) buildUserClashConfig(ctx context.Context, user generated.User, isMeta bool) ([]byte, error) {
