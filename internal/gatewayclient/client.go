@@ -158,6 +158,11 @@ type EffectiveHost struct {
 	SnellPSK              string `json:"snell_psk"`
 	SnellV6Mode           string `json:"snell_v6_mode"`
 
+	// Only meaningful for a peer host whose Protocol is "hysteria" (v1,
+	// distinct from hysteria2 above) - see
+	// subscription.EffectiveInbound's own doc comment.
+	HysteriaObfsPassword string `json:"hysteria_obfs_password"`
+
 	// Remark is the raw, unformatted template ({USERNAME} etc. still
 	// literal) - the RECEIVING panel formats it with its own user's own
 	// variables, never this peer's, since {DATA_USAGE}/{EXPIRE_DATE}/etc.

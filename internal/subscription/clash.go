@@ -13,9 +13,9 @@ import (
 // .make_node/.add. Returns nil, nil for a combination Clash can't represent -
 // matching the Python original's silent exclusion, not an error: kcp/
 // splithttp/xhttp always (no Clash transport maps to them), plain vless,
-// hysteria2 and tuic on non-meta Clash (the base protocol has none of the
-// three at all), and reality security on non-meta Clash (no reality-opts
-// field exists there).
+// hysteria2, tuic and hysteria (v1) on non-meta Clash (the base protocol has
+// none of the three at all), and reality security on non-meta Clash (no
+// reality-opts field exists there).
 //
 // Snell is never returned, meta or not - not a scope cut like the others
 // above, an actual incompatibility: Clash Meta's own "snell" proxy type
@@ -44,9 +44,9 @@ func ClashProxy(remark, address string, in EffectiveInbound, settings proxysetti
 	if !isMeta && settings.Type == proxysettings.VLESS {
 		return nil, nil
 	}
-	// hysteria2/tuic are Clash Meta additions - plain Clash has never
-	// supported either.
-	if !isMeta && (settings.Type == proxysettings.Hysteria2 || settings.Type == proxysettings.TUIC) {
+	// hysteria2/tuic/hysteria(v1) are Clash Meta additions - plain Clash has
+	// never supported any of the three.
+	if !isMeta && (settings.Type == proxysettings.Hysteria2 || settings.Type == proxysettings.TUIC || settings.Type == proxysettings.Hysteria) {
 		return nil, nil
 	}
 
@@ -122,6 +122,29 @@ func ClashProxy(remark, address string, in EffectiveInbound, settings proxysetti
 		node["udp-relay-mode"] = "native"
 		if in.ZeroRTTHandshake {
 			node["reduce-rtt"] = true
+		}
+		return node, nil
+	case proxysettings.Hysteria:
+		// Also self-contained, same reason as hysteria2 above (mandatory
+		// TLS, no classic tls/network block) - see
+		// internal/nodecore/hysteria's own doc comment.
+		node["type"] = "hysteria"
+		node["auth-str"] = settings.Hysteria.AuthString
+		node["sni"] = in.SNI
+		if in.AllowInsecure {
+			node["skip-cert-verify"] = true
+		}
+		if in.ALPN != "" {
+			node["alpn"] = strings.Split(in.ALPN, ",")
+		}
+		if in.UpMbps > 0 {
+			node["up"] = in.UpMbps
+		}
+		if in.DownMbps > 0 {
+			node["down"] = in.DownMbps
+		}
+		if in.HysteriaObfsPassword != "" {
+			node["obfs"] = in.HysteriaObfsPassword
 		}
 		return node, nil
 	default:

@@ -23,30 +23,55 @@ import { Select } from "rapido-ui/Select";
 // stays a job for the full JSON editor/Xray import on this same page, not
 // this quick-create surface.
 
-export type ProtocolOption = "vmess" | "vless" | "trojan" | "shadowsocks" | "hysteria2" | "tuic" | "anytls" | "snell";
+export type ProtocolOption =
+  | "vmess"
+  | "vless"
+  | "trojan"
+  | "shadowsocks"
+  | "hysteria2"
+  | "tuic"
+  | "anytls"
+  | "snell"
+  | "hysteria";
 
 // What security a protocol can carry, and the sensible unattended default
-// for the bulk action. hysteria2/tuic/anytls are TLS-mandatory at the
-// sing-box level (syncInboundEntries's own check); snell has no TLS concept
-// at all (internal/nodecore/snell's own doc comment) - both ends of this
-// table are "forced", not just "defaulted", which is why PROTOCOLS also
-// carries whether the single-create form's own security choice is locked.
-const PROTOCOLS: { value: ProtocolOption; security: "none" | "tls"; securityLocked: boolean }[] = [
-  { value: "vmess", security: "tls", securityLocked: false },
-  { value: "vless", security: "tls", securityLocked: false },
-  { value: "trojan", security: "tls", securityLocked: false },
-  { value: "shadowsocks", security: "none", securityLocked: false },
-  { value: "hysteria2", security: "tls", securityLocked: true },
-  { value: "tuic", security: "tls", securityLocked: true },
-  { value: "anytls", security: "tls", securityLocked: true },
-  { value: "snell", security: "none", securityLocked: true },
+// for the bulk action. hysteria2/tuic/anytls/hysteria are TLS-mandatory at
+// the sing-box level (syncInboundEntries's own check); snell has no TLS
+// concept at all (internal/nodecore/snell's own doc comment) - both ends of
+// this table are "forced", not just "defaulted", which is why PROTOCOLS
+// also carries whether the single-create form's own security choice is
+// locked. bulkEligible is false only for hysteria (v1): unlike every other
+// field this form auto-generates (a cert, a PSK), its required up_mbps/
+// down_mbps have no "generate and forget" default that still makes sense -
+// a wrong guess makes the protocol connect but be unusably slow/broken, not
+// obviously rejected - so the unattended bulk action leaves it out and only
+// the single-create form (where the admin types real numbers) offers it.
+const PROTOCOLS: { value: ProtocolOption; security: "none" | "tls"; securityLocked: boolean; bulkEligible: boolean }[] = [
+  { value: "vmess", security: "tls", securityLocked: false, bulkEligible: true },
+  { value: "vless", security: "tls", securityLocked: false, bulkEligible: true },
+  { value: "trojan", security: "tls", securityLocked: false, bulkEligible: true },
+  { value: "shadowsocks", security: "none", securityLocked: false, bulkEligible: true },
+  { value: "hysteria2", security: "tls", securityLocked: true, bulkEligible: true },
+  { value: "tuic", security: "tls", securityLocked: true, bulkEligible: true },
+  { value: "anytls", security: "tls", securityLocked: true, bulkEligible: true },
+  { value: "snell", security: "none", securityLocked: true, bulkEligible: true },
+  { value: "hysteria", security: "tls", securityLocked: true, bulkEligible: false },
 ];
+
+const BULK_PROTOCOLS = PROTOCOLS.filter((p) => p.bulkEligible);
 
 const protocolMeta = (p: ProtocolOption) => PROTOCOLS.find((e) => e.value === p)!;
 
 // ---------------------------------------------------------------------------
 
-type FormValues = { tag: string; protocol: ProtocolOption; port: string; security: "none" | "tls" };
+type FormValues = {
+  tag: string;
+  protocol: ProtocolOption;
+  port: string;
+  security: "none" | "tls";
+  upMbps: string;
+  downMbps: string;
+};
 
 const defaultTag = (protocol: ProtocolOption) => `${protocol}-main`;
 
@@ -60,6 +85,8 @@ export const QuickAddInboundModal: FC<{ onClose: () => void; onCreated: () => vo
     protocol: "vmess",
     port: "",
     security: "tls",
+    upMbps: "",
+    downMbps: "",
   });
   const [error, setError] = useState("");
   const createInbound = useCreateInboundMutation();
@@ -78,7 +105,15 @@ export const QuickAddInboundModal: FC<{ onClose: () => void; onCreated: () => vo
   };
 
   const port = Number(values.port);
-  const canSubmit = !!values.tag.trim() && Number.isInteger(port) && port > 0 && port <= 65535;
+  const upMbps = Number(values.upMbps);
+  const downMbps = Number(values.downMbps);
+  const isHysteria = values.protocol === "hysteria";
+  const canSubmit =
+    !!values.tag.trim() &&
+    Number.isInteger(port) &&
+    port > 0 &&
+    port <= 65535 &&
+    (!isHysteria || (upMbps > 0 && downMbps > 0));
 
   const submit = () => {
     setError("");
@@ -87,6 +122,7 @@ export const QuickAddInboundModal: FC<{ onClose: () => void; onCreated: () => vo
       protocol: values.protocol,
       port,
       security: values.security,
+      ...(isHysteria ? { up_mbps: upMbps, down_mbps: downMbps } : {}),
     };
     createInbound.mutate(body, {
       onSuccess: onCreated,
@@ -149,6 +185,32 @@ export const QuickAddInboundModal: FC<{ onClose: () => void; onCreated: () => vo
           </span>
         </label>
 
+        {isHysteria && (
+          <div className="grid grid-cols-2 gap-3">
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-rapido-muted">{t("rapido.inbounds.quickAdd.upMbps")}</span>
+              <Input
+                dir="ltr"
+                type="number"
+                inputMode="numeric"
+                value={values.upMbps}
+                onChange={(e) => setValues((v) => ({ ...v, upMbps: e.target.value }))}
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-rapido-muted">{t("rapido.inbounds.quickAdd.downMbps")}</span>
+              <Input
+                dir="ltr"
+                type="number"
+                inputMode="numeric"
+                value={values.downMbps}
+                onChange={(e) => setValues((v) => ({ ...v, downMbps: e.target.value }))}
+              />
+            </label>
+            <span className="col-span-2 text-xs text-rapido-muted">{t("rapido.inbounds.quickAdd.bandwidthHint")}</span>
+          </div>
+        )}
+
         {error && (
           <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">
             {error}
@@ -194,8 +256,8 @@ export const AddAllProtocolsButton: FC<{ onDone: () => void }> = ({ onDone }) =>
     // one protocol from racing the others - plus it means the result list
     // below fills in the same order the protocols are declared in, not
     // whatever order responses happened to land in.
-    for (let i = 0; i < PROTOCOLS.length; i++) {
-      const p = PROTOCOLS[i];
+    for (let i = 0; i < BULK_PROTOCOLS.length; i++) {
+      const p = BULK_PROTOCOLS[i];
       const body: CreateInboundPayload = {
         tag: defaultTag(p.value),
         protocol: p.value,

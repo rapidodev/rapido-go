@@ -146,6 +146,12 @@ type inboundDetailDTO struct {
 	// separate, inbound-level secret from any one user's own credential.
 	SnellPSK    string `json:"snell_psk,omitempty"`
 	SnellV6Mode string `json:"snell_v6_mode,omitempty"`
+
+	// HysteriaObfsPassword only applies to protocol="hysteria" (v1, not
+	// hysteria2) - a single shared XPlus obfuscation password, simpler than
+	// hysteria2's own salamander/gecko obfs. See internal/nodecore/hysteria's
+	// own doc comment.
+	HysteriaObfsPassword string `json:"hysteria_obfs_password,omitempty"`
 }
 
 func toInboundDetailDTO(in generated.Inbound) inboundDetailDTO {
@@ -168,6 +174,7 @@ func toInboundDetailDTO(in generated.Inbound) inboundDetailDTO {
 		ZeroRTTHandshake:      in.ZeroRttHandshake,
 		SnellPSK:              in.SnellPsk.String,
 		SnellV6Mode:           in.SnellV6Mode.String,
+		HysteriaObfsPassword:  in.HysteriaObfsPassword.String,
 	}
 }
 
@@ -266,6 +273,9 @@ type inboundSyncEntry struct {
 	ZeroRTTHandshake      bool   `json:"zero_rtt_handshake,omitempty"`
 	SnellPSK              string `json:"snell_psk,omitempty"`
 	SnellV6Mode           string `json:"snell_v6_mode,omitempty"`
+
+	// See inboundDetailDTO's own doc comment on this field.
+	HysteriaObfsPassword string `json:"hysteria_obfs_password,omitempty"`
 }
 
 // syncInboundEntries is the real work behind POST /api/inbounds/sync:
@@ -289,12 +299,26 @@ func (h *Handler) syncInboundEntries(ctx context.Context, entries []inboundSyncE
 		// anytls joins this same check for the same reason as hysteria2/tuic
 		// above (C.ErrTLSRequired at the sing-box level) - see
 		// internal/nodecore/anytls's own doc comment on why TLS is mandatory
-		// here rather than admin-optional like sing-box's own inbound.
-		if (e.Protocol == "hysteria2" || e.Protocol == "tuic" || e.Protocol == "anytls") && e.Security != "tls" {
+		// here rather than admin-optional like sing-box's own inbound. hysteria
+		// (v1) joins it too - sing-box's own NewInbound returns C.ErrTLSRequired
+		// for it exactly like hysteria2/tuic/anytls do.
+		if (e.Protocol == "hysteria2" || e.Protocol == "tuic" || e.Protocol == "anytls" || e.Protocol == "hysteria") && e.Security != "tls" {
 			return created, &inboundValidationError{"inbound " + e.Tag + ": security must be \"tls\" for protocol " + e.Protocol}
 		}
 		if e.Protocol == "tuic" && e.CongestionControl != "" && !validCongestionControl[e.CongestionControl] {
 			return created, &inboundValidationError{"inbound " + e.Tag + ": invalid congestion_control " + e.CongestionControl}
+		}
+		// Unlike hysteria2 (defaults to BBR, up_mbps/down_mbps are just an
+		// optional hint - see migration 00018's own comment), Hysteria v1 has
+		// no congestion-control fallback and genuinely cannot function
+		// without a declared bandwidth ceiling - sing-quic/hysteria.Service
+		// divides by these to pace sends, so a missing value here is a
+		// "connects but is unusably slow/broken" bug at runtime, not an
+		// obviously-rejected request. Caught here as a clean 422 instead,
+		// matching Core Config's own outbound-side requirement for the same
+		// protocol.
+		if e.Protocol == "hysteria" && (e.UpMbps <= 0 || e.DownMbps <= 0) {
+			return created, &inboundValidationError{"inbound " + e.Tag + ": up_mbps and down_mbps must both be > 0 for protocol hysteria"}
 		}
 		if e.Protocol == "snell" {
 			// sing-snell's own v6 server rejects a PSK outside this range
@@ -343,6 +367,7 @@ func (h *Handler) syncInboundEntries(ctx context.Context, entries []inboundSyncE
 			ZeroRttHandshake:      e.ZeroRTTHandshake,
 			SnellPsk:              textFromPtr(normalizeZeroString(&e.SnellPSK)),
 			SnellV6Mode:           textFromPtr(normalizeZeroString(&e.SnellV6Mode)),
+			HysteriaObfsPassword:  textFromPtr(normalizeZeroString(&e.HysteriaObfsPassword)),
 		})
 		if err != nil {
 			return created, fmt.Errorf("could not sync inbound %s: %w", e.Tag, err)
@@ -389,7 +414,7 @@ func (h *Handler) handleSyncInbounds(c *gin.Context) {
 // as a lookup set here (rather than calling into that function just to
 // learn this) so handleCreateInbound can decide whether to auto-generate a
 // certificate before validation ever runs.
-var tlsRequiredProtocols = map[string]bool{"hysteria2": true, "tuic": true, "anytls": true}
+var tlsRequiredProtocols = map[string]bool{"hysteria2": true, "tuic": true, "anytls": true, "hysteria": true}
 
 // handleCreateInbound implements POST /api/inbounds (sudo only): a direct,
 // one-shot "add this protocol on this port" creation for the dashboard's
@@ -526,7 +551,7 @@ func realityPortToPg(port int32) pgtype.Int4 {
 
 func proxyTypeValid(protocol string) bool {
 	switch protocol {
-	case "vmess", "vless", "trojan", "shadowsocks", "hysteria2", "tuic", "snell", "anytls":
+	case "vmess", "vless", "trojan", "shadowsocks", "hysteria2", "tuic", "snell", "anytls", "hysteria":
 		return true
 	}
 	return false

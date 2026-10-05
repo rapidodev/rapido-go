@@ -24,11 +24,12 @@ const (
 	TUIC        ProxyType = "tuic"
 	Snell       ProxyType = "snell"
 	AnyTLS      ProxyType = "anytls"
+	Hysteria    ProxyType = "hysteria"
 )
 
 func (t ProxyType) Valid() bool {
 	switch t {
-	case VMess, VLESS, Trojan, Shadowsocks, Hysteria2, TUIC, Snell, AnyTLS:
+	case VMess, VLESS, Trojan, Shadowsocks, Hysteria2, TUIC, Snell, AnyTLS, Hysteria:
 		return true
 	}
 	return false
@@ -64,6 +65,7 @@ type Settings struct {
 	TUIC        *TUICSettings
 	Snell       *SnellSettings
 	AnyTLS      *AnyTLSSettings
+	Hysteria    *HysteriaSettings
 }
 
 type VMessSettings struct {
@@ -113,6 +115,14 @@ type SnellSettings struct {
 // AnyTLS's own auth is a single password.
 type AnyTLSSettings struct {
 	Password string `json:"password"`
+}
+
+// HysteriaSettings is Hysteria v1's own per-user secret - sing-box's own
+// option.HysteriaUser calls it AuthString (or raw Auth bytes; this panel
+// only ever generates/stores the string form), so the wire field is named
+// to match rather than reusing "password" the way Hysteria2Settings does.
+type HysteriaSettings struct {
+	AuthString string `json:"auth_str"`
 }
 
 // randomPassword mirrors app/utils/system.py's random_password:
@@ -269,6 +279,18 @@ func parse(proxyType ProxyType, raw json.RawMessage, coerceVisionFlow bool) (Set
 		}
 		return Settings{Type: AnyTLS, AnyTLS: &s}, nil
 
+	case Hysteria:
+		var s HysteriaSettings
+		if hasSettings(raw) {
+			if err := json.Unmarshal(raw, &s); err != nil {
+				return Settings{}, fmt.Errorf("proxysettings: invalid hysteria settings: %w", err)
+			}
+		}
+		if s.AuthString == "" {
+			s.AuthString = randomPassword()
+		}
+		return Settings{Type: Hysteria, Hysteria: &s}, nil
+
 	default:
 		return Settings{}, fmt.Errorf("proxysettings: unknown proxy type %q", proxyType)
 	}
@@ -308,6 +330,8 @@ func (s Settings) MarshalJSON() ([]byte, error) {
 		return json.Marshal(s.Snell)
 	case AnyTLS:
 		return json.Marshal(s.AnyTLS)
+	case Hysteria:
+		return json.Marshal(s.Hysteria)
 	default:
 		return nil, fmt.Errorf("proxysettings: unknown proxy type %q", s.Type)
 	}
@@ -335,5 +359,7 @@ func (s *Settings) Revoke() {
 		s.Snell.UserKey = randomPassword()
 	case AnyTLS:
 		s.AnyTLS.Password = randomPassword()
+	case Hysteria:
+		s.Hysteria.AuthString = randomPassword()
 	}
 }

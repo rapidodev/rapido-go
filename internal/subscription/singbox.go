@@ -68,6 +68,17 @@ func SingBoxOutbound(tag, address string, in EffectiveInbound, settings proxyset
 		}
 	case proxysettings.AnyTLS:
 		out["password"] = settings.AnyTLS.Password
+	case proxysettings.Hysteria:
+		out["auth_str"] = settings.Hysteria.AuthString
+		if in.UpMbps > 0 {
+			out["up_mbps"] = in.UpMbps
+		}
+		if in.DownMbps > 0 {
+			out["down_mbps"] = in.DownMbps
+		}
+		if in.HysteriaObfsPassword != "" {
+			out["obfs"] = in.HysteriaObfsPassword
+		}
 	default:
 		return nil, fmt.Errorf("subscription: unknown proxy type %q", settings.Type)
 	}
@@ -85,7 +96,7 @@ func SingBoxOutbound(tag, address string, in EffectiveInbound, settings proxyset
 	// its own idle-session pooling is the closest thing it has) - see this
 	// function's own doc comment on the QUIC pair's mandatory TLS for why
 	// they're otherwise built like every classic TCP-family type above.
-	if settings.Type == proxysettings.Hysteria2 || settings.Type == proxysettings.TUIC || settings.Type == proxysettings.Snell || settings.Type == proxysettings.AnyTLS {
+	if settings.Type == proxysettings.Hysteria2 || settings.Type == proxysettings.TUIC || settings.Type == proxysettings.Snell || settings.Type == proxysettings.AnyTLS || settings.Type == proxysettings.Hysteria {
 		return out, nil
 	}
 	// Python's SingBoxConfiguration.make_outbound sets this block on EVERY

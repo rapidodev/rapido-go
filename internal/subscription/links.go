@@ -30,6 +30,8 @@ func BuildLink(remark, address string, in EffectiveInbound, settings proxysettin
 		return hysteria2Link(remark, address, in, settings.Hysteria2), nil
 	case proxysettings.TUIC:
 		return tuicLink(remark, address, in, settings.TUIC), nil
+	case proxysettings.Hysteria:
+		return hysteriaLink(remark, address, in, settings.Hysteria), nil
 	default:
 		return "", fmt.Errorf("subscription: unknown proxy type %q", settings.Type)
 	}
@@ -181,6 +183,29 @@ func hysteria2Link(remark, address string, in EffectiveInbound, s *proxysettings
 		q.Set("obfs-password", in.Hysteria2ObfsPassword)
 	}
 	return fmt.Sprintf("hysteria2://%s@%s:%d/?%s#%s", url.PathEscape(s.Password), address, in.Port, q.Encode(), url.PathEscape(remark))
+}
+
+// hysteriaLink builds the legacy Hysteria v1 share link - the `hysteria://`
+// scheme the original hysteria project's own CLI (`hysteria url`) and every
+// client that still supports v1 (NekoBox, v2rayN, Shadowrocket, ...)
+// recognize, predating hysteria2's own URI. Unlike hysteria2Link/tuicLink,
+// v1 genuinely needs upmbps/downmbps in the link itself - sing-quic/
+// hysteria's client paces sends off the declared bandwidth (see
+// internal/nodecore/hysteria's own doc comment), it is not an optional
+// hint the way it is for hysteria2.
+func hysteriaLink(remark, address string, in EffectiveInbound, s *proxysettings.HysteriaSettings) string {
+	q := url.Values{
+		"auth": {s.AuthString}, "peer": {in.SNI},
+		"upmbps": {fmt.Sprint(in.UpMbps)}, "downmbps": {fmt.Sprint(in.DownMbps)},
+		"alpn": {"h3"},
+	}
+	if in.AllowInsecure {
+		q.Set("insecure", "1")
+	}
+	if in.HysteriaObfsPassword != "" {
+		q.Set("obfs", in.HysteriaObfsPassword)
+	}
+	return fmt.Sprintf("hysteria://%s:%d?%s#%s", address, in.Port, q.Encode(), url.PathEscape(remark))
 }
 
 func tuicLink(remark, address string, in EffectiveInbound, s *proxysettings.TUICSettings) string {
