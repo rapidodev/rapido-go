@@ -70,6 +70,21 @@ const agoLabelKey = {
   days: "rapido.monitoring.agoDays",
 } as const;
 
+// formatDuration renders a second count the same way Go's own
+// time.Duration.String() does for the whole-second durations this page
+// deals in (e.g. 76 -> "1m16s") - matching exactly what an InfraAlert
+// recovery message already reports, so the dashboard and the bot never
+// disagree on how a downtime is phrased.
+const formatDuration = (totalSeconds: number): string => {
+  const s = Math.max(0, Math.round(totalSeconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `${h}h${m}m${sec}s`;
+  if (m > 0) return `${m}m${sec}s`;
+  return `${sec}s`;
+};
+
 const agoText = (t: (key: string, opts?: Record<string, unknown>) => string, checkedAt: string): string => {
   const seconds = Math.max(0, Math.floor((Date.now() - new Date(checkedAt).getTime()) / 1000));
   if (seconds < 60) return t(agoLabelKey.seconds, { value: seconds });
@@ -349,6 +364,11 @@ const HealthRow: FC<{ tunnel: Tunnel }> = ({ tunnel }) => {
       <Badge tone={tone} title={health?.error || undefined}>
         {label}
       </Badge>
+      {!health?.up && health?.down_for_seconds !== undefined && (
+        <span className="text-rapido-muted" dir="ltr">
+          {t("rapido.tunnels.downFor", { time: formatDuration(health.down_for_seconds) })}
+        </span>
+      )}
       {health?.checked_at && <span className="text-rapido-muted">{agoText(t, health.checked_at)}</span>}
     </div>
   );
@@ -408,6 +428,24 @@ const MetricsSection: FC<{ tunnel: Tunnel }> = ({ tunnel }) => {
           <span className="text-[11px] text-rapido-muted">{t("rapido.tunnels.metricsTraffic")}</span>
           <span className="text-xs" dir="ltr">
             ↓{formatBytes(m.rx_bytes)} / ↑{formatBytes(m.tx_bytes)}
+          </span>
+        </div>
+        <div className="flex flex-col gap-0.5">
+          <span className="text-[11px] text-rapido-muted">{t("rapido.tunnels.metricsConnections")}</span>
+          <span className="text-xs" dir="ltr">
+            {m.connections}
+          </span>
+        </div>
+        <div className="flex flex-col gap-0.5">
+          <span className="text-[11px] text-rapido-muted">{t("rapido.tunnels.metricsLoss")}</span>
+          <span
+            className={classNames("text-xs", m.rx_dropped + m.tx_dropped + m.rx_errors + m.tx_errors > 0 && "text-amber-400")}
+            dir="ltr"
+            title={t("rapido.tunnels.metricsLossBreakdown", {
+              rxDrop: m.rx_dropped, txDrop: m.tx_dropped, rxErr: m.rx_errors, txErr: m.tx_errors,
+            })}
+          >
+            {m.rx_dropped + m.tx_dropped + m.rx_errors + m.tx_errors}
           </span>
         </div>
       </div>

@@ -21,8 +21,42 @@ import (
 	"github.com/legendary1205/rapido-go/internal/hostmetrics"
 )
 
-// ErrMissing is the probe result for an interface that does not exist.
+// ErrMissing is the probe result for an interface that does not exist -
+// this host's own WireGuard config/service never brought it up, so the
+// fault is local ("tunnel"), not the remote exit's.
 var ErrMissing = errors.New("interface not found")
+
+// ErrExitUnreachable is the probe result when iface exists and this host's
+// own internet access is otherwise fine, but a probe bound specifically to
+// iface still fails - the tunnel's own remote exit (almost always a
+// third-party WireGuard provider such as Mullvad) is the one not
+// answering or not forwarding this host's traffic, not anything local.
+var ErrExitUnreachable = errors.New("tunnel exit unreachable")
+
+// ErrNodeOffline is the probe result when this host has no working
+// internet/DNS at all right now - even a probe made over the host's own
+// normal route (not bound to any one tunnel) failed, so every tunnel on
+// this host will report the same fault; it has nothing to do with any one
+// tunnel's own health.
+var ErrNodeOffline = errors.New("node has no internet access")
+
+// domainFor turns a probe's error into the fault domain Status/
+// hostmetrics.TunnelHealth report - see DialProbe's own doc comment for how
+// each is actually distinguished. A probe error this package does not
+// recognize (e.g. a test's own fakeProbe) still needs some answer: it
+// defaults to "exit", the most common real failure before this
+// classification existed at all - treating it as local ("tunnel") would
+// wrongly point an admin at this host's own config.
+func domainFor(err error) string {
+	switch {
+	case errors.Is(err, ErrMissing):
+		return "tunnel"
+	case errors.Is(err, ErrNodeOffline):
+		return "node"
+	default:
+		return "exit"
+	}
+}
 
 // Probe opens one connection through iface and returns how long it took.
 type Probe func(ctx context.Context, iface string) (time.Duration, error)
@@ -63,6 +97,9 @@ type Status struct {
 	CheckedAt time.Time
 	// Since is when Up last changed.
 	Since time.Time
+	// Domain is the fault domain while down ("tunnel"/"exit"/"node" - see
+	// domainFor), empty while up.
+	Domain string
 }
 
 type entry struct {
@@ -206,10 +243,13 @@ func (m *Monitor) record(name string, rtt time.Duration, err error) {
 	wasUp := e.Up
 	e.CheckedAt = now
 
+	downSince := e.Since // only meaningful while down; read before Since is overwritten below
+
 	if err == nil {
 		e.Present = true
 		e.RTT = rtt
 		e.Error = ""
+		e.Domain = ""
 		e.okStreak++
 		e.failStreak = 0
 		if first || (!e.Up && e.okStreak >= m.opts.UpAfter) {
@@ -220,6 +260,7 @@ func (m *Monitor) record(name string, rtt time.Duration, err error) {
 		e.Present = !missing
 		e.RTT = 0
 		e.Error = err.Error()
+		e.Domain = domainFor(err)
 		e.failStreak++
 		e.okStreak = 0
 		if first || missing || (e.Up && e.failStreak >= m.opts.DownAfter) {
@@ -233,9 +274,9 @@ func (m *Monitor) record(name string, rtt time.Duration, err error) {
 	}
 	if !first && e.Up != wasUp {
 		if e.Up {
-			m.opts.Logger.Info("wireguard tunnel recovered", "tunnel", name)
+			m.opts.Logger.Info("wireguard tunnel recovered", "tunnel", name, "down_for", now.Sub(downSince).Round(time.Second).String())
 		} else {
-			m.opts.Logger.Warn("wireguard tunnel is down", "tunnel", name, "error", e.Error)
+			m.opts.Logger.Warn("wireguard tunnel is down", "tunnel", name, "error", e.Error, "domain", e.Domain)
 		}
 	}
 }
@@ -280,7 +321,9 @@ func (m *Monitor) Health() map[string]hostmetrics.TunnelHealth {
 		if !own[name] || !e.Probed {
 			continue
 		}
-		h := hostmetrics.TunnelHealth{Present: e.Present, Up: e.Up, Error: e.Error}
+		h := hostmetrics.TunnelHealth{Present: e.Present, Up: e.Up, Error: e.Error, Domain: e.Domain}
+		since := e.Since
+		h.Since = &since
 		if e.Up && e.RTT > 0 {
 			ms := float64(e.RTT.Microseconds()) / 1000
 			h.ProbeMs = &ms

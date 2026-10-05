@@ -174,7 +174,16 @@ func SubscriptionRevokedMessage(username, byUsername string, belongsTo *string) 
 // user lifecycle - a WireGuard tunnel or an external relay - changing
 // availability. up is the new state. Has no owning-admin concept, like
 // LoginMessage: this is fleet-wide, not tied to one reseller's users.
-func InfraAlertMessage(kind, name, detail string, up bool) string {
+//
+// domain narrows down WHERE a down component's fault most likely sits
+// (see tunnelhealth.DialProbe's own doc comment for how a WireGuard
+// tunnel's probe tells these apart; relayhealth never sets it, since a
+// relay probe has no "exit vs. node" distinction to make) - rendered as a
+// short, actionable sentence via domainReason so an admin does not have
+// to guess whether to go fix this host, its tunnel, or wait on a
+// third-party provider. downFor is the exact time the component was down,
+// only meaningful (non-zero) on a recovery.
+func InfraAlertMessage(kind, name, detail string, up bool, domain string, downFor time.Duration) string {
 	icon, label := "🔴", "Down"
 	if up {
 		icon, label = "🟢", "Recovered"
@@ -185,10 +194,36 @@ func InfraAlertMessage(kind, name, detail string, up bool) string {
 			"<b>%s</b> : <code>%s</code>",
 		icon, label, html.EscapeString(kind), html.EscapeString(name),
 	)
-	if !up && detail != "" {
+	if up {
+		if downFor > 0 {
+			msg += fmt.Sprintf("\n<b>Was down</b> : <code>%s</code>", downFor.Round(time.Second).String())
+		}
+		return msg
+	}
+	if reason := domainReason(domain); reason != "" {
+		msg += fmt.Sprintf("\n<b>Likely cause</b> : <code>%s</code>", html.EscapeString(reason))
+	}
+	if detail != "" {
 		msg += fmt.Sprintf("\n<b>Error</b> : <code>%s</code>", html.EscapeString(detail))
 	}
 	return msg
+}
+
+// domainReason turns a tunnelhealth fault domain into a short, actionable
+// sentence - see InfraAlertMessage's own doc comment. An empty or
+// unrecognized domain (relayhealth's own alerts, which have no such
+// concept) renders nothing extra.
+func domainReason(domain string) string {
+	switch domain {
+	case "tunnel":
+		return "This host's own tunnel interface/config is missing - fix it here, not the remote exit"
+	case "exit":
+		return "This host's own internet is fine - the tunnel's remote exit (e.g. Mullvad) is not responding or not forwarding traffic"
+	case "node":
+		return "This host has no working internet/DNS at all right now - every tunnel on it will show the same fault"
+	default:
+		return ""
+	}
 }
 
 func LoginMessage(username, clientIP, status string) string {

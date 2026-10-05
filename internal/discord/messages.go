@@ -135,16 +135,43 @@ func SubscriptionRevokedPayload(username, byUsername string, belongsTo *string) 
 }
 
 // InfraAlertPayload mirrors telegram.InfraAlertMessage for Discord.
-func InfraAlertPayload(kind, name, detail string, up bool) EmbedPayload {
+// InfraAlertPayload mirrors telegram.InfraAlertMessage's own fields - see
+// that function's doc comment for what domain/downFor mean.
+func InfraAlertPayload(kind, name, detail string, up bool, domain string, downFor time.Duration) EmbedPayload {
 	title, color := ":red_circle: "+kind+" down", 0xff0000
 	if up {
 		title, color = ":green_circle: "+kind+" recovered", 0x00ff00
 	}
 	desc := "**" + kind + ":** " + name
-	if !up && detail != "" {
+	if up {
+		if downFor > 0 {
+			desc += "\n**Was down:** " + downFor.Round(time.Second).String()
+		}
+		return EmbedPayload{Embeds: []Embed{{Title: title, Description: desc, Color: color}}}
+	}
+	if reason := infraDomainReason(domain); reason != "" {
+		desc += "\n**Likely cause:** " + reason
+	}
+	if detail != "" {
 		desc += "\n**Error:** " + detail
 	}
 	return EmbedPayload{Embeds: []Embed{{Title: title, Description: desc, Color: color}}}
+}
+
+// infraDomainReason mirrors telegram.domainReason - kept as a separate
+// copy rather than shared, matching this package's existing standalone
+// (import-free of internal/telegram) message-building style.
+func infraDomainReason(domain string) string {
+	switch domain {
+	case "tunnel":
+		return "This host's own tunnel interface/config is missing - fix it here, not the remote exit"
+	case "exit":
+		return "This host's own internet is fine - the tunnel's remote exit (e.g. Mullvad) is not responding or not forwarding traffic"
+	case "node":
+		return "This host has no working internet/DNS at all right now - every tunnel on it will show the same fault"
+	default:
+		return ""
+	}
 }
 
 // LoginPayload deliberately has no password parameter - see

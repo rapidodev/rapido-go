@@ -187,6 +187,79 @@ func TestTunnelsThatDisappearFromDiscoveryAreForgotten(t *testing.T) {
 	}
 }
 
+// TestDomainClassification is the real reason ErrExitUnreachable/
+// ErrNodeOffline exist: an admin reading an alert needs to know whether a
+// down tunnel is this host's own fault, its tunnel's own remote exit
+// (e.g. Mullvad), or this host having no internet at all right now -
+// three different things to go fix.
+func TestDomainClassification(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"missing interface", ErrMissing, "tunnel"},
+		{"node offline", ErrNodeOffline, "node"},
+		{"exit unreachable", ErrExitUnreachable, "exit"},
+		{"unrecognized error defaults to exit", errors.New("boom"), "exit"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m, fp := newTestMonitor(t, "uk")
+			fp.set("uk", c.err)
+			m.Tick(context.Background())
+			health := m.Health()
+			if got := health["uk"].Domain; got != c.want {
+				t.Errorf("domain = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestDomainClearsOnRecovery(t *testing.T) {
+	m, fp := newTestMonitor(t, "uk")
+	fp.set("uk", ErrExitUnreachable)
+	m.Tick(context.Background())
+	if health := m.Health(); health["uk"].Domain != "exit" {
+		t.Fatalf("setup: want domain=exit while down, got %+v", health["uk"])
+	}
+
+	fp.set("uk", nil)
+	m.Tick(context.Background())
+	m.Tick(context.Background())
+	m.Tick(context.Background())
+	if health := m.Health(); health["uk"].Domain != "" {
+		t.Errorf("domain = %q, want empty once recovered", health["uk"].Domain)
+	}
+}
+
+// TestSinceIsStableWhileDownAndMovesOnlyOnTransition is what lets the
+// panel compute an exact downtime duration later (see
+// internal/hostmetrics/tunnelalerts.go): Since must stay fixed at the
+// original down-start moment across every tick while still down, not
+// creep forward, and must jump only on the tick that actually flips state.
+func TestSinceIsStableWhileDownAndMovesOnlyOnTransition(t *testing.T) {
+	m, fp := newTestMonitor(t, "uk")
+	fp.set("uk", ErrExitUnreachable)
+	m.Tick(context.Background())
+	downSince := *m.Health()["uk"].Since
+
+	time.Sleep(5 * time.Millisecond)
+	m.Tick(context.Background())
+	if got := *m.Health()["uk"].Since; !got.Equal(downSince) {
+		t.Errorf("Since moved across two down ticks: %v -> %v", downSince, got)
+	}
+
+	fp.set("uk", nil)
+	m.Tick(context.Background())
+	m.Tick(context.Background())
+	m.Tick(context.Background())
+	recoveredSince := *m.Health()["uk"].Since
+	if !recoveredSince.After(downSince) {
+		t.Errorf("Since did not move on recovery: still %v", recoveredSince)
+	}
+}
+
 func TestRunStopsWhenContextIsCancelled(t *testing.T) {
 	m, _ := newTestMonitor(t, "uk")
 	m.opts.Interval = 10 * time.Millisecond

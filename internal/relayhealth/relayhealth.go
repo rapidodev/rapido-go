@@ -99,8 +99,11 @@ func DialProbe(ctx context.Context, r Relay) (time.Duration, error) {
 type Lister func(ctx context.Context) ([]Relay, error)
 
 // Alerter is told about a transition - up means the new state (true = just
-// came up, false = just went down).
-type Alerter func(ctx context.Context, r Relay, up bool, detail string)
+// came up, false = just went down). downFor is the exact time the relay
+// was down, only meaningful when up is true (zero on a relay's first-ever
+// sighting already down, where there is no real down period to report -
+// see record's own doc comment).
+type Alerter func(ctx context.Context, r Relay, up bool, detail string, downFor time.Duration)
 
 type Options struct {
 	Prober   Prober
@@ -129,6 +132,12 @@ type entry struct {
 	failStreak int
 	lastError  string
 	checkedAt  time.Time
+	// since is when up last changed - stays fixed across every round the
+	// relay keeps the same state, so a later recovery can compute an
+	// exact downtime duration (newChecked - since) rather than only
+	// "within one poll interval" - same invariant as
+	// internal/tunnelhealth's own Since field.
+	since time.Time
 }
 
 // Status is one relay's current verdict, as Snapshot reports it.
@@ -137,6 +146,10 @@ type Status struct {
 	Up        bool      `json:"up"`
 	Error     string    `json:"error,omitempty"`
 	CheckedAt time.Time `json:"checked_at"`
+	// Since is when Up last changed - lets the dashboard show "down for
+	// Xm" on a relay that is down right now, without waiting for an
+	// alert transition.
+	Since time.Time `json:"since"`
 }
 
 type Monitor struct {
@@ -232,7 +245,7 @@ func (m *Monitor) Snapshot() []Status {
 		if !e.known {
 			continue
 		}
-		out = append(out, Status{ID: id, Up: e.up, Error: e.lastError, CheckedAt: e.checkedAt})
+		out = append(out, Status{ID: id, Up: e.up, Error: e.lastError, CheckedAt: e.checkedAt, Since: e.since})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
@@ -265,6 +278,10 @@ func (m *Monitor) record(ctx context.Context, r Relay, err error) {
 	e.known = true
 	e.checkedAt = time.Now()
 	nowUp := e.up
+	downSince := e.since // only meaningful while down; read before since is overwritten below
+	if nowUp != wasUp || !wasKnown {
+		e.since = e.checkedAt
+	}
 	m.mu.Unlock()
 
 	switch {
@@ -278,8 +295,12 @@ func (m *Monitor) record(ctx context.Context, r Relay, err error) {
 	if err != nil {
 		detail = err.Error()
 	}
+	var downFor time.Duration
+	if nowUp && wasKnown {
+		downFor = e.checkedAt.Sub(downSince)
+	}
 	if nowUp {
-		m.opts.Logger.Info("relay recovered", "relay", r.Name, "host", r.Host, "port", r.Port)
+		m.opts.Logger.Info("relay recovered", "relay", r.Name, "host", r.Host, "port", r.Port, "down_for", downFor.Round(time.Second).String())
 	} else {
 		m.opts.Logger.Warn("relay is down", "relay", r.Name, "host", r.Host, "port", r.Port, "error", detail)
 	}
@@ -289,6 +310,6 @@ func (m *Monitor) record(ctx context.Context, r Relay, err error) {
 	// lands), a relay with no history and a failing probe right now is
 	// exactly the case an admin needs to hear about, not one to wait out.
 	if m.opts.Alert != nil {
-		m.opts.Alert(ctx, r, nowUp, detail)
+		m.opts.Alert(ctx, r, nowUp, detail, downFor)
 	}
 }

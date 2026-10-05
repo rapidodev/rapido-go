@@ -33,6 +33,16 @@ import (
 // counter at the kernel level), which is the simplest real measure of how
 // much this tunnel has actually carried without touching frps's own config
 // (no webServer/dashboard needs enabling on every relay for this).
+//
+// RxDropped/TxDropped/RxErrors/TxErrors are the SAME GRE interface's own
+// cumulative loss counters (/sys/class/net/<iface>/statistics/*_dropped,
+// *_errors) - real packet loss the kernel already tracks for free, not an
+// estimate derived from probe timing. Connections is a live count (not
+// cumulative - there is no "connections ever" counter to read without
+// frps's own dashboard, which this collector deliberately avoids enabling
+// fleet-wide just for this), of ESTABLISHED TCP sockets on the relay whose
+// local port is one of this tunnel's forwarded ports right now - "how many
+// clients are actually using this tunnel at this moment."
 type Metrics struct {
 	CPUPercent  float64   `json:"cpu_percent"`
 	MemUsedMB   int64     `json:"mem_used_mb"`
@@ -41,6 +51,11 @@ type Metrics struct {
 	DiskTotalGB float64   `json:"disk_total_gb"`
 	RxBytes     int64     `json:"rx_bytes"`
 	TxBytes     int64     `json:"tx_bytes"`
+	RxDropped   int64     `json:"rx_dropped"`
+	TxDropped   int64     `json:"tx_dropped"`
+	RxErrors    int64     `json:"rx_errors"`
+	TxErrors    int64     `json:"tx_errors"`
+	Connections int       `json:"connections"`
 	CheckedAt   time.Time `json:"checked_at"`
 }
 
@@ -94,7 +109,8 @@ func ReadMetrics(ctx context.Context, c *cache.Client) (map[int32]Metrics, error
 }
 
 // Target is one tunnel to collect metrics for - just enough to dial its
-// relay and know which interface's counters to read.
+// relay, know which interface's counters to read, and know which locally-
+// listening ports count as "this tunnel's own connections" for ss below.
 type Target struct {
 	TunnelID         int32
 	RelayHost        string
@@ -102,6 +118,7 @@ type Target struct {
 	RelaySSHUser     string
 	RelaySSHPassword string
 	InterfaceName    string
+	Ports            []int32
 }
 
 // Lister returns the tunnels to collect from, called fresh every round -
@@ -109,8 +126,12 @@ type Target struct {
 type Lister func(ctx context.Context) ([]Target, error)
 
 // script gathers everything in one SSH round trip: a 1-second CPU sample,
-// memory, disk, and the GRE interface's byte counters, each on its own
-// line with a fixed prefix so parseOutput doesn't need to guess at order.
+// memory, disk, the GRE interface's byte/drop/error counters, and a live
+// established-connection count, each on its own line with a fixed prefix
+// so parseOutput doesn't need to guess at order. %s is the GRE interface
+// name (repeated once per statistics file read) and %s is connCmd - either
+// a real `ss` pipeline or a literal "echo 0" when the tunnel forwards no
+// ports to count.
 const script = `
 read _ a1 b1 c1 i1 _ < /proc/stat
 sleep 1
@@ -120,12 +141,39 @@ di=$(( i2 - i1 ))
 if [ "$dt" -gt 0 ]; then echo "CPU:$(( (100*(dt-di))/dt ))"; else echo "CPU:0"; fi
 free -m | awk '/^Mem:/ {print "MEM:"$3":"$2}'
 df -BG / | awk 'NR==2 {gsub("G","",$2); gsub("G","",$3); print "DISK:"$3":"$2}'
-echo "RX:$(cat /sys/class/net/%s/statistics/rx_bytes 2>/dev/null || echo 0)"
-echo "TX:$(cat /sys/class/net/%s/statistics/tx_bytes 2>/dev/null || echo 0)"
+echo "RX:$(cat /sys/class/net/%[1]s/statistics/rx_bytes 2>/dev/null || echo 0)"
+echo "TX:$(cat /sys/class/net/%[1]s/statistics/tx_bytes 2>/dev/null || echo 0)"
+echo "RXDROP:$(cat /sys/class/net/%[1]s/statistics/rx_dropped 2>/dev/null || echo 0)"
+echo "TXDROP:$(cat /sys/class/net/%[1]s/statistics/tx_dropped 2>/dev/null || echo 0)"
+echo "RXERR:$(cat /sys/class/net/%[1]s/statistics/rx_errors 2>/dev/null || echo 0)"
+echo "TXERR:$(cat /sys/class/net/%[1]s/statistics/tx_errors 2>/dev/null || echo 0)"
+echo "CONN:$(%[2]s)"
 `
 
-func collect(ctx context.Context, relay *sshexec.Client, ifaceName string) (Metrics, error) {
-	out, err := relay.Run(ctx, fmt.Sprintf(script, ifaceName, ifaceName))
+// connCountCommand builds the shell pipeline that counts, right now, how
+// many ESTABLISHED TCP sockets on the relay have one of ports as their
+// local (listening) port - i.e. real clients currently using this
+// tunnel, not a cumulative "connections ever" figure (there is no such
+// kernel counter; frps's own dashboard tracks something close to it, but
+// enabling that fleet-wide on every relay just for this figure was not
+// worth the extra moving part - see Metrics's own doc comment). A tunnel
+// with no forwarded ports yet has nothing to count.
+func connCountCommand(ports []int32) string {
+	if len(ports) == 0 {
+		return "echo 0"
+	}
+	terms := make([]string, len(ports))
+	for i, p := range ports {
+		terms[i] = fmt.Sprintf("sport = :%d", p)
+	}
+	// -H suppresses ss's own header line, which it otherwise always
+	// prints regardless of filters - without it, every count here would
+	// be off by exactly one.
+	return fmt.Sprintf(`ss -tnH state established "( %s )" 2>/dev/null | wc -l`, strings.Join(terms, " or "))
+}
+
+func collect(ctx context.Context, relay *sshexec.Client, ifaceName string, ports []int32) (Metrics, error) {
+	out, err := relay.Run(ctx, fmt.Sprintf(script, ifaceName, connCountCommand(ports)))
 	if err != nil {
 		return Metrics{}, err
 	}
@@ -155,6 +203,17 @@ func parseOutput(out string) (Metrics, error) {
 			m.RxBytes, _ = strconv.ParseInt(strings.TrimPrefix(line, "RX:"), 10, 64)
 		case strings.HasPrefix(line, "TX:"):
 			m.TxBytes, _ = strconv.ParseInt(strings.TrimPrefix(line, "TX:"), 10, 64)
+		case strings.HasPrefix(line, "RXDROP:"):
+			m.RxDropped, _ = strconv.ParseInt(strings.TrimPrefix(line, "RXDROP:"), 10, 64)
+		case strings.HasPrefix(line, "TXDROP:"):
+			m.TxDropped, _ = strconv.ParseInt(strings.TrimPrefix(line, "TXDROP:"), 10, 64)
+		case strings.HasPrefix(line, "RXERR:"):
+			m.RxErrors, _ = strconv.ParseInt(strings.TrimPrefix(line, "RXERR:"), 10, 64)
+		case strings.HasPrefix(line, "TXERR:"):
+			m.TxErrors, _ = strconv.ParseInt(strings.TrimPrefix(line, "TXERR:"), 10, 64)
+		case strings.HasPrefix(line, "CONN:"):
+			conn, _ := strconv.Atoi(strings.TrimPrefix(line, "CONN:"))
+			m.Connections = conn
 		}
 	}
 	m.CheckedAt = time.Now()
@@ -206,7 +265,7 @@ func Run(ctx context.Context, c *cache.Client, o Options) {
 					return
 				}
 				defer client.Close()
-				m, err := collect(dctx, client, t.InterfaceName)
+				m, err := collect(dctx, client, t.InterfaceName, t.Ports)
 				if err != nil {
 					rows[i].Error = err.Error()
 					return
