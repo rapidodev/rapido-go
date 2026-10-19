@@ -272,15 +272,20 @@ func analyzeFRP(res *Result, n NodeFacts, tunnels []IPTunnel, addrs map[string]n
 		res.Details.RelayAddrs = append(append([]string{}, primary...), backup...)
 		res.Details.Protocol = transport + " via HAProxy (" + pathLabel(res.Details.RelayAddrs, len(backup) > 0) + ")"
 		res.Method = frpMethod(c.Protocol)
-	case isPrivate(host):
-		// frpc dials a tunnel-internal address: it rides a GRE tunnel.
-		var gre *IPTunnel
-		for i := range tunnels {
-			if p, ok := addrs[tunnels[i].Name]; ok && p.Contains(mustAddr(host)) {
-				gre = &tunnels[i]
-				break
+		// A primary that is a tunnel-internal address means frp rides a GRE
+		// tunnel, with the other addresses as the fallback path.
+		if len(primary) > 0 && isPrivate(primary[0]) && c.Protocol != "quic" {
+			if gre := greOwning(tunnels, addrs, primary[0]); gre != nil && gre.Kind == "gre" {
+				res.Details.Interface = gre.Name
+				res.Interface = gre.Name
+				res.Details.RelayAddrs = append([]string{gre.Remote}, backup...)
+				res.Details.Protocol = "GRE over " + family(gre.Remote) + " + " + transport + " via HAProxy (" + pathLabel(res.Details.RelayAddrs, len(backup) > 0) + ")"
+				res.Method = tunnelprovision.MethodGREFRP
 			}
 		}
+	case isPrivate(host):
+		// frpc dials a tunnel-internal address: it rides a GRE tunnel.
+		gre := greOwning(tunnels, addrs, host)
 		if gre == nil {
 			res.Method = MethodExternal
 			res.Details.Protocol = transport + " through a private tunnel address"
@@ -302,6 +307,16 @@ func analyzeFRP(res *Result, n NodeFacts, tunnels []IPTunnel, addrs map[string]n
 		res.Details.Protocol = transport + " (" + family(host) + ")"
 		res.Method = frpMethod(c.Protocol)
 	}
+}
+
+// greOwning returns the tunnel interface whose own subnet contains host.
+func greOwning(tunnels []IPTunnel, addrs map[string]netip.Prefix, host string) *IPTunnel {
+	for i := range tunnels {
+		if p, ok := addrs[tunnels[i].Name]; ok && p.Contains(mustAddr(host)) {
+			return &tunnels[i]
+		}
+	}
+	return nil
 }
 
 func frpMethod(protocol string) string {

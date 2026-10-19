@@ -219,3 +219,38 @@ func TestPathAddrsPrefersWhatTheNodeKnowsThenTheTunnelThenTheHost(t *testing.T) 
 		t.Errorf("a hostname is never pinged: %q %q", v6, v4)
 	}
 }
+
+const haproxyGREConfig = `global
+    stats socket /run/haproxy/admin.sock mode 600 level admin
+frontend frp_in
+    bind 127.0.0.1:7001
+    default_backend frp_relay
+backend frp_relay
+    server relay_gre 10.100.1.2:7000 check
+    server relay_v6 [2001:db8:3::fe4]:7000 check backup
+`
+
+func TestAnalyzeRecognisesGREFRPWithIPv6BackupBehindHAProxy(t *testing.T) {
+	res := Analyze(NodeFacts{
+		Route4:   "default via 198.51.100.1 dev eth0 proto static\n",
+		FRPC:     []ConfigFile{{Path: "/root/frp/client/client-7000.toml", Content: frpcTemplateConfig}},
+		HAProxy:  &ConfigFile{Path: "/etc/haproxy/haproxy.cfg", Content: haproxyGREConfig},
+		Addrs:    "7: t1gre    inet 10.100.1.1/30 scope global t1gre\\       valid_lft forever\n2: eth0    inet 198.51.100.8/24 brd 198.51.100.255 scope global eth0\n",
+		IPTunnel: "t1gre: gre/ip remote 203.0.113.98 local 198.51.100.8 ttl 255\n",
+	}, nil)
+	if !res.Found || res.Method != tunnelprovision.MethodGREFRP {
+		t.Fatalf("verdict = %+v", res)
+	}
+	if res.Interface != "t1gre" || res.Details.Interface != "t1gre" {
+		t.Errorf("interface = %q / %q", res.Interface, res.Details.Interface)
+	}
+	if !reflect.DeepEqual(res.Details.RelayAddrs, []string{"203.0.113.98", "2001:db8:3::fe4"}) {
+		t.Errorf("relay addrs = %v, want the GRE peer then the IPv6 backup", res.Details.RelayAddrs)
+	}
+	if res.Details.Protocol != "GRE over IPv4 + frp over TCP via HAProxy (IPv4 with IPv6 backup)" {
+		t.Errorf("protocol = %q", res.Details.Protocol)
+	}
+	if res.RelayHost != "203.0.113.98" {
+		t.Errorf("SSH host = %q", res.RelayHost)
+	}
+}
