@@ -18,7 +18,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
       ref={ref}
       disabled={disabled}
       className={classNames(
-        "w-full rounded-lg border bg-rapido-bg px-3 py-2 text-sm text-rapido-text placeholder:text-rapido-muted focus:outline-none focus:ring-1 focus:ring-rapido-accent",
+        "w-full rounded-lg border bg-rapido-bg px-3 py-2 text-sm text-rapido-text placeholder:text-rapido-muted shadow-rp-inset transition-shadow focus:border-rapido-accent/60 focus:outline-none focus:ring-2 focus:ring-rapido-accent/40",
         hasError ? "border-red-500" : "border-rapido-border",
         disabled && "cursor-not-allowed opacity-60",
         className

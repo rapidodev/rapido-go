@@ -14,3 +14,7 @@ class ResizeObserverStub {
   disconnect() {}
 }
 globalThis.ResizeObserver = ResizeObserverStub;
+
+// jsdom has no canvas; the 3D world's particle field draws on one, so give it a
+// context-less canvas (it then simply draws nothing).
+HTMLCanvasElement.prototype.getContext = (() => null) as unknown as typeof HTMLCanvasElement.prototype.getContext;

@@ -21,12 +21,18 @@ export type ModalProps = PropsWithChildren<{
 
 export const Modal: FC<ModalProps> = ({ onClose, title, className, children }) => (
   <div
-    className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+    className="fixed inset-0 z-50 flex animate-rp-fade items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
     onMouseDown={(e) => {
       if (e.target === e.currentTarget) onClose();
     }}
   >
-    <Card className={classNames("max-h-[90vh] w-full max-w-sm overflow-y-auto", className)}>
+    <Card
+      elevation={3}
+      className={classNames(
+        "max-h-[90vh] w-full max-w-sm animate-rp-rise overflow-y-auto border-rapido-accent/20 bg-rapido-surface",
+        className
+      )}
+    >
       {title !== undefined && <CardTitle className="mb-3 text-base">{title}</CardTitle>}
       {children}
     </Card>

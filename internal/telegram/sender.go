@@ -190,3 +190,13 @@ func (s *Sender) CreateForumTopic(ctx context.Context, cfg Config, chatID int64,
 	}
 	return topic.MessageThreadID, nil
 }
+
+// SendDM sends one message to a single chat - an admin's own telegram_id - and
+// nowhere else. Unlike Report it does not need a logger channel or admin list
+// to be configured: a bot token is enough.
+func (s *Sender) SendDM(ctx context.Context, cfg Config, chatID int64, text string, logger *slog.Logger) {
+	if cfg.APIToken == "" || chatID == 0 {
+		return
+	}
+	s.send(ctx, cfg, chatID, text, 0, logger)
+}

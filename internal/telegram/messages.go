@@ -305,3 +305,81 @@ func boolText(b bool) string {
 	}
 	return "False"
 }
+
+// TunnelEventMessage reports something that happened to a tunnel that is
+// neither a plain up nor a plain down: traffic failing over to the backup
+// relay path (or returning), sustained packet loss, traffic pinned at a
+// bandwidth ceiling, a saturated network card. It follows
+// InfraAlertMessage's convention (fleet-wide, no owning admin, Persian
+// labels, the measured detail kept verbatim in a code span).
+func TunnelEventMessage(tunnelName, kind, severity, detail string) string {
+	icon := "🟠"
+	switch severity {
+	case "critical":
+		icon = "🔴"
+	case "info":
+		icon = "🟢"
+	}
+	return fmt.Sprintf(
+		"%s <b>#تانل_%s</b>\n"+
+			"➖➖➖➖➖➖➖➖➖\n"+
+			"<b>تانل</b> : <code>%s</code>\n"+
+			"<b>رویداد</b> : %s\n"+
+			"<b>جزئیات</b> : <code>%s</code>\n"+
+			"<b>زمان</b> : <code>%s</code>",
+		icon, tunnelEventHashtagFA(kind), html.EscapeString(tunnelName),
+		html.EscapeString(TunnelEventTitleFA(kind)), html.EscapeString(detail),
+		time.Now().Format("15:04:05 2006-01-02"),
+	)
+}
+
+// TunnelEventTitleFA is the Persian name of a tunnel event kind; an unknown
+// kind is returned as it is.
+func TunnelEventTitleFA(kind string) string {
+	switch kind {
+	case "failover":
+		return "ترافیک به رلهٔ پشتیبان منتقل شد (failover)"
+	case "failback":
+		return "ترافیک به رلهٔ اصلی برگشت (failback)"
+	case "loss_high":
+		return "افت بستهٔ بالا روی مسیر نود تا رله"
+	case "ceiling":
+		return "ترافیک روی یک سقف ثابت گیر کرده است"
+	case "nic_saturated":
+		return "کارت شبکه به سقف سرعت خود رسیده است"
+	case "tunnel_down":
+		return "تانل قطع شد"
+	case "tunnel_up":
+		return "تانل دوباره وصل شد"
+	}
+	return kind
+}
+
+func tunnelEventHashtagFA(kind string) string {
+	switch kind {
+	case "failover":
+		return "فیلاور"
+	case "failback":
+		return "بازگشت"
+	case "loss_high":
+		return "افت_بسته"
+	case "ceiling":
+		return "سقف_پهنا"
+	case "nic_saturated":
+		return "اشباع_کارت"
+	}
+	return "رویداد"
+}
+
+// AdminDigestMessage is the daily summary sent to one admin: how many of their
+// configs expire within three days and how many have 10% or less of their data
+// left.
+func AdminDigestMessage(adminUsername string, expiring3d, lowData int64) string {
+	return fmt.Sprintf(
+		"📊 <b>Daily summary</b> for <code>%s</code>\n"+
+			"➖➖➖➖➖➖➖➖➖\n"+
+			"<b>Expiring within 3 days</b> : %d\n"+
+			"<b>10%% or less data left</b> : %d",
+		html.EscapeString(adminUsername), expiring3d, lowData,
+	)
+}

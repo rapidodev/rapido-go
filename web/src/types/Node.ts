@@ -23,6 +23,10 @@ export type Node = {
   inbound_tags?: string[];
   listen_ports?: number[];
   core_overrides?: NodeCoreOverrides;
+  // true = the panel holds an SSH login for this node, so a restart needs no
+  // credentials; false = it does not and the restart asks for them once. Absent
+  // from a panel older than node restart.
+  ssh_known?: boolean;
 };
 
 // POST /api/node and PUT /api/node/:id both take the full field set -
@@ -86,4 +90,27 @@ export type NodeUsage = {
 
 export type NodeUsageResult = {
   usages: NodeUsage[];
+};
+
+// POST /api/node/:id/restart (sudo). "service" restarts the node agent (the proxy
+// core reconnects, tunnels are untouched); "reboot" reboots the whole
+// server and must be confirmed by typing the node's exact name. The SSH fields
+// are only sent when the node has no stored login (ssh_known === false) and are
+// used once, never stored.
+export type NodeRestartMode = "service" | "reboot";
+
+export type NodeRestartPayload = {
+  mode: NodeRestartMode;
+  confirm_name?: string;
+  ssh_port?: number;
+  ssh_user?: string;
+  ssh_password?: string;
+};
+
+export type NodeRestartResult = {
+  ok: boolean;
+  mode: string;
+  detail: string;
+  active?: boolean;
+  took_ms?: number;
 };

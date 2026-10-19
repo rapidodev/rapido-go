@@ -1,9 +1,12 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
+	"html/template"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -138,5 +141,98 @@ func TestSubscriptionPageDoesNotUpdateSubUserAgent(t *testing.T) {
 	}
 	if lastUserAgent == nil || *lastUserAgent != "v2rayNG/1.8.0" {
 		t.Errorf("sub_last_user_agent = %v, want \"v2rayNG/1.8.0\" after a real raw-config fetch", lastUserAgent)
+	}
+}
+
+// renderSubscriptionPageForTest executes the real embedded template the way
+// handleSubscriptionPage does, without needing a database.
+func renderSubscriptionPageForTest(t *testing.T, username, dataJSON string) string {
+	t.Helper()
+	var buf bytes.Buffer
+	err := subscriptionPageTemplate.Execute(&buf, struct {
+		Username       string
+		RapidoDataJSON template.JS
+	}{Username: username, RapidoDataJSON: template.JS(dataJSON)})
+	if err != nil {
+		t.Fatalf("execute subscription page template: %v", err)
+	}
+	return buf.String()
+}
+
+// TestSubscriptionPageTemplateRendersSelfContained proves, without a
+// database, that the page renders, escapes the username, carries the data
+// blob and stays inside the strict CSP: no external script, stylesheet or
+// image, and fonts only from the same origin.
+func TestSubscriptionPageTemplateRendersSelfContained(t *testing.T) {
+	body := renderSubscriptionPageForTest(t, `</title><script>alert(1)</script>`,
+		`{"username":"x","status":"active","used":1,"lifetime":1,"limit":null,"reset":"no_reset","expire":null,"onlineAt":null,"emergencyUsed":false,"links":[],"subUrl":"/sub/x"}`)
+
+	if strings.Contains(body, "<script>alert(1)</script>") {
+		t.Error("username was not escaped in the rendered page")
+	}
+	if !strings.Contains(body, `window.__RAPIDO__ = {"username":"x"`) {
+		t.Error("data blob missing from the rendered page")
+	}
+	// The instrument cluster's hooks: the script looks these up by id at boot,
+	// and a missing one sends the customer to the no-JavaScript fallback.
+	for _, id := range []string{
+		"heroBox", "expBox", "uBig", "eBig", "barUsed", "barLeft", "rdUsed", "rdLeft", "rdLimit", "rdLife",
+		"subQr", "emgBtn", "emgLabel", "emgWhy", "emgDesc", "emgMsg", "emgZone", "statusPill", "seenPill",
+		"fxBtn", "world", "plate", "platSeg", "appRows", "srvRows", "ticketList", "toast", "overlay",
+	} {
+		if !strings.Contains(body, `id="`+id+`"`) {
+			t.Errorf("rendered page is missing the #%s element the script boots with", id)
+		}
+	}
+
+	for _, banned := range []string{"<link ", "@import", `<script src`, `<img `, "<iframe"} {
+		if strings.Contains(body, banned) {
+			t.Errorf("rendered page contains %q, which the CSP does not allow", banned)
+		}
+	}
+	for _, m := range regexp.MustCompile(`url\(\s*["']?([^"')\s]+)`).FindAllStringSubmatch(body, -1) {
+		if m[1] != "#" && !strings.HasPrefix(m[1], "/statics/fonts/") && !strings.HasPrefix(m[1], "#") {
+			t.Errorf("CSS url(%s) is not a same-origin font", m[1])
+		}
+	}
+}
+
+// TestSubscriptionPageDictionariesStayInStep guards the bilingual page:
+// every key one language defines must exist in the other, or a Persian
+// customer silently gets English (the lookup falls back to it).
+func TestSubscriptionPageDictionariesStayInStep(t *testing.T) {
+	src := subscriptionPageSource
+	start := strings.Index(src, "window.__I18N_DICT__")
+	faAt := strings.Index(src[start:], "\n            fa: {")
+	if start < 0 || faAt < 0 {
+		t.Fatal("could not locate the en/fa dictionaries in the template")
+	}
+	enPart, faPart := src[start:start+faAt], src[start+faAt:]
+	// The Persian block ends at the dictionary's closing brace; later script
+	// holds other quoted maps that are not translations.
+	if end := strings.Index(faPart, "\n        };"); end > 0 {
+		faPart = faPart[:end]
+	}
+	keyRe := regexp.MustCompile(`(?m)^\s*'([a-zA-Z0-9_.]+)':`)
+	keys := func(part string) map[string]bool {
+		out := map[string]bool{}
+		for _, m := range keyRe.FindAllStringSubmatch(part, -1) {
+			out[m[1]] = true
+		}
+		return out
+	}
+	en, fa := keys(enPart), keys(faPart)
+	if len(en) < 150 {
+		t.Fatalf("only %d English keys found - the dictionary parser is broken", len(en))
+	}
+	for k := range en {
+		if !fa[k] {
+			t.Errorf("key %q is missing from the Persian dictionary", k)
+		}
+	}
+	for k := range fa {
+		if !en[k] {
+			t.Errorf("key %q is missing from the English dictionary", k)
+		}
 	}
 }

@@ -11,6 +11,7 @@ import { LoginResponse } from "types/Login";
 import { ReactComponent as Logo } from "assets/logo.svg";
 import { LanguageSwitcher } from "rapido-ui/LanguageSwitcher";
 import { RapidoFooter } from "rapido-ui/Footer";
+import { Card } from "rapido-ui/Card";
 import { Input } from "rapido-ui/Input";
 import { Button } from "rapido-ui/Button";
 import { dirOf } from "utils/language";
@@ -70,7 +71,7 @@ export const Login: FC = () => {
     <div
       dir={dirOf(i18n.language)}
       lang={i18n.language}
-      className="flex min-h-screen w-full flex-col justify-between bg-rapido-bg p-4 font-sans text-rapido-text sm:p-6"
+      className="relative flex min-h-screen w-full flex-col justify-between p-4 font-sans text-rapido-text sm:p-6"
     >
       {/* align="end": the trigger is pinned to the inline end of the viewport,
           so a menu hanging off its start edge sticks out past the page. */}
@@ -79,9 +80,9 @@ export const Login: FC = () => {
       </div>
 
       <div className="flex w-full flex-1 items-center justify-center">
-        <div className="w-full max-w-[340px]">
+        <Card elevation={3} className="w-full max-w-[360px] animate-rp-rise p-6">
           <div className="flex flex-col items-center gap-2">
-            <Logo className="h-12 w-12 text-rapido-accent" />
+            <Logo className="h-12 w-12 text-rapido-accent drop-shadow-[0_0_14px_rgba(34,211,238,.75)]" />
             <h1 className="text-2xl font-semibold">{t("login.loginYourAccount")}</h1>
             <p className="text-rapido-muted">{t("login.welcomeBack")}</p>
           </div>
@@ -125,14 +126,14 @@ export const Login: FC = () => {
                 {loading && (
                   <span
                     aria-hidden="true"
-                    className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white"
+                    className="h-4 w-4 animate-spin rounded-full border-2 border-[#03222b]/30 border-t-[#03222b]"
                   />
                 )}
                 {loading ? t("rapido.pleaseWait") : t("login")}
               </Button>
             </div>
           </form>
-        </div>
+        </Card>
       </div>
 
       <RapidoFooter />

@@ -89,12 +89,13 @@ func setSubscriptionPageHeaders(c *gin.Context) {
 
 // handleSubscriptionPage renders the customer-facing HTML subscription
 // page (Overview/Apps/Servers/Support tabs) - a vanilla HTML/CSS/JS page
-// with no build step and no external dependency, matching Python's own
-// app/templates/subscription/index.html almost verbatim (only the
-// <title>/window.__RAPIDO__ interpolation points are backend-specific;
-// every other line - CSS, the self-contained QR generator, the bilingual
-// i18n dictionaries, the per-platform app data - is static content, not
-// server logic, and is carried over unchanged). Does NOT call
+// with no build step and no external dependency. It is styled in the
+// dashboard's own instrument language (ring gauges, segmented bars, the 3D
+// scene), re-implemented in plain CSS/SVG/JS so it fits the page's strict
+// CSP. Only the <title>/window.__RAPIDO__ interpolation points are
+// backend-specific; every other line - CSS, the self-contained QR
+// generator, the bilingual i18n dictionaries, the per-platform app data -
+// is static content, not server logic. Does NOT call
 // recordSubUserAgent - loading the browser page must not bump
 // sub_updated_at/sub_last_user_agent, matching the Python HTML branch.
 func (h *Handler) handleSubscriptionPage(c *gin.Context, user generated.User) {

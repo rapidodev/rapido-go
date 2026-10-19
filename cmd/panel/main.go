@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/legendary1205/rapido-go/internal/auth"
@@ -29,6 +31,7 @@ import (
 	"github.com/legendary1205/rapido-go/internal/certs"
 	"github.com/legendary1205/rapido-go/internal/config"
 	"github.com/legendary1205/rapido-go/internal/db/generated"
+	"github.com/legendary1205/rapido-go/internal/digestjob"
 	"github.com/legendary1205/rapido-go/internal/discord"
 	"github.com/legendary1205/rapido-go/internal/gatewayjob"
 	"github.com/legendary1205/rapido-go/internal/hostmetrics"
@@ -42,7 +45,9 @@ import (
 	"github.com/legendary1205/rapido-go/internal/reviewjob"
 	"github.com/legendary1205/rapido-go/internal/telegram"
 	"github.com/legendary1205/rapido-go/internal/telegrambot"
+	"github.com/legendary1205/rapido-go/internal/tunneldiscover"
 	"github.com/legendary1205/rapido-go/internal/tunnelmetrics"
+	"github.com/legendary1205/rapido-go/internal/tunnelwatch"
 	"github.com/legendary1205/rapido-go/internal/usagejob"
 )
 
@@ -135,7 +140,7 @@ func run(logger *slog.Logger) error {
 	dispatcher := report.New(report.NotifyFlags{
 		StatusChange: cfg.NotifyStatusChange, UserCreated: cfg.NotifyUserCreated, UserUpdated: cfg.NotifyUserUpdated,
 		UserDeleted: cfg.NotifyUserDeleted, UserDataUsedReset: cfg.NotifyUserDataUsedReset,
-		UserSubRevoked: cfg.NotifyUserSubRevoked, Login: cfg.NotifyLogin, InfraAlert: cfg.NotifyInfraAlert,
+		UserSubRevoked: cfg.NotifyUserSubRevoked, Login: cfg.NotifyLogin, InfraAlert: cfg.NotifyInfraAlert, AdminDigest: cfg.NotifyAdminDigest,
 	}, settingsFn, telegram.NewSender(notifyHTTPClient, ""), discord.NewSender(notifyHTTPClient), logger)
 	resellerAPIClient := resellerapi.NewClient(&http.Client{Timeout: 3 * time.Second})
 	hostMetricsTracker := hostmetrics.NewPreviousTracker()
@@ -151,7 +156,7 @@ func run(logger *slog.Logger) error {
 			Queries: queries, Cache: redisClient, Issuer: issuer, SudoUsername: cfg.SudoUsername,
 			Settings: settingsFn, Logger: logger,
 		})
-		go runAsBackendSingleton(ctx, cfg.DatabaseURL, queries, dispatcher, hostMetricsTracker, redisClient, usageReporter, settingsFn, cfg.UsageRetentionDays, telegramConsole.Run, logger)
+		go runAsBackendSingleton(ctx, cfg.DatabaseURL, queries, dispatcher, hostMetricsTracker, redisClient, usageReporter, settingsFn, cfg.UsageRetentionDays, cfg.AdminDigestHourUTC, telegramConsole.Run, logger)
 	}
 
 	formatFlags := httpapi.SubscriptionFormatFlags{
@@ -210,7 +215,7 @@ func run(logger *slog.Logger) error {
 // as long as its holding connection does, and a pool connection can be
 // silently recycled or closed at any time, which would release the lock
 // out from under this process without it noticing.
-func runAsBackendSingleton(ctx context.Context, databaseURL string, queries *generated.Queries, dispatcher *report.Dispatcher, hostMetricsTracker *hostmetrics.PreviousTracker, redisClient *cache.Client, usageReporter *resellerapi.Client, settingsFn resellerusagejob.SettingsFunc, usageRetentionDays int, runConsole func(context.Context), logger *slog.Logger) {
+func runAsBackendSingleton(ctx context.Context, databaseURL string, queries *generated.Queries, dispatcher *report.Dispatcher, hostMetricsTracker *hostmetrics.PreviousTracker, redisClient *cache.Client, usageReporter *resellerapi.Client, settingsFn resellerusagejob.SettingsFunc, usageRetentionDays, digestHourUTC int, runConsole func(context.Context), logger *slog.Logger) {
 	const retryInterval = 10 * time.Second
 	for {
 		select {
@@ -257,6 +262,12 @@ func runAsBackendSingleton(ctx context.Context, databaseURL string, queries *gen
 		go hostmetrics.RunTunnelAlerts(ctx, queries, func(ctx context.Context, nodeName, tunnelName string, up bool, domain string, downFor time.Duration) {
 			dispatcher.InfraAlert(ctx, "WireGuard tunnel", nodeName+"/"+tunnelName, "", up, domain, downFor)
 		}, logger, 30*time.Second)
+		// Turns each tunnelmetrics round into a stored sample and into events
+		// (failover, packet loss, bandwidth ceiling, ...); see internal/tunnelwatch.
+		watcher := tunnelwatch.NewWatcher(tunnelwatch.DBStore{Q: queries}, func(ctx context.Context, name string, ev tunnelwatch.Event) {
+			dispatcher.TunnelEvent(ctx, name, ev.Kind, ev.Severity, ev.Detail)
+		}, logger)
+		go watcher.PruneLoop(ctx, time.Hour)
 		// Probes every registered external relay (a GRE+FRP box or similar in
 		// front of a node, living entirely outside this fleet - see
 		// internal/relayhealth's doc comment) and alerts the same way.
@@ -274,6 +285,11 @@ func runAsBackendSingleton(ctx context.Context, databaseURL string, queries *gen
 			},
 			Alert: func(ctx context.Context, r relayhealth.Relay, up bool, detail string, downFor time.Duration) {
 				dispatcher.InfraAlert(ctx, "Relay", fmt.Sprintf("%s (%s:%d)", r.Name, r.Host, r.Port), detail, up, "", downFor)
+				// The same change goes on the owning tunnel's event timeline.
+				if t, err := queries.GetTunnelByRelayID(ctx, pgtype.Int4{Int32: r.ID, Valid: true}); err == nil {
+					watcher.SetName(t.ID, t.Name)
+					watcher.RelayTransition(ctx, t.ID, up, detail, downFor)
+				}
 			},
 			// Publishes the full live snapshot every round (not just on a
 			// transition, unlike Alert) so the api role's GET /api/tunnels
@@ -301,21 +317,47 @@ func runAsBackendSingleton(ctx context.Context, databaseURL string, queries *gen
 					if t.Status != "active" {
 						continue
 					}
-					targets = append(targets, tunnelmetrics.Target{
-						TunnelID: t.ID, RelayHost: t.RelayHost, RelaySSHPort: t.RelaySshPort,
+					target := tunnelmetrics.Target{
+						TunnelID: t.ID, Name: t.Name, RelayHost: t.RelayHost, RelaySSHPort: t.RelaySshPort,
 						RelaySSHUser: t.RelaySshUser, RelaySSHPassword: t.RelaySshPassword,
 						InterfaceName: t.InterfaceName, Ports: t.Ports,
-					})
+					}
+					// What detection learned (the real interface of a tunnel the
+					// panel did not build, the NICs, where HAProxy's admin socket is).
+					var det tunneldiscover.Details
+					if len(t.Details) > 0 {
+						_ = json.Unmarshal(t.Details, &det)
+					}
+					if det.Interface != "" && !t.Managed {
+						target.InterfaceName = det.Interface
+					}
+					target.RelayNIC, target.NodeNIC = det.RelayNIC, det.NodeNIC
+					target.PathV6, target.PathV4 = tunneldiscover.PathAddrs(det, t.RelayTunnelAddr.String, t.RelayHost)
+					if det.HAProxy != nil {
+						target.HAProxySocket = det.HAProxy.Socket
+					}
+					// The node end is read too: its main-NIC bandwidth and HAProxy.
+					if n, err := queries.GetNodeByID(ctx, t.NodeID); err == nil {
+						target.NodeHost, target.NodeSSHPort = n.Address, t.NodeSshPort
+						target.NodeSSHUser, target.NodeSSHPassword = t.NodeSshUser, t.NodeSshPassword
+					}
+					targets = append(targets, target)
 				}
 				return targets, nil
 			},
 			Logger: logger,
+			OnTick: func(rows []tunnelmetrics.Row) { watcher.Handle(ctx, rows) },
 		})
 		// Gateway (multi-panel load balancer) sub-phase 4: keeps every
 		// enabled peer's crowdedness/host cache warm so a real client's
 		// subscription fetch never waits on a network call to another
 		// panel - see internal/gatewayjob's own doc comment.
 		go gatewayjob.Run(ctx, queries, redisClient, logger, 2*time.Minute)
+		// One Telegram message a day to each admin that has a telegram_id: configs
+		// expiring within 3 days and configs with 10% or less data left.
+		go digestjob.Run(ctx, digestjob.Deps{
+			Store: queries, Sender: dispatcher, Claimer: redisClaimer{redisClient}, HourUTC: digestHourUTC, Logger: logger,
+		}, 10*time.Minute)
 		// Bills resellers through the reseller bot. Singleton-only so the
 		// same queued traffic is never sent by two processes at once.
 		go resellerusagejob.Run(ctx, queries, usageReporter, settingsFn, redisClient, logger, 10*time.Second)
@@ -417,4 +459,11 @@ func ensureTLS(ctx context.Context, q *generated.Queries, logger *slog.Logger) e
 	}
 	logger.Info("generated Rapido CA/panel certificate", "cn", certs.CommonName)
 	return nil
+}
+
+// redisClaimer lets jobs claim "done today" markers with SET NX.
+type redisClaimer struct{ c *cache.Client }
+
+func (r redisClaimer) SetNX(ctx context.Context, key, value string, ttl time.Duration) (bool, error) {
+	return r.c.Raw().SetNX(ctx, key, value, ttl).Result()
 }

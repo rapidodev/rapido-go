@@ -1,4 +1,4 @@
-import { FC, useEffect, useMemo, useRef, useState } from "react";
+import { FC, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useXrayConfigQuery, useSaveXrayConfigMutation } from "hooks/useXrayConfigQuery";
 import { useImportXrayConfigMutation, useInboundPortsQuery } from "hooks/useInboundsQuery";
@@ -12,6 +12,7 @@ import { Card } from "rapido-ui/Card";
 import { Badge } from "rapido-ui/Badge";
 import { Button } from "rapido-ui/Button";
 import { Modal } from "rapido-ui/Modal";
+import { JsonEditor } from "rapido-ui/JsonEditor";
 import { ltrIsolate } from "rapido-ui/bidi";
 import { XrayConfigStructure, parseDocObject } from "rapido-ui/XrayConfigStructure";
 import { AddAllProtocolsButton, QuickAddInboundModal } from "rapido-ui/QuickAddInbound";
@@ -75,9 +76,6 @@ const XrayConfigJSONEditor: FC<{ config: XrayConfig }> = ({ config }) => {
   const [error, setError] = useState("");
   const [errorLine, setErrorLine] = useState<number | null>(null);
   const [previousText, setPreviousText] = useState<string | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const gutterRef = useRef<HTMLDivElement>(null);
-  const lineCount = text.split("\n").length;
   // What a rule's ports field currently holds while it's mid-typing (see
   // XrayConfigStructure) - kept here so an unparseable draft, which never
   // reaches the JSON, can still hold Apply back.
@@ -189,12 +187,6 @@ const XrayConfigJSONEditor: FC<{ config: XrayConfig }> = ({ config }) => {
     }
   };
 
-  const syncGutterScroll = () => {
-    if (textareaRef.current && gutterRef.current) {
-      gutterRef.current.scrollTop = textareaRef.current.scrollTop;
-    }
-  };
-
   return (
     <Card className="p-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -213,40 +205,16 @@ const XrayConfigJSONEditor: FC<{ config: XrayConfig }> = ({ config }) => {
         onPortDraft={setPortDraft}
       />
 
-      <div className="relative">
-        {/* Absolutely positioned against this wrapper, whose own height is
-            just "however tall the in-flow textarea below currently is" -
-            so a manual resize-y drag on the textarea grows this wrapper too,
-            and the gutter (inset-y-0) stretches to match with no JS needed.
-            Only the vertical scroll offset needs syncing by hand (below),
-            since the gutter's own content can be taller than its visible
-            box once there are more lines than fit. */}
-        <div
-          ref={gutterRef}
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-y-0 left-0 w-9 overflow-hidden rounded-l-lg border-r border-rapido-border bg-rapido-surface-2 py-2 text-right font-mono text-xs leading-5 text-rapido-muted"
-        >
-          {Array.from({ length: lineCount }, (_, i) => i + 1).map((n) => (
-            <div key={n} className={n === errorLine ? "pr-2 font-semibold text-red-400" : "pr-2"}>
-              {n}
-            </div>
-          ))}
-        </div>
-        <textarea
-          ref={textareaRef}
-          dir="ltr"
-          spellCheck={false}
-          wrap="off"
-          rows={22}
-          onScroll={syncGutterScroll}
-          className="w-full resize-y whitespace-pre overflow-x-auto rounded-lg border border-rapido-border bg-rapido-bg py-2 pl-11 pr-3 font-mono text-xs leading-5 text-rapido-text focus:outline-none focus:ring-1 focus:ring-rapido-accent"
-          value={text}
-          onChange={(e) => {
-            changeText(e.target.value);
-            setPortDrafts({});
-          }}
-        />
-      </div>
+      <JsonEditor
+        value={text}
+        rows={22}
+        errorLine={errorLine}
+        ariaLabel={String(t("rapido.xrayConfig.jsonTitle"))}
+        onChange={(v) => {
+          changeText(v);
+          setPortDrafts({});
+        }}
+      />
       {issues.length > 0 && (
         <div role="alert" className="mt-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">
           <p className="mb-1 font-medium">{t("rapido.xrayConfig.issuesTitle")}</p>
@@ -371,17 +339,17 @@ const XrayImportModal: FC<{ onClose: () => void; onApplied: () => void }> = ({ o
       <h2 className="mb-1 text-lg font-semibold">{t("rapido.inbounds.xrayImportTitle")}</h2>
       <p className="mb-4 text-xs text-rapido-muted">{t("rapido.inbounds.xrayImportSubtitle")}</p>
       <div className="flex flex-col gap-3">
-        <textarea
-          dir="ltr"
+        <JsonEditor
+          gutter={false}
           rows={12}
           value={config}
-          onChange={(e) => {
-            setConfig(e.target.value);
+          ariaLabel={String(t("rapido.inbounds.xrayImportTitle"))}
+          onChange={(v) => {
+            setConfig(v);
             setPreview(null);
             setApplied(null);
           }}
-          placeholder='{ "inbounds": [...], "outbounds": [...], "routing": {...} }'
-          className="w-full resize-y rounded-lg border border-rapido-border bg-rapido-bg px-3 py-2 font-mono text-xs text-rapido-text focus:outline-none focus:ring-1 focus:ring-rapido-accent"
+          placeholder={'{ "inbounds": [...], "outbounds": [...], "routing": {...} }'}
         />
 
         {summary && (

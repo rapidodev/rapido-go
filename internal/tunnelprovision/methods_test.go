@@ -145,9 +145,9 @@ func TestTunnelUnitNamesDependOnTheMethod(t *testing.T) {
 
 func TestHostForURLBracketsOnlyIPv6(t *testing.T) {
 	cases := map[string]string{
-		"185.124.175.44":   "185.124.175.44",
+		"185.124.175.44":    "185.124.175.44",
 		"relay.example.org": "relay.example.org",
-		"2a05:9080:3::fe4": "[2a05:9080:3::fe4]",
+		"2a05:9080:3::fe4":  "[2a05:9080:3::fe4]",
 	}
 	for in, want := range cases {
 		if got := hostForURL(in); got != want {

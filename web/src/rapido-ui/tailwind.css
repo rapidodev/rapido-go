@@ -1,3 +1,791 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* ==========================================================================
+   Theme tokens
+   --------------------------------------------------------------------------
+   Colours are space-separated RGB triples so Tailwind's `<alpha-value>` and
+   plain CSS (`rgb(var(--rp-accent) / .4)`) can both use them. The attribute
+   values on <html> (data-theme, data-depth, ...) are written by
+   rapido-ui/appearance.ts; nothing here depends on React.
+   ========================================================================== */
+:root,
+[data-theme="cockpit"] {
+  color-scheme: dark;
+  /* The dashboard's original control-room tokens (#0a1116 / #111c22 /
+     #16232b / #223039 / #22d3ee / #e7f1f4 / #7e97a0), unchanged. */
+  --rp-bg: 10 17 22;
+  --rp-surface: 17 28 34;
+  --rp-raised: 22 35 43;
+  --rp-border: 34 48 57;
+  --rp-text: 231 241 244;
+  --rp-muted: 126 151 160;
+  --rp-accent: 34 211 238;
+  --rp-on-accent: 3 34 43;
+  --rp-violet: 167 139 250;
+  --rp-teal: 45 212 191;
+  /* A fourth surface, below the card: instrument wells, grooves, chart plates. */
+  --rp-inset: 8 14 18;
+  /* The dim tone of every segment that is not lit (dials, bars, trends). */
+  --rp-unlit: var(--rp-text) / 0.14;
+  --rp-ease: cubic-bezier(0.34, 1.32, 0.5, 1);
+  --rp-dur: 900ms;
+  /* One status trio, tuned to sit with the cyan accent: a mint-teal for good,
+     a warm amber for warning, a coral red for bad (and a warm orange between
+     warning and bad). Tailwind's emerald/amber/yellow/red/rose/orange classes
+     are remapped onto these in tailwind.config.js, so every existing pill, bar
+     and border follows them. hi = text on dark, base = fills, lo = pressed. */
+  --rp-good: 54 234 176;
+  --rp-good-hi: 150 245 214;
+  --rp-good-lo: 22 178 125;
+  --rp-warn: 255 190 74;
+  --rp-warn-hi: 255 222 150;
+  --rp-warn-lo: 217 148 20;
+  --rp-bad: 255 104 112;
+  --rp-bad-hi: 255 168 172;
+  --rp-bad-lo: 224 62 76;
+  --rp-warm: 255 148 84;
+  --rp-warm-hi: 255 190 150;
+  --rp-warm-lo: 220 106 40;
+  /* Bevel highlight = the text token; shadows are plain black at low alpha. */
+  --rp-hl: var(--rp-text);
+  --rp-sh: 0 0 0;
+  --rp-shk: 1;
+  --rp-sheen: 0.06;
+  --rp-sheen-dark: 0.14;
+  /* The background mesh is the accent, so it follows an accent change. */
+  --rp-blob-1: var(--rp-accent);
+  --rp-blob-2: var(--rp-accent);
+  --rp-blob-3: var(--rp-teal);
+  --rp-blob-a: 0.14;
+  --rp-grid: var(--rp-muted);
+  --rp-grid-a: 0.05;
+  --rp-shimmer: var(--rp-text) / 0.07;
+  --rp-r-card: 1.25rem;
+  --rp-r-ctl: 0.5rem;
+  --rp-r-sm: 0.375rem;
+}
+
+[data-theme="aurora"] {
+  color-scheme: dark;
+  --rp-hl: 255 255 255;
+  --rp-bg: 9 8 26;
+  --rp-surface: 24 21 56;
+  --rp-raised: 36 32 80;
+  --rp-border: 62 56 118;
+  --rp-text: 238 238 255;
+  --rp-muted: 160 158 205;
+  --rp-accent: 192 132 252;
+  --rp-on-accent: 30 8 60;
+  --rp-violet: 244 114 182;
+  --rp-teal: 52 211 153;
+  --rp-inset: 12 10 34;
+  --rp-sheen: 0.09;
+  --rp-blob-1: 168 85 247;
+  --rp-blob-2: 236 72 153;
+  --rp-blob-3: 56 189 248;
+  --rp-blob-a: 0.3;
+  --rp-grid-a: 0.02;
+}
+
+[data-theme="graphite"] {
+  color-scheme: dark;
+  --rp-bg: 17 18 20;
+  --rp-surface: 27 28 31;
+  --rp-raised: 37 38 42;
+  --rp-border: 54 56 61;
+  --rp-text: 229 231 235;
+  --rp-muted: 150 155 165;
+  --rp-accent: 96 165 250;
+  --rp-on-accent: 6 20 40;
+  --rp-violet: 129 140 248;
+  --rp-teal: 94 234 212;
+  --rp-inset: 12 13 15;
+  --rp-sheen: 0.02;
+  --rp-sheen-dark: 0.06;
+  --rp-blob-a: 0.05;
+  --rp-grid-a: 0;
+}
+
+[data-theme="daylight"] {
+  color-scheme: light;
+  --rp-bg: 237 242 247;
+  --rp-surface: 255 255 255;
+  --rp-raised: 241 245 249;
+  --rp-border: 203 213 225;
+  --rp-text: 15 23 42;
+  --rp-muted: 87 104 126;
+  --rp-accent: 8 145 178;
+  --rp-on-accent: 255 255 255;
+  --rp-violet: 109 40 217;
+  --rp-teal: 13 148 136;
+  --rp-inset: 226 232 240;
+  --rp-unlit: 15 23 42 / 0.13;
+  /* Status colours are also text on white here, so every shade is dark. */
+  --rp-good: 4 120 87;
+  --rp-good-hi: 4 95 70;
+  --rp-good-lo: 6 78 59;
+  --rp-warn: 161 98 7;
+  --rp-warn-hi: 133 77 14;
+  --rp-warn-lo: 113 63 18;
+  --rp-bad: 200 30 30;
+  --rp-bad-hi: 185 28 28;
+  --rp-bad-lo: 153 27 27;
+  --rp-warm: 194 65 12;
+  --rp-warm-hi: 154 52 14;
+  --rp-warm-lo: 124 45 18;
+  --rp-hl: 255 255 255;
+  --rp-sh: 51 65 85;
+  --rp-shk: 0.55;
+  --rp-sheen: 0;
+  --rp-sheen-dark: 0.03;
+  --rp-blob-a: 0.2;
+  --rp-grid: 51 65 85;
+  --rp-grid-a: 0.045;
+  --rp-shimmer: 15 23 42 / 0.06;
+  /* The dial stays a dark instrument on the light page. */
+  --rp-dial-ink: 231 241 244;
+  --rp-dial-muted: 138 162 171;
+}
+
+/* Shades derived from the accent and surface tokens, so a different accent or
+   preset re-derives every highlight, bevel edge, glow and the dial. Plain
+   fallbacks first for browsers without color-mix. */
+:root {
+  --rp-accent-hi: rgb(124 234 255);
+  --rp-accent-lo: rgb(15 182 211);
+  --rp-accent-edge: rgb(11 116 144);
+  --rp-dial-ink: var(--rp-text);
+  --rp-dial-muted: var(--rp-muted);
+  --rp-dial-bz-1: #9db4bf;
+  --rp-dial-bz-2: #3a4f5b;
+  --rp-dial-bz-3: #101c23;
+  --rp-dial-bz-4: #4b6370;
+  --rp-dial-bz-5: #c5d6de;
+  --rp-dial-lip-1: #02060a;
+  --rp-dial-lip-2: #2a3c47;
+  --rp-dial-face-1: #1b3140;
+  --rp-dial-face-2: #0c161d;
+  --rp-dial-face-3: #05090d;
+}
+@supports (color: color-mix(in srgb, red, blue)) {
+  :root {
+    --rp-accent-hi: color-mix(in srgb, rgb(var(--rp-accent)) 58%, white);
+    --rp-accent-lo: color-mix(in srgb, rgb(var(--rp-accent)) 82%, black);
+    --rp-accent-edge: color-mix(in srgb, rgb(var(--rp-accent)) 50%, black);
+    --rp-dial-bz-1: color-mix(in srgb, rgb(var(--rp-muted)) 62%, rgb(var(--rp-text)));
+    --rp-dial-bz-2: color-mix(in srgb, rgb(var(--rp-border)) 80%, rgb(var(--rp-muted)));
+    --rp-dial-bz-3: color-mix(in srgb, rgb(var(--rp-bg)) 70%, black);
+    --rp-dial-bz-4: color-mix(in srgb, rgb(var(--rp-border)) 55%, rgb(var(--rp-muted)));
+    --rp-dial-bz-5: color-mix(in srgb, rgb(var(--rp-muted)) 35%, rgb(var(--rp-text)));
+    --rp-dial-lip-1: color-mix(in srgb, rgb(var(--rp-bg)) 25%, black);
+    --rp-dial-lip-2: rgb(var(--rp-border));
+    --rp-dial-face-1: color-mix(in srgb, rgb(var(--rp-accent)) 16%, rgb(var(--rp-raised)));
+    --rp-dial-face-2: color-mix(in srgb, rgb(var(--rp-bg)) 80%, black);
+    --rp-dial-face-3: color-mix(in srgb, rgb(var(--rp-bg)) 35%, black);
+  }
+}
+/* The light preset keeps the dial dark, built from the same cockpit tokens. */
+[data-theme="daylight"] {
+  --rp-dial-ink: 231 241 244;
+  --rp-dial-muted: 138 162 171;
+  --rp-dial-bz-1: #9db4bf;
+  --rp-dial-bz-2: #3a4f5b;
+  --rp-dial-bz-3: #101c23;
+  --rp-dial-bz-4: #4b6370;
+  --rp-dial-bz-5: #c5d6de;
+  --rp-dial-lip-1: #02060a;
+  --rp-dial-lip-2: #223039;
+  --rp-dial-face-1: #1b3140;
+  --rp-dial-face-2: #0c161d;
+  --rp-dial-face-3: #05090d;
+}
+
+/* ---- 3D depth: how much shadow / bevel the surfaces carry ---------------- */
+:root,
+[data-depth="full"] {
+  --rp-hl-a: 0.08;
+  --rp-shadow-1: inset 0 1px 0 rgb(var(--rp-hl) / var(--rp-hl-a)), 0 1px 2px rgb(var(--rp-sh) / calc(0.4 * var(--rp-shk))),
+    0 4px 10px -2px rgb(var(--rp-sh) / calc(0.35 * var(--rp-shk)));
+  --rp-shadow-2: inset 0 1px 0 rgb(var(--rp-hl) / var(--rp-hl-a)), inset 0 -1px 0 rgb(var(--rp-sh) / calc(0.3 * var(--rp-shk))),
+    0 1px 2px rgb(var(--rp-sh) / calc(0.45 * var(--rp-shk))), 0 8px 20px -6px rgb(var(--rp-sh) / calc(0.55 * var(--rp-shk))),
+    0 22px 44px -22px rgb(var(--rp-sh) / calc(0.5 * var(--rp-shk)));
+  --rp-shadow-3: inset 0 1px 0 rgb(var(--rp-hl) / calc(var(--rp-hl-a) * 1.25)), inset 0 -1px 0 rgb(var(--rp-sh) / calc(0.35 * var(--rp-shk))),
+    0 2px 4px rgb(var(--rp-sh) / calc(0.5 * var(--rp-shk))), 0 14px 30px -8px rgb(var(--rp-sh) / calc(0.6 * var(--rp-shk))),
+    0 36px 70px -28px rgb(var(--rp-sh) / calc(0.65 * var(--rp-shk))), 0 0 0 1px rgb(var(--rp-accent) / 0.08);
+  --rp-shadow-inset: inset 0 2px 5px rgb(var(--rp-sh) / calc(0.45 * var(--rp-shk))), inset 0 -1px 0 rgb(var(--rp-hl) / 0.04);
+}
+[data-depth="subtle"] {
+  --rp-hl-a: 0.04;
+  --rp-shadow-1: 0 1px 2px rgb(var(--rp-sh) / calc(0.25 * var(--rp-shk)));
+  --rp-shadow-2: inset 0 1px 0 rgb(var(--rp-hl) / var(--rp-hl-a)), 0 6px 16px -8px rgb(var(--rp-sh) / calc(0.4 * var(--rp-shk)));
+  --rp-shadow-3: inset 0 1px 0 rgb(var(--rp-hl) / var(--rp-hl-a)), 0 14px 32px -14px rgb(var(--rp-sh) / calc(0.55 * var(--rp-shk))),
+    0 0 0 1px rgb(var(--rp-accent) / 0.08);
+  --rp-shadow-inset: inset 0 1px 3px rgb(var(--rp-sh) / calc(0.3 * var(--rp-shk)));
+}
+[data-depth="off"] {
+  --rp-hl-a: 0;
+  --rp-shadow-1: none;
+  --rp-shadow-2: none;
+  --rp-shadow-3: 0 0 0 1px rgb(var(--rp-accent) / 0.15);
+  --rp-shadow-inset: none;
+}
+
+/* The page colour lives on <html> only: a body background would paint over
+   the 3D world, which sits at a negative z-index behind the content. */
+html {
+  background-color: rgb(var(--rp-bg));
+  /* Nothing the 3D effects move (tilting cards, parallax layers, the scene) may ever make the
+     page scroll sideways. Hidden on the root is propagated to the viewport, so it cannot
+     break position: sticky; where overflow: clip exists the body also clips without becoming
+     a scroll container. */
+  overflow-x: hidden;
+}
+body {
+  background: transparent;
+  max-width: 100%;
+}
+@supports (overflow: clip) {
+  html {
+    overflow-x: clip;
+  }
+  body {
+    overflow-x: clip;
+  }
+}
+
+/* ---- corner radius ------------------------------------------------------- */
+[data-radius="sharp"] {
+  --rp-r-card: 0.25rem;
+  --rp-r-ctl: 0.125rem;
+  --rp-r-sm: 0.0625rem;
+}
+[data-radius="pill"] {
+  --rp-r-card: 1.75rem;
+  --rp-r-ctl: 1.1rem;
+  --rp-r-sm: 0.9rem;
+}
+
+/* ---- density: every rem-based size scales with the root ------------------ */
+html[data-density="compact"] {
+  font-size: 14.5px;
+}
+
+/* ==========================================================================
+   Shared surface language
+   --------------------------------------------------------------------------
+   Component-layer classes, so a Tailwind utility a caller adds (a border
+   colour, a background tint) still wins. Only transform and opacity are
+   animated; box-shadow changes ride a transition, never per frame.
+   ========================================================================== */
+@layer components {
+  /* A bevelled glass panel: a diagonal sheen over the surface colour, a lit
+     top edge (the inset in --rp-shadow-*), and layered drop shadows. */
+  .rp-card {
+    position: relative;
+    background-image: linear-gradient(
+      158deg,
+      rgb(var(--rp-hl) / var(--rp-sheen)) 0%,
+      rgb(var(--rp-hl) / calc(var(--rp-sheen) * 0.25)) 36%,
+      rgb(var(--rp-sh) / var(--rp-sheen-dark)) 100%
+    );
+    transition: box-shadow 0.22s ease, border-color 0.22s ease;
+  }
+  .rp-card.rp-interactive:hover {
+    border-color: rgb(var(--rp-accent) / 0.3);
+  }
+
+  /* Pointer tilt. The transform exists only while hovered, so an idle card
+     creates no stacking context and cannot trap a fixed-position child. The
+     --rp-* variables are written by useTilt from a single pointer handler. */
+  .rp-tilt {
+    transition: transform 0.18s cubic-bezier(0.2, 0.7, 0.2, 1), box-shadow 0.22s ease,
+      border-color 0.22s ease;
+  }
+  .rp-tilt:hover {
+    transform: perspective(900px) translateY(-3px) translateZ(14px) rotateX(var(--rp-rx, 0deg))
+      rotateY(var(--rp-ry, 0deg));
+  }
+  .rp-tilt::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.25s ease;
+    background: radial-gradient(
+      circle at var(--rp-mx, 50%) var(--rp-my, 0%),
+      rgb(var(--rp-hl) / 0.09),
+      transparent 55%
+    );
+  }
+  .rp-tilt:hover::after {
+    opacity: 1;
+  }
+
+  /* Physical buttons: a lit top edge, a solid "side" under the key, and a
+     press that sinks the key into that side. */
+  .rp-key {
+    transition: transform 0.08s ease, box-shadow 0.12s ease, filter 0.15s ease,
+      background-color 0.15s ease, border-color 0.15s ease;
+  }
+  .rp-key:active:not(:disabled) {
+    transform: translateY(2px);
+  }
+  .rp-key-primary {
+    background-image: linear-gradient(
+      180deg,
+      var(--rp-accent-hi) 0%,
+      rgb(var(--rp-accent)) 52%,
+      var(--rp-accent-lo) 100%
+    );
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.55), inset 0 -2px 0 rgb(0 0 0 / 0.12),
+      0 3px 0 var(--rp-accent-edge), 0 9px 18px -5px rgb(var(--rp-accent) / 0.5);
+  }
+  .rp-key-primary:hover:not(:disabled) {
+    filter: brightness(1.07);
+    transform: translateY(-1px);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.55), inset 0 -2px 0 rgb(0 0 0 / 0.12),
+      0 4px 0 var(--rp-accent-edge), 0 12px 22px -5px rgb(var(--rp-accent) / 0.6);
+  }
+  .rp-key-primary:active:not(:disabled) {
+    transform: translateY(3px);
+    box-shadow: inset 0 2px 5px rgb(0 0 0 / 0.28), 0 0 0 var(--rp-accent-edge),
+      0 3px 8px -3px rgb(var(--rp-accent) / 0.4);
+  }
+  .rp-key-secondary {
+    background-image: linear-gradient(180deg, rgb(var(--rp-hl) / 0.07), rgb(var(--rp-hl) / 0.01));
+    box-shadow: inset 0 1px 0 rgb(var(--rp-hl) / 0.08), 0 2px 0 rgb(var(--rp-sh) / calc(0.45 * var(--rp-shk))),
+      0 6px 12px -6px rgb(var(--rp-sh) / calc(0.6 * var(--rp-shk)));
+  }
+  .rp-key-secondary:hover:not(:disabled) {
+    border-color: rgb(var(--rp-accent) / 0.45);
+  }
+  .rp-key-secondary:active:not(:disabled) {
+    box-shadow: inset 0 2px 5px rgb(var(--rp-sh) / calc(0.45 * var(--rp-shk))), 0 0 0 transparent;
+  }
+  .rp-key-chip {
+    box-shadow: inset 0 1px 0 rgb(var(--rp-hl) / 0.06), 0 1px 0 rgb(var(--rp-sh) / calc(0.45 * var(--rp-shk)));
+  }
+  .rp-key-chip:active:not(:disabled) {
+    transform: translateY(1px);
+    box-shadow: inset 0 2px 4px rgb(var(--rp-sh) / calc(0.4 * var(--rp-shk)));
+  }
+
+  /* The animated gradient mesh behind every page: soft colour blobs drifting
+     slowly, plus a faint grid. Transform-only animation. */
+  .rp-blob {
+    position: absolute;
+    border-radius: 9999px;
+    will-change: transform;
+  }
+  .rp-grid {
+    background-image: linear-gradient(rgb(var(--rp-grid) / var(--rp-grid-a)) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(var(--rp-grid) / var(--rp-grid-a)) 1px, transparent 1px);
+    background-size: 44px 44px;
+    -webkit-mask-image: radial-gradient(ellipse at 50% 30%, #000 20%, transparent 75%);
+    mask-image: radial-gradient(ellipse at 50% 30%, #000 20%, transparent 75%);
+  }
+
+  /* Dots flowing along a path (HAProxy active route). The strip is wider than
+     its clip box and slides by exactly one dot period, so the loop is seamless. */
+  .rp-flow-dots {
+    position: absolute;
+    inset-block: 0;
+    inset-inline-start: 0;
+    width: calc(100% + 16px);
+    background-image: radial-gradient(circle, currentColor 2px, transparent 2.5px);
+    background-size: 16px 100%;
+    background-position: 0 50%;
+    background-repeat: repeat-x;
+  }
+}
+
+/* ==========================================================================
+   Appearance switches (unlayered: they have to win over component classes)
+   ========================================================================== */
+
+/* Depth: flat surfaces drop the sheen and the key-cap edges */
+[data-depth="off"] .rp-card {
+  background-image: none;
+}
+[data-depth="off"] .rp-key-primary,
+[data-depth="off"] .rp-key-secondary,
+[data-depth="off"] .rp-key-chip {
+  box-shadow: none;
+  background-image: none;
+}
+[data-depth="off"] .rp-key-primary {
+  background-color: rgb(var(--rp-accent));
+}
+[data-depth="off"] .rp-key-primary:hover:not(:disabled),
+[data-depth="off"] .rp-key-primary:active:not(:disabled),
+[data-depth="off"] .rp-key-secondary:active:not(:disabled),
+[data-depth="off"] .rp-key-chip:active:not(:disabled) {
+  box-shadow: none;
+  transform: none;
+}
+[data-depth="off"] .rp-tilt:hover {
+  transform: none;
+}
+[data-depth="off"] .rp-tilt::after,
+[data-depth="off"] .rp-gauge-glass {
+  display: none;
+}
+[data-depth="off"] .rp-gauge-needle-shadow {
+  filter: none !important;
+}
+[data-depth="subtle"] .rp-key-primary {
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.4), 0 1px 0 var(--rp-accent-edge),
+    0 4px 10px -4px rgb(var(--rp-accent) / 0.4);
+}
+[data-depth="subtle"] .rp-key-primary:hover:not(:disabled) {
+  transform: none;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.4), 0 1px 0 var(--rp-accent-edge),
+    0 6px 14px -4px rgb(var(--rp-accent) / 0.5);
+}
+[data-depth="subtle"] .rp-key-primary:active:not(:disabled) {
+  transform: translateY(1px);
+}
+[data-depth="subtle"] .rp-key-secondary {
+  box-shadow: inset 0 1px 0 rgb(var(--rp-hl) / 0.05);
+}
+/* The modal's perspective entrance is a "full" effect */
+[data-depth="off"] .animate-rp-rise,
+[data-depth="subtle"] .animate-rp-rise {
+  animation-name: rp-fade;
+}
+
+/* Motion: "reduced" keeps short fades but no looping or travelling
+   decoration; "none" is instant. The spinner is exempt from both - it is the
+   only thing telling the user a request is in flight. */
+[data-motion="reduced"] *:not(.animate-spin),
+[data-motion="reduced"] *:not(.animate-spin)::before,
+[data-motion="reduced"] *:not(.animate-spin)::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  scroll-behavior: auto !important;
+}
+[data-motion="none"] *:not(.animate-spin),
+[data-motion="none"] *:not(.animate-spin)::before,
+[data-motion="none"] *:not(.animate-spin)::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}
+/* the phone drawer slides; reduced motion and none make it appear at once */
+[data-motion="reduced"] .rp-drawer,
+[data-motion="none"] .rp-drawer,
+[data-motion="reduced"] .rp-drawer-backdrop,
+[data-motion="none"] .rp-drawer-backdrop {
+  transition: none !important;
+}
+[data-motion="reduced"] .rp-tilt:hover,
+[data-motion="none"] .rp-tilt:hover {
+  transform: none !important;
+}
+[data-motion="reduced"] .rp-key:active:not(:disabled),
+[data-motion="reduced"] .rp-key:hover:not(:disabled),
+[data-motion="none"] .rp-key:active:not(:disabled),
+[data-motion="none"] .rp-key:hover:not(:disabled) {
+  transform: none !important;
+}
+
+/* Daylight: the sky info colour is tuned for dark surfaces; on white it needs
+   its dark shade (the status trio is already dark through its variables). */
+[data-theme="daylight"] .text-sky-300,
+[data-theme="daylight"] .text-sky-400 {
+  color: rgb(3 105 161);
+}
+[data-theme="daylight"] .bg-white\/5 {
+  background-color: rgb(15 23 42 / 0.06);
+}
+[data-theme="daylight"] .bg-white\/10 {
+  background-color: rgb(15 23 42 / 0.1);
+}
+[data-theme="daylight"] .ring-white\/10 {
+  --tw-ring-color: rgb(15 23 42 / 0.12);
+}
+
+/* ==========================================================================
+   The 3D world behind the panel (rapido-ui/World.tsx)
+   --------------------------------------------------------------------------
+   A scene in CSS 3D: a sky, a glowing grid floor receding to a horizon with
+   haze, objects floating at several depths and a field of particles on one
+   canvas. A single pointer handler writes --cx / --cy (-1..1) on .rp-world;
+   each object scales that by its own --depth, so near things move more than
+   far ones. Everything animates by transform or opacity only; the root never
+   intercepts a click. The preset sets the look through the --w-* variables.
+   ========================================================================== */
+:root,
+[data-theme="cockpit"] {
+  --w-sky-1: 6 11 15;
+  --w-sky-2: 11 33 44;
+  --w-floor-1: 7 13 17;
+  --w-grid: var(--rp-accent);
+  --w-grid-a: 0.34;
+  --w-orb-a: 0.2;
+  --w-obj-a: 1;
+  --w-beam-a: 0.16;
+  --w-haze-a: 0.4;
+  --w-veil: 0.28;
+}
+[data-theme="aurora"] {
+  --w-sky-1: 8 6 26;
+  --w-sky-2: 36 20 70;
+  --w-floor-1: 10 8 30;
+  --w-grid-a: 0.1;
+  --w-orb-a: 0.42;
+  --w-beam-a: 0.1;
+  --w-haze-a: 0.3;
+  --w-veil: 0.2;
+}
+[data-theme="graphite"] {
+  --w-sky-1: 14 15 17;
+  --w-sky-2: 24 25 28;
+  --w-floor-1: 15 16 18;
+  --w-grid-a: 0;
+  --w-orb-a: 0.07;
+  --w-obj-a: 0.5;
+  --w-beam-a: 0;
+  --w-haze-a: 0.08;
+  --w-veil: 0.3;
+}
+[data-theme="daylight"] {
+  --w-sky-1: 205 226 245;
+  --w-sky-2: 239 247 253;
+  --w-floor-1: 226 235 244;
+  --w-grid: 51 65 85;
+  --w-grid-a: 0.16;
+  --w-orb-a: 0.3;
+  --w-beam-a: 0.12;
+  --w-haze-a: 0.25;
+  --w-veil: 0.15;
+}
+
+.rp-world {
+  --w-horizon: 44%;
+  position: fixed;
+  inset: 0;
+  z-index: -10;
+  overflow: hidden;
+  pointer-events: none;
+  /* The scene is clipped by its own box, never by the page: nothing oversize inside it can
+     widen the document. */
+  overflow: clip;
+  contain: strict;
+}
+/* one world, a little different per page: a wide horizon on Overview, the
+   path view on Tunnels, a denser and calmer room for Users */
+.rp-world[data-page="overview"] { --w-horizon: 40%; }
+.rp-world[data-page="tunnels"] { --w-horizon: 47%; }
+.rp-world[data-page="users"] { --w-horizon: 52%; --w-obj-a: 0.55; --w-beam-a: 0.06; }
+
+.rp-w-sky {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    to bottom,
+    rgb(var(--w-sky-1)) 0%,
+    rgb(var(--w-sky-2)) var(--w-horizon),
+    rgb(var(--w-floor-1)) 100%
+  );
+}
+.rp-w-haze {
+  position: absolute;
+  inset-inline: 0;
+  top: calc(var(--w-horizon) - 16%);
+  height: 32%;
+  background: radial-gradient(
+    60% 50% at 50% 50%,
+    rgb(var(--rp-accent) / var(--w-haze-a)),
+    rgb(var(--rp-accent) / calc(var(--w-haze-a) * 0.3)) 45%,
+    transparent 75%
+  );
+}
+.rp-w-horizon-line {
+  position: absolute;
+  inset-inline: 0;
+  top: var(--w-horizon);
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgb(var(--rp-accent) / 0.75), transparent);
+  box-shadow: 0 0 14px 1px rgb(var(--rp-accent) / 0.35);
+  opacity: calc(var(--w-grid-a) * 2.5);
+}
+.rp-w-cam {
+  position: absolute;
+  inset: 0;
+  transform-style: flat;
+}
+.rp-w-floor-wrap {
+  position: absolute;
+  inset-inline: 0;
+  top: var(--w-horizon);
+  bottom: 0;
+  overflow: hidden;
+  perspective: 620px;
+  perspective-origin: 50% 0;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 14%, #000 55%, rgba(0, 0, 0, 0.35) 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 14%, #000 55%, rgba(0, 0, 0, 0.35) 100%);
+}
+.rp-w-floor {
+  position: absolute;
+  left: -60%;
+  width: 220%;
+  top: 0;
+  height: 300%;
+  transform-origin: 50% 0;
+  transform: rotateX(76deg);
+}
+.rp-w-grid {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -96px;
+  height: calc(100% + 96px);
+  background-image: linear-gradient(rgb(var(--w-grid) / var(--w-grid-a)) 2px, transparent 2px),
+    linear-gradient(90deg, rgb(var(--w-grid) / var(--w-grid-a)) 2px, transparent 2px);
+  background-size: 96px 96px;
+  animation: rp-floor 9s linear infinite;
+}
+@keyframes rp-floor {
+  from { transform: translateY(0); }
+  to { transform: translateY(96px); }
+}
+/* the glow the floor throws under the panel */
+.rp-w-floorglow {
+  position: absolute;
+  inset-inline: 0;
+  bottom: -10%;
+  height: 45%;
+  background: radial-gradient(60% 70% at 50% 100%, rgb(var(--rp-accent) / 0.16), transparent 70%);
+}
+.rp-w-obj {
+  position: absolute;
+  --depth: 0.5;
+  transform: translate3d(calc(var(--cx, 0) * var(--depth) * -52px), calc(var(--cy, 0) * var(--depth) * -32px), 0);
+  transition: transform 0.4s cubic-bezier(0.2, 0.7, 0.2, 1);
+  opacity: var(--w-obj-a);
+}
+.rp-w-orb {
+  width: 100%;
+  height: 100%;
+  border-radius: 9999px;
+  background: radial-gradient(circle at 38% 34%, rgb(var(--orb) / calc(var(--w-orb-a) * 1.6)), rgb(var(--orb) / var(--w-orb-a)) 38%, rgb(var(--orb) / 0) 70%);
+  animation: rp-bob 11s ease-in-out infinite;
+}
+.rp-w-ring {
+  width: 100%;
+  height: 100%;
+  border-radius: 9999px;
+  border: 1.5px solid rgb(var(--orb) / 0.42);
+  box-shadow: 0 0 18px rgb(var(--orb) / 0.22), inset 0 0 18px rgb(var(--orb) / 0.12);
+  animation: rp-spin-tilt 42s linear infinite;
+}
+.rp-w-shard {
+  width: 100%;
+  height: 100%;
+  clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%);
+  background: linear-gradient(160deg, rgb(var(--orb) / 0.5), rgb(var(--orb) / 0.04) 70%);
+  animation: rp-spin-y 20s linear infinite;
+}
+.rp-w-beam {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(to top, rgb(var(--orb) / var(--w-beam-a)), rgb(var(--orb) / 0));
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 50%, transparent);
+  mask-image: linear-gradient(to right, transparent, #000 50%, transparent);
+  animation: rp-beam 7s ease-in-out infinite;
+}
+@keyframes rp-bob {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  50% { transform: translate3d(0, -16px, 0); }
+}
+@keyframes rp-spin-tilt {
+  from { transform: rotateX(68deg) rotateZ(0deg); }
+  to { transform: rotateX(68deg) rotateZ(360deg); }
+}
+@keyframes rp-spin-y {
+  from { transform: perspective(500px) rotateY(0deg); }
+  to { transform: perspective(500px) rotateY(360deg); }
+}
+@keyframes rp-beam {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+.rp-w-particles {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.rp-w-vignette {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(120% 95% at 50% 42%, transparent 50%, rgb(var(--rp-bg) / 0.7) 100%),
+    linear-gradient(rgb(var(--rp-bg) / var(--w-veil)), rgb(var(--rp-bg) / var(--w-veil)));
+}
+/* levels, motion and states */
+.rp-world[data-level="subtle"] .rp-only-immersive { display: none; }
+.rp-world[data-animated="false"] *,
+.rp-world[data-paused="true"] * { animation-play-state: paused !important; }
+.rp-world[data-animated="false"] .rp-w-obj { transition: none; transform: none; }
+.rp-world[data-animated="false"] * { animation: none !important; }
+.rp-world[data-fly="1"][data-animated="true"] .rp-w-cam { animation: rp-fly 0.7s cubic-bezier(0.2, 0.8, 0.2, 1); }
+@keyframes rp-fly {
+  from { transform: scale(1.08) translateY(2.5%); opacity: 0.55; }
+  to { transform: none; opacity: 1; }
+}
+/* touch: no pointer, so the camera drifts slowly instead */
+.rp-world[data-drift="on"][data-animated="true"] .rp-w-cam { animation: rp-drift 34s ease-in-out infinite alternate; }
+@keyframes rp-drift {
+  from { transform: translate3d(-1.2%, 0, 0) scale(1.02); }
+  to { transform: translate3d(1.2%, -0.6%, 0) scale(1.02); }
+}
+/* the sheen on dials is part of the old skeuomorphic dial and no longer exists */
+
+/* ---- JSON editor: syntax colours from the theme ---------------------------
+   keys = primary, strings = tertiary, numbers = secondary, true/false/null = warning,
+   punctuation = muted. Each colour is pulled toward the text colour so it stays readable on
+   whatever the surface is; the light preset pulls further. */
+.rp-json {
+  --rp-json-key: rgb(var(--rp-accent));
+  --rp-json-string: rgb(var(--rp-tertiary, var(--rp-teal)));
+  --rp-json-number: rgb(var(--rp-violet));
+  --rp-json-literal: rgb(var(--rp-warn));
+  --rp-json-punct: rgb(var(--rp-muted));
+}
+@supports (color: color-mix(in srgb, red, blue)) {
+  .rp-json {
+    --rp-json-key: color-mix(in srgb, rgb(var(--rp-accent)) 90%, rgb(var(--rp-text)));
+    --rp-json-string: color-mix(in srgb, rgb(var(--rp-tertiary, var(--rp-teal))) 90%, rgb(var(--rp-text)));
+    --rp-json-number: color-mix(in srgb, rgb(var(--rp-violet)) 90%, rgb(var(--rp-text)));
+    --rp-json-literal: color-mix(in srgb, rgb(var(--rp-warn)) 92%, rgb(var(--rp-text)));
+  }
+  [data-theme="daylight"] .rp-json {
+    --rp-json-key: color-mix(in srgb, rgb(var(--rp-accent)) 74%, rgb(var(--rp-text)));
+    --rp-json-string: color-mix(in srgb, rgb(var(--rp-tertiary, var(--rp-teal))) 72%, rgb(var(--rp-text)));
+    --rp-json-number: color-mix(in srgb, rgb(var(--rp-violet)) 86%, rgb(var(--rp-text)));
+    --rp-json-literal: color-mix(in srgb, rgb(var(--rp-warn)) 88%, rgb(var(--rp-text)));
+  }
+}
+.rp-json-key { color: var(--rp-json-key); }
+.rp-json-string { color: var(--rp-json-string); }
+.rp-json-number { color: var(--rp-json-number); }
+.rp-json-literal { color: var(--rp-json-literal); font-weight: 600; }
+.rp-json-punct { color: var(--rp-json-punct); }
+.rp-json-layer { color: rgb(var(--rp-text)); }
+.rp-json-input {
+  color: transparent;
+  caret-color: rgb(var(--rp-text));
+}
+.rp-json-input::selection { background: rgb(var(--rp-accent) / 0.35); color: transparent; }
+.rp-json-input::placeholder { color: rgb(var(--rp-muted)); }
+/* If colours are forced by the system the coloured copy is not trusted: show the real text. */
+@media (forced-colors: active) {
+  .rp-json-input { color: CanvasText; }
+  .rp-json-layer { display: none; }
+}

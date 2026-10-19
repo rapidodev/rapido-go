@@ -86,7 +86,7 @@ func testDispatcher(flags NotifyFlags, vals integrationsettings.Values, tgServer
 }
 
 func allFlags() NotifyFlags {
-	return NotifyFlags{StatusChange: true, UserCreated: true, UserUpdated: true, UserDeleted: true, UserDataUsedReset: true, UserSubRevoked: true, Login: true, InfraAlert: true}
+	return NotifyFlags{StatusChange: true, UserCreated: true, UserUpdated: true, UserDeleted: true, UserDataUsedReset: true, UserSubRevoked: true, Login: true, InfraAlert: true, AdminDigest: true}
 }
 
 func TestUserCreatedSendsTelegramAndDiscord(t *testing.T) {
@@ -408,5 +408,30 @@ func TestStatusChangeOnHold(t *testing.T) {
 	}
 	if !strings.Contains(tg.Requests()[0].Body, "OnHold") {
 		t.Errorf("telegram on_hold message missing #OnHold label: %s", tg.Requests()[0].Body)
+	}
+}
+
+func TestTunnelEventSendsBothChannelsAndRespectsTheInfraFlag(t *testing.T) {
+	tg := newCaptureServer()
+	defer tg.Close()
+	dc := newCaptureServer()
+	defer dc.Close()
+
+	vals := integrationsettings.Values{TelegramAPIToken: "tok", TelegramAdminIDs: []int64{111}, DiscordWebhookURL: dc.URL}
+	d := testDispatcher(allFlags(), vals, tg, dc)
+	d.TunnelEvent(context.Background(), "node2", "failover", "warning", "Traffic moved to the backup")
+
+	if len(tg.Requests()) != 1 || len(dc.Requests()) != 1 {
+		t.Fatalf("requests: telegram=%d discord=%d, want 1 each", len(tg.Requests()), len(dc.Requests()))
+	}
+	if !strings.Contains(tg.Requests()[0].Body, "node2") || !strings.Contains(tg.Requests()[0].Body, "Traffic moved to the backup") {
+		t.Errorf("telegram body = %s", tg.Requests()[0].Body)
+	}
+
+	flags := allFlags()
+	flags.InfraAlert = false
+	testDispatcher(flags, vals, tg, dc).TunnelEvent(context.Background(), "node2", "ceiling", "warning", "x")
+	if len(tg.Requests()) != 1 {
+		t.Error("NOTIFY_INFRA_ALERT=false must silence tunnel events too")
 	}
 }

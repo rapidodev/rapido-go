@@ -102,10 +102,12 @@ FROM gosrc AS panelbuild
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
+# Optional build tags (empty in the public build).
+ARG GO_TAGS=
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-        go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/panel ./cmd/panel
+        go build -trimpath -tags "${GO_TAGS}" -ldflags "-s -w -X main.version=${VERSION}" -o /out/panel ./cmd/panel
 
 # --- node agent binaries ------------------------------------------------------------
 # Built for BOTH linux architectures whatever the panel image's own target is:

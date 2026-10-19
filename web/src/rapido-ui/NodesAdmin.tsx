@@ -46,6 +46,18 @@ import { Input } from "rapido-ui/Input";
 import { Checkbox } from "rapido-ui/Checkbox";
 import { Modal } from "rapido-ui/Modal";
 import { NodeLoadChip } from "rapido-ui/NodeLoadChip";
+import { ResourceMeter } from "rapido-ui/ResourceMeter";
+import { Cluster, ClusterZone } from "rapido-ui/Cluster";
+import { NodeCluster } from "rapido-ui/NodeCluster";
+import { PortList } from "rapido-ui/PortChips";
+import { RestartNodeButton } from "rapido-ui/RestartNodeModal";
+import { PulseDot } from "rapido-ui/Badge";
+import { SplitBar } from "rapido-ui/Segments";
+import { GAUGE_CYAN, GAUGE_VIOLET } from "rapido-ui/instrument";
+import { useMonitoringQuery } from "hooks/useMonitoringQuery";
+import { useTunnelsQuery } from "hooks/useTunnelsQuery";
+import { hostDisplayState } from "utils/monitoringHost";
+import { agoText } from "utils/ago";
 
 // Full CRUD for the physical/VPS servers a node agent runs on - not to be
 // confused with rapido-ui/HostsAdmin.tsx's Hosts, which are proxy connection
@@ -64,9 +76,9 @@ import { NodeLoadChip } from "rapido-ui/NodeLoadChip";
 //    are managed entirely separately on the Hosts page in this backend.
 
 const cardToneClasses: Partial<Record<BadgeTone, string>> = {
-  green: "!border-emerald-500/60 bg-emerald-500/[0.04]",
-  yellow: "!border-yellow-500/60 bg-yellow-500/[0.04]",
-  red: "!border-red-500/60 bg-red-500/[0.04]",
+  green: "!border-emerald-500/60",
+  yellow: "!border-yellow-500/60",
+  red: "!border-red-500/60",
 };
 
 // ---------------------------------------------------------------------------
@@ -614,63 +626,78 @@ const NodeCard: FC<{
     );
   };
 
+  // The same instrument cluster as Monitoring and the tunnels, from what the
+  // panel really knows: the live monitoring sample when the node reports one,
+  // otherwise just its client load.
+  const { data: snap } = useMonitoringQuery();
+  const { data: tunnels } = useTunnelsQuery();
+  const host = snap?.hosts.find((h) => h.node_id === node.id);
+  const nodeTunnels = (tunnels ?? []).filter((tn) => tn.node_id === node.id);
+  const hostState = host ? hostDisplayState(host) : "no-data";
+  const chip = "rounded-md bg-rapido-raised px-1.5 py-0.5 text-[11px] tabular-nums text-rapido-text ring-1 ring-inset ring-white/10";
+
   return (
-    <Card className={classNames("p-4", cardToneClasses[tone])}>
-      <div className="flex flex-col gap-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="truncate text-sm font-semibold">{node.name}</span>
-            <Badge tone={tone}>{t(`nodes.status.${node.status}`, node.status)}</Badge>
-            {custom && (
-              <Badge tone="brand" title={profileTitle}>
-                {t("rapido.nodes.customProfile")}
-              </Badge>
+    <Card tilt tiltMax={1.5} className={classNames("p-4 sm:p-5", cardToneClasses[tone])}>
+      <div className="flex flex-col gap-4">
+        {/* header bar: identity on the left, actions grouped at the end */}
+        <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
+          <div className="flex min-w-0 flex-col gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <PulseDot tone={tone} live={node.status === "connected"} />
+              <span className="truncate text-base font-semibold">{node.name}</span>
+              <Badge tone={tone}>{t(`nodes.status.${node.status}`, node.status)}</Badge>
+              {custom && (
+                <Badge tone="brand" title={profileTitle}>
+                  {t("rapido.nodes.customProfile")}
+                </Badge>
+              )}
+              {load && <NodeLoadChip load={load} />}
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5 text-xs text-rapido-muted">
+              <span className={chip} dir="ltr" title={String(t("nodes.nodeAddress"))}>
+                {node.address}
+              </span>
+              {host?.xray_version && (
+                <span className={chip} dir="ltr">
+                  {host.xray_version}
+                </span>
+              )}
+              {host?.collected_at && (
+                <span>
+                  {t("rapido.monitoring.lastSeen")} {agoText(t, host.collected_at)}
+                </span>
+              )}
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Button variant="chip" tone="accent" onClick={onEdit}>
+              {t("rapido.edit")}
+            </Button>
+            <Button
+              variant="chip"
+              tone={isDisabled ? "sky" : "amber"}
+              disabled={updateNode.isPending}
+              onClick={toggleDisabled}
+            >
+              {isDisabled ? t("rapido.hosts.enable") : t("rapido.hosts.disable")}
+            </Button>
+            <RestartNodeButton node={{ id: node.id, name: node.name, ssh_known: node.ssh_known }} />
+            {confirmDelete ? (
+              <>
+                <span className="text-xs text-red-400">{t("rapido.nodes.confirmDelete")}</span>
+                <Button variant="chip" tone="red" disabled={deleteNode.isPending} onClick={remove}>
+                  {t("delete")}
+                </Button>
+                <Button variant="chip" onClick={() => setConfirmDelete(false)}>
+                  {t("cancel")}
+                </Button>
+              </>
+            ) : (
+              <Button variant="chip" tone="red" onClick={() => setConfirmDelete(true)}>
+                {t("delete")}
+              </Button>
             )}
           </div>
-          {load && <NodeLoadChip load={load} />}
-        </div>
-
-        <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-rapido-muted">
-          <span>
-            {t("nodes.nodeAddress")}:{" "}
-            <span className="text-rapido-text" dir="ltr">
-              {node.address}
-            </span>
-          </span>
-          <span>
-            {t("nodes.nodePort")}:{" "}
-            <span className="text-rapido-text" dir="ltr">
-              {node.port}
-            </span>
-          </span>
-          <span>
-            {t("nodes.nodeAPIPort")}:{" "}
-            <span className="text-rapido-text" dir="ltr">
-              {node.api_port}
-            </span>
-          </span>
-          <span title={t("rapido.nodes.capacityField")}>
-            {t("rapido.nodes.capacity")}:{" "}
-            {node.capacity != null ? (
-              <span className="text-rapido-text" dir="ltr">
-                {node.capacity}
-              </span>
-            ) : (
-              <span className="text-rapido-text">
-                {defaultCapacity
-                  ? t("rapido.nodes.capacityDefaultValue", { value: ltrIsolate(defaultCapacity) })
-                  : t("rapido.nodes.capacityDefault")}
-              </span>
-            )}
-          </span>
-          {node.usage_coefficient !== 1 && (
-            <span>
-              {t("nodes.usageCoefficient")}:{" "}
-              <span className="text-rapido-text" dir="ltr">
-                ×{node.usage_coefficient}
-              </span>
-            </span>
-          )}
         </div>
 
         {msg && (
@@ -686,32 +713,61 @@ const NodeCard: FC<{
           </div>
         )}
 
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Button variant="chip" tone="accent" onClick={onEdit}>
-            {t("rapido.edit")}
-          </Button>
-          <Button
-            variant="chip"
-            tone={isDisabled ? "sky" : "amber"}
-            disabled={updateNode.isPending}
-            onClick={toggleDisabled}
-          >
-            {isDisabled ? t("rapido.hosts.enable") : t("rapido.hosts.disable")}
-          </Button>
-          {confirmDelete ? (
-            <>
-              <span className="text-xs text-red-400">{t("rapido.nodes.confirmDelete")}</span>
-              <Button variant="chip" tone="red" disabled={deleteNode.isPending} onClick={remove}>
-                {t("delete")}
-              </Button>
-              <Button variant="chip" onClick={() => setConfirmDelete(false)}>
-                {t("cancel")}
-              </Button>
-            </>
-          ) : (
-            <Button variant="chip" tone="red" onClick={() => setConfirmDelete(true)}>
-              {t("delete")}
-            </Button>
+        {host && hostState !== "no-data" ? (
+          <NodeCluster host={host} load={load} tunnels={nodeTunnels} />
+        ) : load && Number.isFinite(load.percent) ? (
+          <Cluster minZone="0px">
+            <ClusterZone title={t("rapido.nodes.loadGaugeLabel")}>
+              <div className="flex items-center gap-4">
+                <ResourceMeter
+                  value={Math.min(100, Math.max(0, load.percent))}
+                  max={100}
+                  unit="%"
+                  size={100}
+                  ariaLabel={String(t("rapido.nodes.loadGaugeLabel"))}
+                />
+                <div className="flex min-w-0 flex-col gap-0.5 text-xs text-rapido-muted">
+                  <span>{t("rapido.nodes.loadGaugeLabel")}</span>
+                  <span className="tabular-nums text-rapido-text" dir="ltr">
+                    {load.conns} / {load.capacity}
+                  </span>
+                </div>
+              </div>
+            </ClusterZone>
+          </Cluster>
+        ) : null}
+
+        {/* footer: ports and settings as chips, with room for an events strip */}
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-rapido-border/60 pt-3 text-xs text-rapido-muted">
+          <span className="flex items-center gap-1.5">
+            {t("nodes.nodePort")}: <span className={chip} dir="ltr">{node.port}</span>
+          </span>
+          <span className="flex items-center gap-1.5">
+            {t("nodes.nodeAPIPort")}: <span className={chip} dir="ltr">{node.api_port}</span>
+          </span>
+          <span className="flex items-center gap-1.5" title={String(t("rapido.nodes.capacityField"))}>
+            {t("rapido.nodes.capacity")}:{" "}
+            {node.capacity != null ? (
+              <span className={chip} dir="ltr">
+                {node.capacity}
+              </span>
+            ) : (
+              <span className="text-rapido-text">
+                {defaultCapacity
+                  ? t("rapido.nodes.capacityDefaultValue", { value: ltrIsolate(defaultCapacity) })
+                  : t("rapido.nodes.capacityDefault")}
+              </span>
+            )}
+          </span>
+          {node.usage_coefficient !== 1 && (
+            <span className="flex items-center gap-1.5">
+              {t("nodes.usageCoefficient")}: <span className={chip} dir="ltr">×{node.usage_coefficient}</span>
+            </span>
+          )}
+          {node.listen_ports && node.listen_ports.length > 0 && (
+            <span className="flex flex-wrap items-center gap-1.5">
+              {t("rapido.monitoring.listenPorts")} ({node.listen_ports.length}) <PortList ports={node.listen_ports} />
+            </span>
           )}
         </div>
       </div>
@@ -804,14 +860,15 @@ const UsagePanel: FC = () => {
                       {formatBytes(total)}
                     </span>
                   </div>
-                  <div className="h-2 w-full overflow-hidden rounded-full bg-white/5">
-                    {/* One bar, split by direction: down is what customers
-                        pulled, up is what they sent. */}
-                    <div className="flex h-full" style={{ width: `${pct}%` }}>
-                      <div className="h-full bg-sky-400/70" style={{ width: `${upPct}%` }} />
-                      <div className="h-full flex-1 bg-rapido-accent" />
-                    </div>
-                  </div>
+                  {/* One bar, split by direction: down (blue) is what customers
+                      pulled, up (violet) is what they sent. */}
+                  <SplitBar
+                    fill={pct}
+                    parts={[
+                      { value: upPct, color: GAUGE_VIOLET },
+                      { value: 100 - upPct, color: GAUGE_CYAN },
+                    ]}
+                  />
                   <div className="mt-0.5 flex gap-3 text-[11px] text-rapido-muted">
                     <span>
                       ↑{" "}

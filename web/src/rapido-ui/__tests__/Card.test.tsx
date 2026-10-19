@@ -6,8 +6,23 @@ describe("Card", () => {
   it("renders on the surface token with the control-room radius", () => {
     render(<Card data-testid="card">content</Card>);
     const el = screen.getByTestId("card");
-    expect(el).toHaveClass("bg-rapido-surface");
+    expect(el).toHaveClass("bg-rapido-surface/75");
     expect(el).toHaveClass("rounded-xl2");
+  });
+
+  it("is a bevelled glass panel at the default elevation, and flat of tilt unless asked", () => {
+    render(<Card data-testid="card">content</Card>);
+    const el = screen.getByTestId("card");
+    expect(el).toHaveClass("rp-card");
+    expect(el).toHaveClass("shadow-rp-2");
+    expect(el).not.toHaveClass("rp-tilt");
+  });
+
+  it("takes an elevation and opts in to tilt", () => {
+    render(<Card data-testid="card" elevation={3} tilt>content</Card>);
+    const el = screen.getByTestId("card");
+    expect(el).toHaveClass("shadow-rp-3");
+    expect(el).toHaveClass("rp-tilt");
   });
 
   it("merges a caller className without dropping the base styling", () => {
@@ -17,7 +32,7 @@ describe("Card", () => {
       </Card>
     );
     const el = screen.getByTestId("card");
-    expect(el).toHaveClass("bg-rapido-surface");
+    expect(el).toHaveClass("bg-rapido-surface/75");
     expect(el).toHaveClass("border-emerald-500/30");
   });
 });

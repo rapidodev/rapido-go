@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -127,11 +128,23 @@ type nodeDTO struct {
 	// Capacity is how many open client connections read as 100% load on this
 	// node; null means the panel-wide default (CONFIG_LOAD_CAPACITY) applies.
 	Capacity *int32 `json:"capacity"`
+	// SSHKnown is true when some tunnel row stores an SSH login for this node, so
+	// POST /api/node/:id/restart needs no password in its body.
+	SSHKnown bool `json:"ssh_known"`
 	// The node's profile, each omitted while it is the default (see
 	// nodeProfile), so a node nobody customised serializes as it always did.
 	InboundTags   []string        `json:"inbound_tags,omitempty"`
 	ListenPorts   []int32         `json:"listen_ports,omitempty"`
 	CoreOverrides json.RawMessage `json:"core_overrides,omitempty"`
+}
+
+// nodeDTO is toNodeDTO plus the one field that needs a lookup.
+func (h *Handler) nodeDTO(ctx context.Context, n generated.Node) nodeDTO {
+	dto := toNodeDTO(n)
+	if _, err := h.store.Queries.GetNodeSSHLogin(ctx, n.ID); err == nil {
+		dto.SSHKnown = true
+	}
+	return dto
 }
 
 func toNodeDTO(n generated.Node) nodeDTO {
@@ -264,8 +277,8 @@ func (h *Handler) handleCreateNode(c *gin.Context) {
 	// panel's NodeResponse - a client doing resp["id"] right after creating
 	// a node must find it there. The nested "node" key is kept as well so
 	// this panel's own dashboard keeps working; extra keys break nobody.
-	merged, err := mergeJSONObjects(toNodeDTO(node), gin.H{
-		"node":           toNodeDTO(node),
+	merged, err := mergeJSONObjects(h.nodeDTO(c.Request.Context(), node), gin.H{
+		"node":           h.nodeDTO(c.Request.Context(), node),
 		"setup_blob":     setupBlob,
 		"certificate":    nodeCert.CertPEM,
 		"key":            nodeCert.KeyPEM,
@@ -350,7 +363,7 @@ func (h *Handler) handleUpdateNode(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not update node"})
 			return
 		}
-		c.JSON(http.StatusOK, toNodeDTO(node))
+		c.JSON(http.StatusOK, h.nodeDTO(c.Request.Context(), node))
 		return
 	}
 
@@ -415,7 +428,7 @@ func (h *Handler) handleUpdateNode(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Node not found"})
 		return
 	}
-	c.JSON(http.StatusOK, toNodeDTO(node))
+	c.JSON(http.StatusOK, h.nodeDTO(c.Request.Context(), node))
 }
 
 // handleListNodes implements GET /api/nodes (sudo only).
@@ -425,9 +438,17 @@ func (h *Handler) handleListNodes(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not list nodes"})
 		return
 	}
+	known := map[int32]bool{}
+	if ids, err := h.store.Queries.ListNodeIDsWithSSH(c.Request.Context()); err == nil {
+		for _, id := range ids {
+			known[id] = true
+		}
+	}
 	out := make([]nodeDTO, 0, len(nodes))
 	for _, n := range nodes {
-		out = append(out, toNodeDTO(n))
+		dto := toNodeDTO(n)
+		dto.SSHKnown = known[n.ID]
+		out = append(out, dto)
 	}
 	c.JSON(http.StatusOK, out)
 }
@@ -444,7 +465,7 @@ func (h *Handler) handleGetNode(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Node not found"})
 		return
 	}
-	c.JSON(http.StatusOK, toNodeDTO(node))
+	c.JSON(http.StatusOK, h.nodeDTO(c.Request.Context(), node))
 }
 
 // handleDeleteNode implements DELETE /api/node/:id (sudo only).

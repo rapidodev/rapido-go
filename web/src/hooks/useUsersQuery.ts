@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { fetch } from "service/http";
+import { fetch, fetcher } from "service/http";
 import {
   Status,
   User,
@@ -93,4 +93,25 @@ export const useRevokeUserSubMutation = () => {
       fetch<User>(`/user/${username}/revoke_sub`, { method: "POST" }),
     onSuccess: () => invalidateUsers(queryClient),
   });
+};
+
+/**
+ * Saves the user list as a CSV file. The export carries the same filters as the list (search,
+ * status, reseller, sort) but no paging. Fetched with the bearer token and handed to the
+ * browser through a synthetic download link - a plain <a href> could not send the token.
+ */
+export const downloadUsersCsv = async (filters: UsersFilters): Promise<void> => {
+  const { limit: _limit, offset: _offset, ...rest } = cleanFilters(filters) as Record<string, unknown>;
+  const blob = await fetcher<Blob, "blob">("/users/export", { query: rest, responseType: "blob" });
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "users.csv";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 };

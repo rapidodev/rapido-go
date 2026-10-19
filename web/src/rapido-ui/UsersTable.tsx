@@ -1,8 +1,9 @@
-import { FC, useEffect, useMemo, useState } from "react";
+import { FC, ReactNode, useEffect, useMemo, useState } from "react";
+import { ArrowPathIcon, EllipsisHorizontalIcon, KeyIcon, LinkIcon, PencilSquareIcon, TrashIcon } from "@heroicons/react/24/outline";
 import { useTranslation } from "react-i18next";
 import debounce from "lodash.debounce";
 import classNames from "classnames";
-import { useUsersQuery, UsersFilters } from "hooks/useUsersQuery";
+import { useUsersQuery, UsersFilters, downloadUsersCsv } from "hooks/useUsersQuery";
 import { useAdminsQuery } from "hooks/useAdminsQuery";
 import { useIsSudo } from "hooks/useCurrentAdminQuery";
 import { useUsersUiStore } from "rapido-ui/usersUiStore";
@@ -13,6 +14,14 @@ import { LastSeen, lastSeenOf } from "utils/presence";
 import { setUsersPerPageLimitSize } from "utils/userPreferenceStorage";
 import { Card, CardTitle, CardSubtitle } from "rapido-ui/Card";
 import { Badge } from "rapido-ui/Badge";
+import { LOAD_ZONES, solidZones } from "rapido-ui/Gauge";
+import { GAUGE_BAD, GAUGE_CYAN, GAUGE_GOOD, GAUGE_VIOLET, GAUGE_WARN, TYPE } from "rapido-ui/instrument";
+import { Cluster, ClusterZone } from "rapido-ui/Cluster";
+import { SegmentBar } from "rapido-ui/Segments";
+import { StatusPill } from "rapido-ui/StatusPill";
+import { useSystemStatsQuery } from "hooks/useSystemStatsQuery";
+import { ResourceMeter } from "rapido-ui/ResourceMeter";
+import { useAppearance } from "rapido-ui/appearance";
 import { Button } from "rapido-ui/Button";
 import { Input } from "rapido-ui/Input";
 import { Select } from "rapido-ui/Select";
@@ -59,12 +68,13 @@ const sortOptions: { value: string; labelKey: string }[] = [
 type CardTone = BadgeTone;
 
 const cardToneClasses: Record<CardTone, string> = {
-  green: "!border-emerald-500/60 bg-emerald-500/[0.04]",
-  sky: "!border-sky-500/60 bg-sky-500/[0.04]",
-  yellow: "!border-yellow-500/60 bg-yellow-500/[0.04]",
-  orange: "!border-orange-500/60 bg-orange-500/[0.04]",
-  red: "!border-red-500/60 bg-red-500/[0.04]",
+  green: "!border-emerald-500/60",
+  sky: "!border-sky-500/60",
+  yellow: "!border-yellow-500/60",
+  orange: "!border-orange-500/60",
+  red: "!border-red-500/60",
   brand: "!border-rapido-accent/60 bg-rapido-accent/[0.04]",
+  violet: "!border-rapido-violet/60 bg-rapido-violet/[0.04]",
   gray: "",
 };
 
@@ -120,6 +130,31 @@ const buildPageItems = (
   return items;
 };
 
+// The actions of a user card as one toolbar: the two everyday ones (Edit, Subscription link) with
+// icon and label, the rare ones (Reset usage, Revoke subscription) behind a "..." menu so a narrow
+// card does not wrap into three rows, and Delete on its own at the far end, in red.
+const ToolButton: FC<{ icon: ReactNode; label: string; tone: "accent" | "sky" | "red"; onClick: () => void; iconOnly?: boolean }> = ({
+  icon,
+  label,
+  tone,
+  onClick,
+  iconOnly,
+}) => (
+  <Button
+    variant="chip"
+    tone={tone}
+    onClick={onClick}
+    aria-label={iconOnly ? label : undefined}
+    title={iconOnly ? label : undefined}
+    className="flex items-center gap-1.5"
+  >
+    <span className="h-3.5 w-3.5 shrink-0 [&>svg]:h-3.5 [&>svg]:w-3.5" aria-hidden="true">
+      {icon}
+    </span>
+    {!iconOnly && label}
+  </Button>
+);
+
 const UserActions: FC<{ user: User }> = ({ user }) => {
   const { t } = useTranslation();
   const setEditingUser = useUsersUiStore((s) => s.setEditingUser);
@@ -127,6 +162,7 @@ const UserActions: FC<{ user: User }> = ({ user }) => {
   const setResetUsageUser = useUsersUiStore((s) => s.setResetUsageUser);
   const setRevokeSubscriptionUser = useUsersUiStore((s) => s.setRevokeSubscriptionUser);
   const setSubscriptionLinkUser = useUsersUiStore((s) => s.setSubscriptionLinkUser);
+  const [menu, setMenu] = useState(false);
 
   // A Gateway replica (see types/User.ts's own doc comment) can only
   // change via the panel that actually owns it - the backend rejects a
@@ -137,36 +173,73 @@ const UserActions: FC<{ user: User }> = ({ user }) => {
 
   return (
     <div className="flex flex-wrap items-center gap-1.5">
-      {!isReplica && (
-        <Button variant="chip" tone="accent" onClick={() => setEditingUser(user)}>
-          {t("rapido.edit")}
+      {!isReplica && <ToolButton icon={<PencilSquareIcon />} label={String(t("rapido.edit"))} tone="accent" onClick={() => setEditingUser(user)} />}
+      <ToolButton icon={<LinkIcon />} label={String(t("rapido.subscriptionLink"))} tone="sky" onClick={() => setSubscriptionLinkUser(user)} />
+      <div className="relative" onBlur={(e) => !e.currentTarget.contains(e.relatedTarget as Node) && setMenu(false)}>
+        <Button
+          variant="chip"
+          aria-haspopup="menu"
+          aria-expanded={menu}
+          aria-label={String(t("rapido.users.moreActions"))}
+          onClick={() => setMenu((v) => !v)}
+        >
+          <EllipsisHorizontalIcon className="h-4 w-4" aria-hidden="true" />
         </Button>
-      )}
-      <Button variant="chip" tone="amber" onClick={() => setResetUsageUser(user)}>
-        {t("userDialog.resetUsage")}
-      </Button>
-      <Button variant="chip" tone="amber" onClick={() => setRevokeSubscriptionUser(user)}>
-        {t("userDialog.revokeSubscription")}
-      </Button>
-      <Button variant="chip" tone="sky" onClick={() => setSubscriptionLinkUser(user)}>
-        {t("rapido.subscriptionLink")}
-      </Button>
-      <Button variant="chip" tone="red" onClick={() => setDeletingUser(user)}>
-        {t("delete")}
-      </Button>
+        {menu && (
+          <div
+            role="menu"
+            className="absolute bottom-full z-20 mb-1.5 flex min-w-[11rem] flex-col gap-0.5 rounded-lg border border-rapido-border bg-rapido-surface p-1 shadow-rp-3 start-0"
+          >
+            <button
+              type="button"
+              role="menuitem"
+              className="flex items-center gap-2 rounded-md px-2.5 py-1.5 text-start text-xs text-rapido-warn hover:bg-rapido-raised"
+              onClick={() => {
+                setMenu(false);
+                setResetUsageUser(user);
+              }}
+            >
+              <ArrowPathIcon className="h-3.5 w-3.5" aria-hidden="true" />
+              {t("userDialog.resetUsage")}
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="flex items-center gap-2 rounded-md px-2.5 py-1.5 text-start text-xs text-rapido-warn hover:bg-rapido-raised"
+              onClick={() => {
+                setMenu(false);
+                setRevokeSubscriptionUser(user);
+              }}
+            >
+              <KeyIcon className="h-3.5 w-3.5" aria-hidden="true" />
+              {t("userDialog.revokeSubscription")}
+            </button>
+          </div>
+        )}
+      </div>
+      <span className="ms-auto" />
+      <ToolButton icon={<TrashIcon />} label={String(t("delete"))} tone="red" iconOnly onClick={() => setDeletingUser(user)} />
     </div>
   );
 };
 
-const UserRow: FC<{ user: User }> = ({ user }) => {
+const DAY = 86400;
+
+const UserRow: FC<{ user: User; showAdmin: boolean }> = ({ user, showAdmin }) => {
   const { t } = useTranslation();
   const protocols = Object.keys(user.proxies);
   const hasLimit = !!user.data_limit;
-  const usedPercent = hasLimit
-    ? Math.min((user.used_traffic / (user.data_limit as number)) * 100, 100)
-    : 0;
+  const usedPercent = hasLimit ? Math.min((user.used_traffic / (user.data_limit as number)) * 100, 100) : 0;
   const expiryInfo = relativeExpiryDate(user.expire);
   const lastSeen = lastSeenOf(user.online_at, user.online);
+
+  // Days left, against the length of the period the user was given (creation to expiry),
+  // capped to a sensible bar when the period is long or unknown.
+  const nowSec = Date.now() / 1000;
+  const daysLeft = user.expire ? Math.max(0, (user.expire - nowSec) / DAY) : null;
+  const periodDays = user.expire ? Math.max(1, (user.expire - Date.parse(user.created_at) / 1000) / DAY) : null;
+  const periodMax = periodDays && Number.isFinite(periodDays) ? Math.min(periodDays, 365) : 30;
+  const expiringSoon = daysLeft !== null && daysLeft <= 3;
 
   // A connected customer is shown green regardless of status, since presence is
   // the more immediate signal; otherwise the card carries its status colour, so
@@ -183,95 +256,147 @@ const UserRow: FC<{ user: User }> = ({ user }) => {
       ? "sky"
       : statusToneOf;
 
+  const ringZones = user.status === "limited" ? solidZones(GAUGE_BAD) : LOAD_ZONES;
+
   return (
-    <Card className={classNames("p-4", cardToneClasses[cardTone])}>
-      <div className="flex flex-col gap-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <CardTitle className="min-w-0 break-all text-base" dir="ltr">
-              {user.username}
-            </CardTitle>
-            <span className="flex items-center gap-1.5">
-              <PresenceDot kind={lastSeen.kind} />
-              <CardSubtitle
-                className={classNames(
-                  lastSeen.kind === "online" && "text-emerald-400"
-                )}
-              >
-                {lastSeen.kind === "online" && t("rapido.onlineNowLabel")}
-                {lastSeen.kind === "never" && t("rapido.neverConnected")}
-                {lastSeen.kind === "seen" &&
-                  t("rapido.lastSeen", {
-                    time: ltrIsolate(lastSeen.time || t("rapido.underAMinute")),
-                  })}
-              </CardSubtitle>
-            </span>
-          </div>
-          <div className="flex flex-wrap items-center gap-1.5">
-            <Badge tone={statusTone[user.status] ?? "gray"}>
-              {t(`status.${user.status}`)}
+    <Card tilt tiltMax={2} className={classNames("flex min-w-0 flex-col gap-3 p-4", cardToneClasses[cardTone])}>
+      {/* header: who, how they are, and what protocols */}
+      <div className="flex flex-col gap-1.5">
+        <div className="flex items-start justify-between gap-2">
+          <CardTitle className="min-w-0 break-all text-base" dir="ltr">
+            {user.username}
+          </CardTitle>
+          <StatusPill tone={statusToneOf} live={lastSeen.kind === "online"} className="shrink-0">
+            {t(`status.${user.status}`)}
+          </StatusPill>
+        </div>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="flex items-center gap-1.5">
+            <PresenceDot kind={lastSeen.kind} />
+            <CardSubtitle className={classNames(lastSeen.kind === "online" && "text-emerald-400")}>
+              {lastSeen.kind === "online" && t("rapido.onlineNowLabel")}
+              {lastSeen.kind === "never" && t("rapido.neverConnected")}
+              {lastSeen.kind === "seen" &&
+                t("rapido.lastSeen", {
+                  time: ltrIsolate(lastSeen.time || t("rapido.underAMinute")),
+                })}
+            </CardSubtitle>
+          </span>
+          {user.synced_from_panel_name && (
+            <Badge tone="sky" className="px-1.5 py-0.5 text-[10px]">
+              {t("rapido.gateway.syncedFrom", { name: user.synced_from_panel_name })}
             </Badge>
-            {user.synced_from_panel_name && (
-              <Badge tone="sky">
-                {t("rapido.gateway.syncedFrom", { name: user.synced_from_panel_name })}
-              </Badge>
-            )}
-            {protocols.map((protocol) => (
-              <Badge key={protocol} tone="brand">
-                {protocol}
-              </Badge>
-            ))}
-          </div>
-        </div>
-
-        <div className="flex flex-col gap-1.5">
-          <div className="flex items-center justify-between gap-2 text-xs text-rapido-muted">
-            <span className="tabular-nums" dir="ltr">
-              {formatBytes(user.used_traffic)}
-            </span>
-            <span
-              className={hasLimit ? "tabular-nums" : undefined}
-              dir={hasLimit ? "ltr" : undefined}
-            >
-              {hasLimit
-                ? formatBytes(user.data_limit as number)
-                : t("rapido.unlimited")}
-            </span>
-          </div>
-          <div className="h-1.5 w-full overflow-hidden rounded-full bg-rapido-border">
-            <div
-              className={classNames(
-                "h-full rounded-full",
-                user.status === "limited" ? "bg-red-500" : "bg-rapido-accent"
-              )}
-              style={{ width: `${usedPercent}%` }}
-            />
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs text-rapido-muted">
-          <span
-            className={
-              expiryInfo.status === "expired" ? "text-red-400" : undefined
-            }
-          >
-            {expiryInfo.status === "expires" &&
-              t("expires", { time: ltrIsolate(expiryInfo.time) })}
-            {expiryInfo.status === "expired" &&
-              t("expired", { time: ltrIsolate(expiryInfo.time) })}
-          </span>
-          <span>
-            {t("rapido.totalLabel", {
-              value: ltrIsolate(String(formatBytes(user.lifetime_used_traffic))),
-            })}
-          </span>
-        </div>
-
-        <div className="border-t border-rapido-border pt-2">
-          <UserActions user={user} />
+          )}
+          {protocols.map((protocol) => (
+            <Badge key={protocol} tone="brand" className="px-1.5 py-0.5 text-[10px]">
+              {protocol}
+            </Badge>
+          ))}
         </div>
       </div>
+
+      {/* one plate, two zones: what they used, and how long they have left */}
+      <Cluster fixed className="grid-cols-1" aria-label={user.username}>
+        <ClusterZone title={t("rapido.users.trafficUsed")} className="p-3">
+          <div className="flex items-center gap-3">
+            {hasLimit ? (
+              <ResourceMeter value={usedPercent} max={100} unit="%" size={88} ariaLabel={String(t("rapido.users.trafficUsed"))} zones={ringZones} />
+            ) : (
+              <div className="flex h-[88px] w-[88px] shrink-0 items-center justify-center rounded-full border border-dashed border-rapido-border text-2xl text-rapido-muted" aria-label={String(t("rapido.unlimited"))}>
+                ∞
+              </div>
+            )}
+            <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+              <span className={classNames(TYPE.readout, "text-lg")} dir="ltr">
+                {formatBytes(user.used_traffic)}
+              </span>
+              <span className={TYPE.caption}>
+                {hasLimit ? (
+                  <>
+                    {t("rapido.users.ofLimit")} <span dir="ltr">{formatBytes(user.data_limit as number)}</span>
+                  </>
+                ) : (
+                  t("rapido.unlimited")
+                )}
+              </span>
+              {hasLimit && <SegmentBar value={usedPercent} max={100} count={20} className="h-1.5" zones={ringZones} />}
+            </div>
+          </div>
+        </ClusterZone>
+        <ClusterZone title={t("rapido.users.expiry")} className="p-3">
+          <div className="flex flex-col gap-1.5">
+            <span className={classNames("text-sm font-medium", expiryInfo.status === "expired" ? "text-red-400" : expiringSoon ? "text-amber-400" : "text-rapido-text")}>
+              {expiryInfo.status === "expires" && t("expires", { time: ltrIsolate(expiryInfo.time) })}
+              {expiryInfo.status === "expired" && t("expired", { time: ltrIsolate(expiryInfo.time) })}
+              {!expiryInfo.status && t("rapido.users.noExpiry")}
+            </span>
+            {daysLeft !== null && (
+              <SegmentBar
+                value={daysLeft}
+                max={periodMax}
+                count={24}
+                className="h-1.5"
+                tint="value"
+                zones={[
+                  { upTo: 0.1, color: GAUGE_BAD },
+                  { upTo: 0.25, color: GAUGE_WARN },
+                  { upTo: 1, color: GAUGE_GOOD },
+                ]}
+              />
+            )}
+            <div className={classNames(TYPE.caption, "flex flex-wrap items-center gap-x-3 gap-y-0.5")}>
+              <span>
+                {t("rapido.totalLabel", { value: ltrIsolate(String(formatBytes(user.lifetime_used_traffic))) })}
+              </span>
+              {showAdmin && user.admin && (
+                <span dir="ltr" title={String(t("rapido.filterByAdmin"))}>
+                  @{user.admin.username}
+                </span>
+              )}
+            </div>
+          </div>
+        </ClusterZone>
+      </Cluster>
+
+      <div className="mt-auto border-t border-rapido-border/60 pt-3">
+        <UserActions user={user} />
+      </div>
     </Card>
+  );
+};
+
+/** The headline counters above the list, as segmented counters in the same language. */
+const UsersSummary: FC<{ shown: number; total: number }> = ({ shown, total }) => {
+  const { t } = useTranslation();
+  const { data: stats } = useSystemStatsQuery();
+  if (!stats) return null;
+  const all = Math.max(1, stats.total_user);
+  const items: { key: string; label: string; value: number; color: string }[] = [
+    { key: "active", label: t("status.active"), value: stats.users_active, color: GAUGE_GOOD },
+    { key: "limited", label: t("status.limited"), value: stats.users_limited, color: GAUGE_BAD },
+    { key: "expired", label: t("status.expired"), value: stats.users_expired, color: GAUGE_VIOLET },
+    { key: "online", label: t("rapido.onlineNow"), value: stats.online_users, color: GAUGE_CYAN },
+  ];
+  return (
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5" aria-label={String(t("rapido.users.clusterLabel"))}>
+      <div className="flex flex-col gap-1.5 rounded-xl2 border border-rapido-border/70 bg-rapido-surface/60 px-3.5 py-2.5">
+        <span className={TYPE.caption}>{t("rapido.users.shown")}</span>
+        <span className={classNames(TYPE.readout, "text-xl")} dir="ltr">
+          {shown}
+          <span className="text-sm font-normal text-rapido-muted"> / {total}</span>
+        </span>
+        <SegmentBar value={shown} max={Math.max(1, total)} count={16} className="h-1" zones={solidZones(GAUGE_CYAN)} />
+      </div>
+      {items.map((it) => (
+        <div key={it.key} className="flex flex-col gap-1.5 rounded-xl2 border border-rapido-border/70 bg-rapido-surface/60 px-3.5 py-2.5">
+          <span className={TYPE.caption}>{it.label}</span>
+          <span className={classNames(TYPE.readout, "text-xl")} dir="ltr">
+            {it.value}
+          </span>
+          <SegmentBar value={it.value} max={all} count={16} className="h-1" zones={solidZones(it.color)} />
+        </div>
+      ))}
+    </div>
   );
 };
 
@@ -315,6 +440,8 @@ export const UsersTable: FC = () => {
 
   return (
     <div className="flex flex-col gap-4">
+      <UsersSummary shown={users.length} total={total} />
+
       <div className="flex flex-wrap items-center gap-3">
         <Input
           type="text"
@@ -375,9 +502,12 @@ export const UsersTable: FC = () => {
         {/* ms-auto, not ml-auto: pushing an item to the end of a flex row means
             an auto margin on its *start* side. In RTL the free space is already
             on the left, so margin-left:auto absorbed nothing. */}
+        <Button variant="secondary" className="ms-auto shrink-0" onClick={() => void downloadUsersCsv(filters).catch(() => undefined)}>
+          {t("rapido.users.exportCsv")}
+        </Button>
         <Button
           variant="primary"
-          className="ms-auto shrink-0"
+          className="shrink-0"
           onClick={() => setCreatingNewUser(true)}
         >
           <span aria-hidden="true">+ </span>
@@ -398,9 +528,9 @@ export const UsersTable: FC = () => {
       )}
 
       {!isLoading && users.length > 0 && (
-        <div className="flex flex-col gap-3">
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(min(21rem,100%),1fr))] gap-4">
           {users.map((user) => (
-            <UserRow key={user.username} user={user} />
+            <UserRow key={user.username} user={user} showAdmin={isSudo} />
           ))}
         </div>
       )}

@@ -3,6 +3,7 @@ import { Navigate, createHashRouter } from "react-router-dom";
 import { fetchCurrentAdmin } from "hooks/useCurrentAdminQuery";
 import { queryClient, queryKeys } from "utils/queryClient";
 import { SudoOnly } from "rapido-ui/SudoOnly";
+import { extensionRoutes } from "extensions";
 import { Login } from "./Login";
 
 // A failed /admin fetch (expired/missing token) throws, which react-router
@@ -39,6 +40,8 @@ const TunnelsPage = lazy(() => import("./TunnelsPage"));
 const LogsPage = lazy(() => import("./LogsPage"));
 const BackupsPage = lazy(() => import("./BackupsPage"));
 const GatewayPage = lazy(() => import("./GatewayPage"));
+const AppearancePage = lazy(() => import("./AppearancePage"));
+const ThemePage = lazy(() => import("./ThemePage"));
 
 export const router = createHashRouter([
   {
@@ -150,6 +153,31 @@ export const router = createHashRouter([
     loader: fetchAdminLoader,
   },
   {
+    // Every admin can restyle their own panel; nothing here is server-side.
+    path: "/appearance/",
+    element: (
+      <Suspense fallback={null}>
+        <AppearancePage />
+      </Suspense>
+    ),
+    errorElement: <Login />,
+    loader: fetchAdminLoader,
+  },
+  {
+    // Designing the panel-wide theme changes every admin's default look: sudo only. Other
+    // admins keep the personal Appearance dialog.
+    path: "/theme/",
+    element: (
+      <SudoOnly>
+        <Suspense fallback={null}>
+          <ThemePage />
+        </Suspense>
+      </SudoOnly>
+    ),
+    errorElement: <Login />,
+    loader: fetchAdminLoader,
+  },
+  {
     path: "/gateway/",
     element: (
       <SudoOnly>
@@ -209,6 +237,20 @@ export const router = createHashRouter([
     errorElement: <Login />,
     loader: fetchAdminLoader,
   },
+  // Pages an optional add-on contributes (none in the public build).
+  ...extensionRoutes().map(({ path, sudoOnly, component: Page }) => {
+    const page = (
+      <Suspense fallback={null}>
+        <Page />
+      </Suspense>
+    );
+    return {
+      path,
+      element: sudoOnly ? <SudoOnly>{page}</SudoOnly> : page,
+      errorElement: <Login />,
+      loader: fetchAdminLoader,
+    };
+  }),
   {
     path: "/login/",
     element: <Login />,

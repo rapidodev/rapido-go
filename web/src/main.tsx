@@ -12,6 +12,8 @@ import { queryClient } from "utils/queryClient";
 import App from "./App";
 import "index.scss";
 import "rapido-ui/tailwind.css";
+import { initAppearance } from "rapido-ui/appearance";
+import { cachedPanelAppearance } from "rapido-ui/panelTheme";
 
 dayjs.extend(Timezone);
 dayjs.extend(LocalizedFormat);
@@ -19,11 +21,10 @@ dayjs.extend(utc);
 dayjs.extend(RelativeTime);
 dayjs.extend(Duration);
 
-// The browser chrome colour is a constant - one dark palette, no light/dark
-// mode switch.
-document
-  .querySelector('meta[name="theme-color"]')
-  ?.setAttribute("content", "#0a1116");
+// The look (theme preset, depth, motion, ...) is the user's Appearance
+// choice from localStorage, applied to <html> before the first render so
+// there is no flash of the wrong theme. It also sets the browser chrome colour.
+initAppearance(cachedPanelAppearance());
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

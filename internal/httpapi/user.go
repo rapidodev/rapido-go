@@ -721,21 +721,30 @@ func (h *Handler) handleDeleteUser(c *gin.Context) {
 	if !ok {
 		return
 	}
-	ctx := c.Request.Context()
+	if err := h.deleteUserCore(c.Request.Context(), dbuser, identity.Username); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"detail": "User removed successfully"})
+}
+
+// deleteUserCore removes one user and tells the notification channels and the
+// Gateway peers - the part of DELETE /api/user/:username that is not HTTP,
+// shared with the bulk endpoint.
+func (h *Handler) deleteUserCore(ctx context.Context, dbuser generated.User, byUsername string) error {
 	// Resolved before the delete, not after - the row (and its admin_id)
 	// won't exist to look up once DeleteUser succeeds.
 	userAdmin := h.resolveAdminRef(ctx, dbuser.AdminID)
 	if err := h.store.Queries.DeleteUser(ctx, dbuser.ID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not delete user"})
-		return
+		return errors.New("Could not delete user")
 	}
 	// No InvalidateExcludedInbounds call needed: this cascades to the user's
 	// proxies/exclude_inbounds_association rows, but their proxy IDs are a
 	// serial PK that's never reused, so any leftover cache entry keyed on
 	// one just expires unread via its TTL - never served to anyone.
-	h.reports.UserDeleted(ctx, dbuser.Username, identity.Username, userAdmin)
+	h.reports.UserDeleted(ctx, dbuser.Username, byUsername, userAdmin)
 	h.dispatchGatewayUserDelete(ctx, dbuser)
-	c.JSON(http.StatusOK, gin.H{"detail": "User removed successfully"})
+	return nil
 }
 
 // handleResetUserDataUsage implements POST /api/user/:username/reset,
@@ -749,30 +758,9 @@ func (h *Handler) handleResetUserDataUsage(c *gin.Context) {
 		return
 	}
 	ctx := c.Request.Context()
-	if err := h.store.Queries.CreateUserUsageLog(ctx, generated.CreateUserUsageLogParams{
-		UserID: pgInt4FromInt(int(dbuser.ID)), UsedTrafficAtReset: dbuser.UsedTraffic,
-	}); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not log usage reset"})
-		return
-	}
-	newStatus := dbuser.Status
-	if newStatus != statusExpired && newStatus != statusDisabled {
-		newStatus = statusActive
-	}
-	updated, err := h.store.Queries.ResetUserTraffic(ctx, generated.ResetUserTrafficParams{ID: dbuser.ID, Status: newStatus})
+	updated, err := h.resetUsageCore(ctx, dbuser, identity.Username)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not reset user data usage"})
-		return
-	}
-	// Matches crud.reset_user_data_usage's _clear_node_usages call - a gap
-	// in the original Phase 2 port, fixed here since Phase 5 needed the
-	// same query anyway for NextPlan firing.
-	if err := h.store.Queries.ClearNodeUserUsages(ctx, pgInt4FromInt(int(updated.ID))); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not clear node usage history"})
-		return
-	}
-	if err := h.store.Queries.DeleteNextPlanByUserID(ctx, updated.ID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not clear next_plan"})
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
 		return
 	}
 	resp, err := h.buildUserResponse(ctx, updated)
@@ -780,9 +768,40 @@ func (h *Handler) handleResetUserDataUsage(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not read user"})
 		return
 	}
-	h.reports.UserDataUsageReset(ctx, updated.Username, identity.Username, h.resolveAdminRef(ctx, updated.AdminID))
 	h.attachUserLinks(ctx, updated, &resp)
 	c.JSON(http.StatusOK, resp)
+}
+
+// resetUsageCore is the data of POST /api/user/:username/reset - log the
+// pre-reset value, zero used_traffic, reactivate unless expired/disabled, drop
+// the node usage history and any pending next_plan, and send the report -
+// shared with the bulk endpoint. Its errors are the messages the HTTP handler
+// answers with.
+func (h *Handler) resetUsageCore(ctx context.Context, dbuser generated.User, byUsername string) (generated.User, error) {
+	if err := h.store.Queries.CreateUserUsageLog(ctx, generated.CreateUserUsageLogParams{
+		UserID: pgInt4FromInt(int(dbuser.ID)), UsedTrafficAtReset: dbuser.UsedTraffic,
+	}); err != nil {
+		return generated.User{}, errors.New("Could not log usage reset")
+	}
+	newStatus := dbuser.Status
+	if newStatus != statusExpired && newStatus != statusDisabled {
+		newStatus = statusActive
+	}
+	updated, err := h.store.Queries.ResetUserTraffic(ctx, generated.ResetUserTrafficParams{ID: dbuser.ID, Status: newStatus})
+	if err != nil {
+		return generated.User{}, errors.New("Could not reset user data usage")
+	}
+	// Matches crud.reset_user_data_usage's _clear_node_usages call - a gap
+	// in the original Phase 2 port, fixed here since Phase 5 needed the
+	// same query anyway for NextPlan firing.
+	if err := h.store.Queries.ClearNodeUserUsages(ctx, pgInt4FromInt(int(updated.ID))); err != nil {
+		return generated.User{}, errors.New("Could not clear node usage history")
+	}
+	if err := h.store.Queries.DeleteNextPlanByUserID(ctx, updated.ID); err != nil {
+		return generated.User{}, errors.New("Could not clear next_plan")
+	}
+	h.reports.UserDataUsageReset(ctx, updated.Username, byUsername, h.resolveAdminRef(ctx, updated.AdminID))
+	return updated, nil
 }
 
 // handleRevokeUserSub implements POST /api/user/:username/revoke_sub:
@@ -853,24 +872,10 @@ func validUserSort(v string) string {
 // dbadmin if not admin.is_sudo else None` pattern).
 func (h *Handler) handleListUsers(c *gin.Context) {
 	identity := auth.CurrentIdentity(c)
-	params := generated.ListUsersParams{}
-	if !identity.IsSudo {
-		params.AdminID = pgInt4FromInt(int(identity.AdminID))
-	} else if v := c.Query("admin"); v != "" {
-		// Sudo only: show just one reseller's configs. An unknown username
-		// matches nothing (an empty list), not "everyone".
-		a, err := h.store.Queries.GetAdminByUsername(c.Request.Context(), v)
-		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"users": []userResponseDTO{}, "total": 0})
-			return
-		}
-		params.AdminID = pgInt4FromInt(int(a.ID))
-	}
-	if v := c.Query("search"); v != "" {
-		params.Search = textFromPtr(&v)
-	}
-	if statuses := c.QueryArray("status"); len(statuses) > 0 {
-		params.Statuses = statuses
+	params, matchable := h.userListFilter(c.Request.Context(), identity, c.Query("admin"), c.Query("search"), c.QueryArray("status"))
+	if !matchable {
+		c.JSON(http.StatusOK, gin.H{"users": []userResponseDTO{}, "total": 0})
+		return
 	}
 	if v := c.Query("offset"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -903,7 +908,7 @@ func (h *Handler) handleListUsers(c *gin.Context) {
 	// the dashboard, or an external management tool - needs a real total
 	// to compute page counts correctly.
 	total, err := h.store.Queries.CountUsers(ctx, generated.CountUsersParams{
-		AdminID: params.AdminID, Statuses: params.Statuses, Search: params.Search,
+		AdminID: params.AdminID, Statuses: params.Statuses, Search: params.Search, SearchUsername: params.SearchUsername,
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not count users"})

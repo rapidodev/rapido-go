@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/netip"
@@ -14,6 +15,7 @@ import (
 	"github.com/legendary1205/rapido-go/internal/db/generated"
 	"github.com/legendary1205/rapido-go/internal/relayhealth"
 	"github.com/legendary1205/rapido-go/internal/sshexec"
+	"github.com/legendary1205/rapido-go/internal/tunneldiscover"
 	"github.com/legendary1205/rapido-go/internal/tunnelmetrics"
 	"github.com/legendary1205/rapido-go/internal/tunnelprovision"
 )
@@ -39,13 +41,13 @@ type tunnelHealthDTO struct {
 }
 
 type tunnelMetricsDTO struct {
-	CPUPercent  float64   `json:"cpu_percent"`
-	MemUsedMB   int64     `json:"mem_used_mb"`
-	MemTotalMB  int64     `json:"mem_total_mb"`
-	DiskUsedGB  float64   `json:"disk_used_gb"`
-	DiskTotalGB float64   `json:"disk_total_gb"`
-	RxBytes     int64     `json:"rx_bytes"`
-	TxBytes     int64     `json:"tx_bytes"`
+	CPUPercent  float64 `json:"cpu_percent"`
+	MemUsedMB   int64   `json:"mem_used_mb"`
+	MemTotalMB  int64   `json:"mem_total_mb"`
+	DiskUsedGB  float64 `json:"disk_used_gb"`
+	DiskTotalGB float64 `json:"disk_total_gb"`
+	RxBytes     int64   `json:"rx_bytes"`
+	TxBytes     int64   `json:"tx_bytes"`
 	// RxDropped/TxDropped/RxErrors/TxErrors are the GRE interface's own
 	// cumulative loss counters (since the relay's last reboot) - real
 	// packet loss, not an estimate. Connections is a live (not
@@ -59,6 +61,16 @@ type tunnelMetricsDTO struct {
 	TxErrors    int64     `json:"tx_errors"`
 	Connections int       `json:"connections"`
 	CheckedAt   time.Time `json:"checked_at"`
+
+	// The main network card of the relay (see tunnelmetrics.Metrics), and the
+	// node end with its HAProxy failover status when it has one.
+	NIC          string                     `json:"nic,omitempty"`
+	NICSpeedMbps int                        `json:"nic_speed_mbps,omitempty"`
+	NICRxBps     float64                    `json:"nic_rx_bps"`
+	NICTxBps     float64                    `json:"nic_tx_bps"`
+	NICRxBytes   int64                      `json:"nic_rx_bytes"`
+	NICTxBytes   int64                      `json:"nic_tx_bytes"`
+	Node         *tunnelmetrics.NodeMetrics `json:"node,omitempty"`
 }
 
 type tunnelDTO struct {
@@ -74,8 +86,23 @@ type tunnelDTO struct {
 	// when they differ from the SSH address (e.g. an IPv6 underlay).
 	NodeTunnelAddr  *string `json:"node_tunnel_addr"`
 	RelayTunnelAddr *string `json:"relay_tunnel_addr"`
-	Status         string  `json:"status"`
-	StatusMessage  *string `json:"status_message"`
+	Status          string  `json:"status"`
+	StatusMessage   *string `json:"status_message"`
+
+	// Managed is false for a tunnel the panel found rather than built: it
+	// only monitors it. Protocol is the human description of what runs
+	// (from detection, or derived from the method for a built one).
+	Managed    bool     `json:"managed"`
+	Protocol   *string  `json:"protocol"`
+	RelayAddrs []string `json:"relay_addrs"`
+	NodeNIC    *string  `json:"node_nic"`
+	RelayNIC   *string  `json:"relay_nic"`
+	// The non-secret half of the stored logins, so the edit form can show
+	// them. The passwords are never sent back.
+	NodeSSHPort  int32  `json:"node_ssh_port"`
+	NodeSSHUser  string `json:"node_ssh_user"`
+	RelaySSHPort int32  `json:"relay_ssh_port"`
+	RelaySSHUser string `json:"relay_ssh_user"`
 
 	// Live health (internal/relayhealth, probed via the linked tunnel_relays
 	// row) and resource metrics (internal/tunnelmetrics, probed via this
@@ -90,6 +117,28 @@ func toTunnelDTO(t generated.Tunnel, health relayhealth.Status, healthKnown bool
 		ID: t.ID, Name: t.Name, Method: t.Method, NodeID: t.NodeID,
 		RelayHost: t.RelayHost, Ports: t.Ports, InterfaceName: t.InterfaceName,
 		FRPControlPort: t.FrpControlPort, Status: t.Status,
+	}
+	dto.Managed = t.Managed
+	dto.NodeSSHPort, dto.NodeSSHUser = t.NodeSshPort, t.NodeSshUser
+	dto.RelaySSHPort, dto.RelaySSHUser = t.RelaySshPort, t.RelaySshUser
+	dto.RelayAddrs = []string{}
+	var det tunneldiscover.Details
+	if len(t.Details) > 0 {
+		_ = json.Unmarshal(t.Details, &det)
+	}
+	if det.Protocol != "" {
+		dto.Protocol = &det.Protocol
+	} else if label := methodLabel(t.Method); label != "" {
+		dto.Protocol = &label
+	}
+	if len(det.RelayAddrs) > 0 {
+		dto.RelayAddrs = det.RelayAddrs
+	}
+	if det.NodeNIC != "" {
+		dto.NodeNIC = &det.NodeNIC
+	}
+	if det.RelayNIC != "" {
+		dto.RelayNIC = &det.RelayNIC
 	}
 	if t.NodeTunnelAddr.Valid {
 		dto.NodeTunnelAddr = &t.NodeTunnelAddr.String
@@ -115,6 +164,8 @@ func toTunnelDTO(t generated.Tunnel, health relayhealth.Status, healthKnown bool
 			RxBytes: metrics.RxBytes, TxBytes: metrics.TxBytes, CheckedAt: metrics.CheckedAt,
 			RxDropped: metrics.RxDropped, TxDropped: metrics.TxDropped,
 			RxErrors: metrics.RxErrors, TxErrors: metrics.TxErrors, Connections: metrics.Connections,
+			NIC: metrics.NIC, NICSpeedMbps: metrics.NICSpeedMbps, NICRxBps: metrics.NICRxBps, NICTxBps: metrics.NICTxBps,
+			NICRxBytes: metrics.NICRxBytes, NICTxBytes: metrics.NICTxBytes, Node: metrics.Node,
 		}
 		dto.Metrics = &m
 	}
@@ -351,6 +402,7 @@ func (h *Handler) handleCreateTunnel(c *gin.Context) {
 		RelayHost: req.RelayHost, RelaySshPort: req.RelaySSHPort, RelaySshUser: req.RelaySSHUser, RelaySshPassword: req.RelaySSHPassword,
 		Ports: req.Ports, InterfaceName: ifaceName, TunnelSubnet: subnet, FrpControlPort: controlPort, FrpToken: token,
 		NodeTunnelAddr: textOrNull(req.NodeTunnelAddr), RelayTunnelAddr: textOrNull(req.RelayTunnelAddr),
+		Managed: true, Details: []byte("{}"),
 		Status: "pending",
 	})
 	if err != nil {
@@ -480,6 +532,10 @@ func (h *Handler) handleTunnelAction(c *gin.Context, transientStatus, successSta
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Tunnel not found"})
 		return
 	}
+	if !t.Managed {
+		c.JSON(http.StatusConflict, gin.H{"detail": "This tunnel was not created by the panel, so the panel only monitors it. Manage its services on the servers directly."})
+		return
+	}
 	if err := h.store.Queries.UpdateTunnelStatus(ctx, generated.UpdateTunnelStatusParams{ID: t.ID, Status: transientStatus}); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not update the tunnel's status"})
 		return
@@ -557,6 +613,20 @@ func (h *Handler) handleDeleteTunnel(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Tunnel not found"})
 		return
 	}
+	if !t.Managed {
+		// A tunnel the panel only found: forget it, never touch the servers.
+		if t.TunnelRelayID.Valid {
+			if err := h.store.Queries.DeleteTunnelRelay(ctx, t.TunnelRelayID.Int32); err != nil {
+				h.logger.Warn("could not remove tunnel's monitoring row", "tunnel_id", t.ID, "error", err)
+			}
+		}
+		if err := h.store.Queries.DeleteTunnel(ctx, t.ID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not delete the tunnel"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"detail": "Tunnel removed from the panel (the servers were not touched)", "teardown_warning": nil})
+		return
+	}
 	node, err := h.store.Queries.GetNodeByID(ctx, t.NodeID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "could not look up this tunnel's node"})
@@ -614,4 +684,24 @@ func textOrNull(s string) pgtype.Text {
 		return pgtype.Text{}
 	}
 	return pgtype.Text{String: s, Valid: true}
+}
+
+// methodLabel describes a panel-built tunnel the way detection describes a
+// found one.
+func methodLabel(method string) string {
+	switch method {
+	case "gre_frp":
+		return "GRE over IPv4 + frp over TCP"
+	case "frp_direct":
+		return "frp over TCP (direct)"
+	case "frp_quic":
+		return "frp over QUIC (direct)"
+	case "gre_dnat":
+		return "GRE over IPv4 + kernel port forwarding"
+	case "ip6gre_dnat":
+		return "GRE over IPv6 + kernel port forwarding"
+	case "wg_dnat":
+		return "WireGuard + kernel port forwarding"
+	}
+	return ""
 }

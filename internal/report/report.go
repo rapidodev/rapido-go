@@ -27,6 +27,7 @@ type NotifyFlags struct {
 	UserSubRevoked    bool
 	Login             bool
 	InfraAlert        bool
+	AdminDigest       bool
 }
 
 // Category* are the keys integrationsettings.Values.TelegramTopicIDs is
@@ -265,6 +266,40 @@ func (d *Dispatcher) InfraAlert(ctx context.Context, kind, name, detail string, 
 
 	payload := discord.InfraAlertPayload(kind, name, detail, up, domain, downFor)
 	d.discord.Send(ctx, payload, vals.DiscordWebhookURL, nil, d.logger)
+}
+
+// TunnelEvent reports a tunnel event that is not a plain up/down change
+// (failover, sustained packet loss, a bandwidth ceiling, a saturated card).
+// It rides on the same NOTIFY_INFRA_ALERT flag and "infra_alert" topic as
+// InfraAlert and, like it, is fleet-wide.
+func (d *Dispatcher) TunnelEvent(ctx context.Context, tunnelName, kind, severity, detail string) {
+	if !d.flags.InfraAlert {
+		return
+	}
+	vals, tgCfg, ok := d.resolve(ctx, CategoryInfraAlert)
+	if !ok {
+		return
+	}
+	d.telegram.Report(ctx, tgCfg, telegram.TunnelEventMessage(tunnelName, kind, severity, detail), nil, d.logger)
+
+	payload := discord.TunnelEventPayload(tunnelName, kind, severity, detail, telegram.TunnelEventTitleFA(kind))
+	d.discord.Send(ctx, payload, vals.DiscordWebhookURL, nil, d.logger)
+}
+
+// AdminDigest sends one admin their daily summary by Telegram direct message,
+// and only to them (it is not a fleet-wide event, so it never goes to the
+// logger channel). It returns false when nothing was sent: the digest flag is
+// off, the admin has no telegram_id, or settings could not be read.
+func (d *Dispatcher) AdminDigest(ctx context.Context, admin AdminRef, expiring3d, lowData int64) bool {
+	if !d.flags.AdminDigest || admin.TelegramID == nil {
+		return false
+	}
+	_, tgCfg, ok := d.resolve(ctx, CategoryInfraAlert)
+	if !ok || tgCfg.APIToken == "" {
+		return false
+	}
+	d.telegram.SendDM(ctx, tgCfg, *admin.TelegramID, telegram.AdminDigestMessage(admin.Username, expiring3d, lowData), d.logger)
+	return true
 }
 
 // TopicRequest is one forum topic CreateTopics should create.

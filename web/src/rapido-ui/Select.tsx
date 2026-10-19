@@ -13,7 +13,7 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
     <select
       ref={ref}
       className={classNames(
-        "max-w-full rounded-lg border border-rapido-border bg-rapido-bg px-3 py-2 text-sm text-rapido-text focus:outline-none focus:ring-1 focus:ring-rapido-accent",
+        "max-w-full rounded-lg border border-rapido-border bg-rapido-bg px-3 py-2 text-sm text-rapido-text shadow-rp-inset transition-shadow focus:border-rapido-accent/60 focus:outline-none focus:ring-2 focus:ring-rapido-accent/40",
         className
       )}
       {...rest}

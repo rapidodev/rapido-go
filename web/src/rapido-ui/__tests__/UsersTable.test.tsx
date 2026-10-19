@@ -20,6 +20,11 @@ vi.mock("hooks/useUsersQuery", () => ({
 // here, so they are stubbed instead of standing up a QueryClient.
 vi.mock("hooks/useCurrentAdminQuery", () => ({ useIsSudo: () => state.sudo }));
 vi.mock("hooks/useAdminsQuery", () => ({ useAdminsQuery: () => ({ data: state.admins }) }));
+vi.mock("hooks/useSystemStatsQuery", () => ({
+  useSystemStatsQuery: () => ({
+    data: { total_user: 120, online_users: 4, users_active: 70, users_limited: 12, users_expired: 15, users_on_hold: 13, users_disabled: 10 },
+  }),
+}));
 
 import { UsersTable } from "../UsersTable";
 import { useUsersUiStore } from "../usersUiStore";
@@ -138,5 +143,59 @@ describe("Users table filters", () => {
     state.admins = [{ username: "reseller-a" }];
     render(<UsersTable />);
     expect(screen.queryByLabelText("Filter by reseller")).not.toBeInTheDocument();
+  });
+});
+
+describe("Users list layout", () => {
+  it("lays the cards out in a responsive grid that fills the width instead of one full-width card per row", () => {
+    state.users = [user({ username: "a" }), user({ id: 2, username: "b" }), user({ id: 3, username: "c" })];
+    const { container } = render(<UsersTable />);
+    const grid = container.querySelector("div.grid.gap-4") as HTMLElement;
+    expect(grid.className).toContain("auto-fill");
+    expect(grid.className).toContain("min(21rem,100%)");
+    expect(grid.children).toHaveLength(3);
+  });
+
+  it("shows the headline counters above the list: shown out of total, active, limited, expired, online", () => {
+    state.users = [user({ username: "a" })];
+    render(<UsersTable />);
+    const strip = screen.getByLabelText("User statistics");
+    expect(strip).toHaveTextContent("Shown1 / 1");
+    expect(strip).toHaveTextContent("Active70");
+    expect(strip).toHaveTextContent("Limited12");
+    expect(strip).toHaveTextContent("Expired15");
+    expect(strip).toHaveTextContent("Online Now4");
+  });
+
+  it("keeps the everyday actions on the card, the rare ones behind a menu, and Delete on its own", () => {
+    state.users = [user({ username: "a" })];
+    render(<UsersTable />);
+    expect(screen.getByRole("button", { name: "Edit" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Subscription link" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reset Usage" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    expect(screen.getByRole("menuitem", { name: "Reset Usage" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Revoke Subscription" })).toBeInTheDocument();
+  });
+
+  it("opens the reset dialog from the menu and closes the menu", () => {
+    state.users = [user({ username: "a" })];
+    useUsersUiStore.setState({ resetUsageUser: null });
+    render(<UsersTable />);
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Reset Usage" }));
+    expect(useUsersUiStore.getState().resetUsageUser?.username).toBe("a");
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("draws the data limit as a ring with the used and total amounts, and an unlimited user without one", () => {
+    state.users = [
+      user({ username: "capped", used_traffic: 5 * 1024 ** 3, data_limit: 10 * 1024 ** 3 }),
+      user({ id: 2, username: "free", used_traffic: 1024 ** 3, data_limit: null }),
+    ];
+    render(<UsersTable />);
+    expect(screen.getByRole("img", { name: "Traffic used: 50 %" })).toBeInTheDocument();
+    expect(screen.getAllByLabelText("Unlimited")).toHaveLength(1);
   });
 });

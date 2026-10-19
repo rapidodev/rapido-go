@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { fetch } from "service/http";
 import { MonitoringHistoryPoint, MonitoringSnapshot } from "types/Monitoring";
 import { queryKeys } from "utils/queryClient";
@@ -33,4 +33,16 @@ export const useMonitoringHistoryQuery = (nodeId: number | null, enabled: boolea
       return fetch<MonitoringHistoryPoint[]>(`/monitoring/history${qs}`);
     },
     enabled,
+  });
+
+// The history of every host at once, for the fleet chart and the board's trends. Uses the
+// same query keys as the per-card history, so a card and the fleet view share one fetch.
+export const useFleetHistoryQueries = (nodeIds: (number | null)[], enabled = true) =>
+  useQueries({
+    queries: nodeIds.map((id) => ({
+      queryKey: queryKeys.monitoringHistory(id),
+      queryFn: () => fetch<MonitoringHistoryPoint[]>(`/monitoring/history${id === null ? "" : `?node_id=${id}`}`),
+      enabled,
+      refetchInterval: 60_000,
+    })),
   });

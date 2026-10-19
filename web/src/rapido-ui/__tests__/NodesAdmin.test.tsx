@@ -18,6 +18,17 @@ vi.mock("hooks/useNodesQuery", () => ({
   useCreateNodeMutation: () => ({ mutate: createMutate, isPending: false }),
   useUpdateNodeMutation: () => ({ mutate: updateMutate, isPending: false }),
   useDeleteNodeMutation: () => ({ mutate: vi.fn(), isPending: false }),
+  useRestartNodeMutation: () => ({ mutate: vi.fn(), isPending: false }),
+}));
+
+// The node cards show the live monitoring sample and the node's tunnels when there are some;
+// these tests are about the node itself, so there are none.
+vi.mock("hooks/useMonitoringQuery", () => ({
+  useMonitoringQuery: () => ({ data: undefined }),
+  useMonitoringHistoryQuery: () => ({ data: undefined, isLoading: false }),
+}));
+vi.mock("hooks/useTunnelsQuery", () => ({
+  useTunnelsQuery: () => ({ data: [] }),
 }));
 
 vi.mock("hooks/useHostsLoadQuery", () => ({

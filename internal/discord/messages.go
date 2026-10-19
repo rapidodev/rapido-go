@@ -213,3 +213,17 @@ func LoginPayload(username, clientIP, status string) EmbedPayload {
 		Color:       0xff0000,
 	}}}
 }
+
+// TunnelEventPayload mirrors telegram.TunnelEventMessage.
+func TunnelEventPayload(tunnelName, kind, severity, detail, title string) EmbedPayload {
+	color := 0xffa500
+	icon := ":orange_circle:"
+	switch severity {
+	case "critical":
+		color, icon = 0xff0000, ":red_circle:"
+	case "info":
+		color, icon = 0x00ff00, ":green_circle:"
+	}
+	desc := "**تانل:** " + tunnelName + "\n**جزئیات:** " + detail
+	return EmbedPayload{Embeds: []Embed{{Title: icon + " " + title, Description: desc, Color: color}}}
+}

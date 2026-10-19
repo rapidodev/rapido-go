@@ -100,7 +100,7 @@ const TicketRow: FC<{
         "cursor-pointer p-4 transition-colors hover:border-rapido-accent/60",
         // Tinted edge so a ticket waiting on an answer is obvious while
         // scrolling, without having to read each row's badges.
-        awaiting && "!border-orange-500/60 bg-orange-500/[0.04]",
+        awaiting && "!border-orange-500/60",
         selected && "!border-rapido-accent bg-rapido-accent/[0.06]"
       )}
     >
@@ -461,7 +461,7 @@ export const TicketsAdmin: FC = () => {
           )}
 
           {!isLoading && listErrorMessage && (
-            <Card className="border-red-500/40 bg-red-500/[0.03] p-4" role="alert">
+            <Card className="border-red-500/40 p-4" role="alert">
               <CardTitle className="mb-1 text-red-400">{t("rapido.tickets.loadFailed")}</CardTitle>
               <CardSubtitle>{listErrorMessage}</CardSubtitle>
               <Button variant="chip" className="mt-3" onClick={() => refetch()}>
@@ -565,7 +565,7 @@ export const TicketsAdmin: FC = () => {
               {detailIsError && (
                 <div
                   role="alert"
-                  className="rounded-lg border border-red-500/40 bg-red-500/[0.03] px-3 py-2 text-xs text-red-400"
+                  className="rounded-lg border border-red-500/40 px-3 py-2 text-xs text-red-400"
                 >
                   {errorText(detailError, t("rapido.tickets.threadLoadFailed"))}
                 </div>
@@ -578,7 +578,7 @@ export const TicketsAdmin: FC = () => {
               />
             </div>
           ) : selectedId != null && detailIsError ? (
-            <Card className="border-red-500/40 bg-red-500/[0.03] p-4" role="alert">
+            <Card className="border-red-500/40 p-4" role="alert">
               <CardTitle className="mb-1 text-red-400">
                 {t("rapido.tickets.threadLoadFailed")}
               </CardTitle>

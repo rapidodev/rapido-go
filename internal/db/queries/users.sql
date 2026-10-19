@@ -107,6 +107,9 @@ WHERE (sqlc.narg('admin_id')::int IS NULL OR admin_id = sqlc.narg('admin_id')::i
     sqlc.narg('search')::text IS NULL
     OR username ILIKE '%' || sqlc.narg('search')::text || '%'
     OR note ILIKE '%' || sqlc.narg('search')::text || '%'
+    -- A pasted subscription link or token, decoded by the handler to the exact
+    -- username it names.
+    OR username = sqlc.narg('search_username')::text
     -- Config UID: a (partial) vless/vmess UUID, typed with or without dashes,
     -- or a trojan/shadowsocks password. Only from 4 characters up, so a stray
     -- one- or two-letter query does not match half the proxies table.
@@ -144,6 +147,9 @@ WHERE (sqlc.narg('admin_id')::int IS NULL OR admin_id = sqlc.narg('admin_id')::i
     sqlc.narg('search')::text IS NULL
     OR username ILIKE '%' || sqlc.narg('search')::text || '%'
     OR note ILIKE '%' || sqlc.narg('search')::text || '%'
+    -- A pasted subscription link or token, decoded by the handler to the exact
+    -- username it names.
+    OR username = sqlc.narg('search_username')::text
     OR (
       length(sqlc.narg('search')::text) >= 4
       AND EXISTS (

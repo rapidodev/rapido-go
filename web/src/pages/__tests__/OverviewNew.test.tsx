@@ -107,8 +107,7 @@ describe("Overview page and sudo-only endpoints", () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     expect(requested()).not.toContain("/monitoring");
-    expect(screen.queryByText("Fleet status")).not.toBeInTheDocument();
-    expect(screen.queryByText("Node resource status")).not.toBeInTheDocument();
+    expect(screen.queryByText("Fleet overview")).not.toBeInTheDocument();
     // The parts a reseller is allowed to see are still there.
     expect(screen.getByText("Total Users")).toBeInTheDocument();
   });
@@ -130,8 +129,8 @@ describe("Overview page and sudo-only endpoints", () => {
     renderOverview();
 
     await waitFor(() => expect(requested()).toContain("/monitoring"));
-    expect(await screen.findByText("Fleet status")).toBeInTheDocument();
-    expect(await screen.findByText("Node resource status")).toBeInTheDocument();
+    // The fleet power view: one panel with the board of every node and tunnel.
+    expect(await screen.findByText("Fleet overview")).toBeInTheDocument();
     expect((await screen.findAllByText("de-node")).length).toBeGreaterThan(0);
   });
 });
@@ -155,7 +154,7 @@ describe("Overview user status legend", () => {
     // A swatch per row, in the same colour the donut slice uses.
     const swatches = items.map((li) => (li.querySelector("[aria-hidden]") as HTMLElement).style.backgroundColor);
     expect(new Set(swatches).size).toBe(5);
-    expect(swatches[0]).toBe("rgb(52, 211, 153)"); // #34d399, active
+    expect(swatches[0]).toBe("rgb(54, 234, 176)"); // #36eab0, the panel's "good" green, for active
   });
 
   it("sits in the same wrapping flex row as the donut, so it drops under it on a narrow card", async () => {
@@ -215,19 +214,19 @@ describe("Overview online count", () => {
     renderOverview();
     await advance(0);
     expect(systemCalls()).toBe(1);
-    expect(screen.getByText("120")).toBeInTheDocument();
+    expect(screen.getAllByText("120").length).toBeGreaterThan(0);
 
     currentStats = { ...stats, online_users: 121 };
     await advance(4900);
     expect(systemCalls()).toBe(1);
     await advance(200);
     expect(systemCalls()).toBe(2);
-    expect(screen.getByText("121")).toBeInTheDocument();
+    expect(screen.getAllByText("121").length).toBeGreaterThan(0);
 
     currentStats = { ...stats, online_users: 95 };
     await advance(5000);
     expect(systemCalls()).toBe(3);
-    expect(screen.getByText("95")).toBeInTheDocument();
+    expect(screen.getAllByText("95").length).toBeGreaterThan(0);
   });
 
   it("does not poll while the tab is hidden", async () => {

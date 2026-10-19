@@ -14,7 +14,9 @@ describe("Button", () => {
     render(<Button variant="primary">Save</Button>);
     const el = screen.getByRole("button", { name: "Save" });
     expect(el).toHaveClass("bg-rapido-accent");
-    expect(el).toHaveClass("text-white");
+    // Dark ink on the cyan key: white on #22d3ee fails contrast.
+    expect(el).toHaveClass("text-[#03222b]");
+    expect(el).toHaveClass("rp-key-primary");
   });
 
   it("renders the chip look with buttonStyles.ts's shared base class", () => {

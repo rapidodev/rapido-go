@@ -166,6 +166,10 @@ type Config struct {
 	NotifyUserSubRevoked    bool
 	NotifyLogin             bool
 	NotifyInfraAlert        bool
+	// NotifyAdminDigest gates the daily Telegram summary sent to each admin that
+	// has a telegram_id; AdminDigestHourUTC is the UTC hour it is sent from.
+	NotifyAdminDigest  bool
+	AdminDigestHourUTC int
 }
 
 func Load() (*Config, error) {
@@ -223,6 +227,11 @@ func Load() (*Config, error) {
 	cfg.NotifyUserSubRevoked = getBool("NOTIFY_USER_SUB_REVOKED", true)
 	cfg.NotifyLogin = getBool("NOTIFY_LOGIN", true)
 	cfg.NotifyInfraAlert = getBool("NOTIFY_INFRA_ALERT", true)
+	cfg.NotifyAdminDigest = getBool("NOTIFY_ADMIN_DIGEST", true)
+	cfg.AdminDigestHourUTC = 6
+	if n, err := strconv.Atoi(getEnv("ADMIN_DIGEST_HOUR_UTC", "6")); err == nil && n >= 0 && n <= 23 {
+		cfg.AdminDigestHourUTC = n
+	}
 
 	if n, err := strconv.ParseInt(getEnv("TELEGRAM_LOGGER_CHANNEL_ID", "0"), 10, 64); err == nil {
 		cfg.TelegramLoggerChannelID = n

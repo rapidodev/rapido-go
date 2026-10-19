@@ -123,7 +123,7 @@ const HostRow: FC<{
     <div
       className={classNames(
         "rounded-lg border p-3",
-        disabled ? "border-rapido-border opacity-60" : "border-sky-500/40 bg-sky-500/[0.03]"
+        disabled ? "border-rapido-border opacity-60" : "border-sky-500/40"
       )}
     >
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">

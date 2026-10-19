@@ -19,10 +19,10 @@ export type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
 };
 
 const primaryClass =
-  "rounded-lg bg-rapido-accent px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50";
+  "rp-key rp-key-primary rounded-lg bg-rapido-accent px-4 py-2 text-sm font-semibold text-[#03222b] disabled:cursor-not-allowed disabled:opacity-50";
 
 const secondaryClass =
-  "rounded-lg border border-rapido-border px-3 py-2 text-sm text-rapido-text transition-colors hover:bg-rapido-raised disabled:cursor-not-allowed disabled:opacity-50";
+  "rp-key rp-key-secondary rounded-lg border border-rapido-border px-3 py-2 text-sm text-rapido-text hover:bg-rapido-raised disabled:cursor-not-allowed disabled:opacity-50";
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
   ({ variant = "secondary", tone = "neutral", className, type = "button", ...rest }, ref) => {

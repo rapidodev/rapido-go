@@ -334,8 +334,12 @@ func startFRPDirect(ctx context.Context, relay, node *sshexec.Client, p Params) 
 		return fmt.Errorf("node: start frpc: %w", err)
 	}
 
-	// Wait until every port is actually registered with the relay; an active
-	// service that has not logged in is the usual silent failure.
+	return waitProxiesRegistered(ctx, node, p)
+}
+
+// waitProxiesRegistered waits until every port is actually registered with the
+// relay; an active service that has not logged in is the usual silent failure.
+func waitProxiesRegistered(ctx context.Context, node *sshexec.Client, p Params) error {
 	want := len(p.Ports)
 	var got string
 	deadline := time.Now().Add(20 * time.Second)
@@ -349,6 +353,46 @@ func startFRPDirect(ctx context.Context, relay, node *sshexec.Client, p Params) 
 	}
 	tail, _ := node.Run(ctx, fmt.Sprintf(`journalctl -u frpc@client-%d -n 6 --no-pager 2>/dev/null | cut -c1-200`, p.FRPControlPort))
 	return fmt.Errorf("node: frpc registered %s of %d ports with the relay. Last log lines: %s", got, want, strings.TrimSpace(tail))
+}
+
+// UpdatePorts points a running, panel-built tunnel at a new set of ports:
+// the frp client config (or the relay's forwarding script) is rewritten from
+// the parameters the tunnel was built with and the service restarted, so the
+// tunnel carries exactly p.Ports afterwards. Users on the tunnel reconnect.
+func UpdatePorts(ctx context.Context, relay, node *sshexec.Client, p Params) error {
+	if len(p.Ports) == 0 {
+		return fmt.Errorf("a tunnel needs at least one port")
+	}
+	switch m := p.method(); {
+	case m == MethodGREFRP || isFRP(m):
+		protocol, serverAddr := "tcp", p.relayOuter()
+		if m == MethodFRPQUIC {
+			protocol = "quic"
+		}
+		if m == MethodGREFRP {
+			serverAddr = p.relayTunnelIP().String()
+		}
+		clientPath := fmt.Sprintf("/root/frp/client/client-%d.toml", p.FRPControlPort)
+		cfg := frpcConfigFor(serverAddr, p.FRPControlPort, p.FRPToken, p.Ports, protocol, 100)
+		if err := node.WriteFile(ctx, clientPath, []byte(cfg), "600"); err != nil {
+			return fmt.Errorf("node: write frpc config: %w", err)
+		}
+		if _, err := node.Run(ctx, fmt.Sprintf("systemctl restart frpc@client-%d", p.FRPControlPort)); err != nil {
+			return fmt.Errorf("node: restart frpc: %w", err)
+		}
+		return waitProxiesRegistered(ctx, node, p)
+	case m == MethodGREDNAT || m == MethodIP6GREDNAT || m == MethodWGDNAT:
+		script := "/usr/local/sbin/" + dnatUnit(p) + ".sh"
+		if err := relay.WriteFile(ctx, script, []byte(dnatScript(p.InterfaceName, p.nodeTunnelIP().String(), p.relayTunnelIP().String(), p.Ports)), "755"); err != nil {
+			return fmt.Errorf("relay: write forwarding script: %w", err)
+		}
+		if _, err := relay.Run(ctx, "systemctl restart "+dnatUnit(p)); err != nil {
+			return fmt.Errorf("relay: restart port forwarding: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown tunnel method %q", p.Method)
+	}
 }
 
 func atoiSafe(s string) int {

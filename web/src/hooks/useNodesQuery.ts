@@ -3,6 +3,8 @@ import { fetch } from "service/http";
 import {
   Node,
   NodeCreateResult,
+  NodeRestartPayload,
+  NodeRestartResult,
   NodeUpdatePayload,
   NodeUsageResult,
   NodeWritePayload,
@@ -64,3 +66,14 @@ export const useNodesUsageQuery = (start?: string, end?: string) =>
       return fetch<NodeUsageResult>(`/nodes/usage${qs ? `?${qs}` : ""}`);
     },
   });
+
+// Restarts the node agent or reboots the whole server. The list is refetched on
+// success so the status the node reports afterwards shows up.
+export const useRestartNodeMutation = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body }: { id: number; body: NodeRestartPayload }) =>
+      fetch<NodeRestartResult>(`/node/${id}/restart`, { method: "POST", body }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.nodes }),
+  });
+};

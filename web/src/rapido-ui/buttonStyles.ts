@@ -2,8 +2,10 @@
 // AdminsAdmin, InactiveAdmins, HostsAdmin, NodesAdmin, TicketsAdmin,
 // CoreSettings, Integrations. One shared copy means a future palette change
 // (like this one) only has one place to get right instead of seven.
+// `rp-key rp-key-chip` is the physical-key press from tailwind.css: a lit top
+// edge, and a small sink on :active.
 export const btnBase =
-  "rounded-md border px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed";
+  "rp-key rp-key-chip rounded-md border px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed";
 
 export const tones = {
   neutral:

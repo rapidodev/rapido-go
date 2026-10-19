@@ -11,6 +11,7 @@ INSERT INTO tunnels (
     relay_host, relay_ssh_port, relay_ssh_user, relay_ssh_password,
     ports, interface_name, tunnel_subnet, frp_control_port, frp_token,
     node_tunnel_addr, relay_tunnel_addr,
+    managed, details,
     status
 ) VALUES (
     $1, $2, $3,
@@ -18,6 +19,7 @@ INSERT INTO tunnels (
     $7, $8, $9, $10,
     $11, $12, $13, $14, $15,
     $17, $18,
+    $19, $20,
     $16
 ) RETURNING *;
 
@@ -38,3 +40,15 @@ SELECT tunnel_subnet FROM tunnels;
 
 -- name: ListUsedFRPControlPorts :many
 SELECT frp_control_port FROM tunnels WHERE relay_host = $1;
+
+-- name: UpdateTunnelEdit :one
+-- The fields an admin can change on an existing tunnel. Everything that
+-- decides how the tunnel is built (method, subnet, interface, frp token) is
+-- deliberately not here - changing those means a new tunnel.
+UPDATE tunnels SET
+    name = $2,
+    node_ssh_port = $3, node_ssh_user = $4, node_ssh_password = $5,
+    relay_host = $6, relay_ssh_port = $7, relay_ssh_user = $8, relay_ssh_password = $9,
+    ports = $10, details = $11
+WHERE id = $1
+RETURNING *;

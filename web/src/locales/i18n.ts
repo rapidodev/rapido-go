@@ -18,6 +18,7 @@ import i18n from "i18next";
 import LanguageDetector from "i18next-browser-languagedetector";
 import HttpApi from "i18next-http-backend";
 import { initReactI18next } from "react-i18next";
+import { extensionLocales } from "extensions";
 
 declare module "i18next" {
     interface CustomTypeOptions {
@@ -67,6 +68,12 @@ i18n
             dayjs.locale(i18n.language);
         }
     );
+
+// Strings an optional add-on brings along are merged over the bundled ones.
+for (const lang of ["en", "fa", "ru", "zh"]) {
+    const extra = extensionLocales(lang);
+    if (Object.keys(extra).length > 0) i18n.addResourceBundle(lang, "translation", extra, true, true);
+}
 
 i18n.on("languageChanged", (lng) => {
     dayjs.locale(lng);

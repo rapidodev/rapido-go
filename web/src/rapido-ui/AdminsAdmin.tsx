@@ -246,10 +246,10 @@ const AdminCard: FC<{
       className={classNames(
         "p-4",
         row.is_owner
-          ? "!border-orange-500/60 bg-orange-500/[0.04]"
+          ? "!border-orange-500/60"
           : row.is_sudo
             ? "!border-rapido-accent/60 bg-rapido-accent/[0.04]"
-            : "!border-sky-500/60 bg-sky-500/[0.04]"
+            : "!border-sky-500/60"
       )}
     >
       <div className="flex flex-col gap-3">
