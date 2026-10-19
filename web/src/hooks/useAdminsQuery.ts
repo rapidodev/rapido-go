@@ -9,10 +9,11 @@ import {
 } from "types/Admin";
 import { queryKeys } from "utils/queryClient";
 
-export const useAdminsQuery = () =>
+export const useAdminsQuery = (options?: { enabled?: boolean }) =>
   useQuery({
     queryKey: queryKeys.admins,
     queryFn: () => fetch<Admin[]>("/admins"),
+    enabled: options?.enabled ?? true,
   });
 
 const invalidateAdmins = (queryClient: ReturnType<typeof useQueryClient>) =>

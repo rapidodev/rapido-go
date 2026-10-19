@@ -107,6 +107,20 @@ WHERE (sqlc.narg('admin_id')::int IS NULL OR admin_id = sqlc.narg('admin_id')::i
     sqlc.narg('search')::text IS NULL
     OR username ILIKE '%' || sqlc.narg('search')::text || '%'
     OR note ILIKE '%' || sqlc.narg('search')::text || '%'
+    -- Config UID: a (partial) vless/vmess UUID, typed with or without dashes,
+    -- or a trojan/shadowsocks password. Only from 4 characters up, so a stray
+    -- one- or two-letter query does not match half the proxies table.
+    OR (
+      length(sqlc.narg('search')::text) >= 4
+      AND EXISTS (
+        SELECT 1 FROM proxies p
+        WHERE p.user_id = users.id
+          AND (
+            replace(lower(p.settings->>'id'), '-', '') LIKE '%' || replace(lower(sqlc.narg('search')::text), '-', '') || '%'
+            OR p.settings->>'password' ILIKE '%' || sqlc.narg('search')::text || '%'
+          )
+      )
+    )
   )
 ORDER BY
   CASE WHEN sqlc.narg('sort')::text = 'created_at' THEN created_at END ASC,
@@ -130,4 +144,15 @@ WHERE (sqlc.narg('admin_id')::int IS NULL OR admin_id = sqlc.narg('admin_id')::i
     sqlc.narg('search')::text IS NULL
     OR username ILIKE '%' || sqlc.narg('search')::text || '%'
     OR note ILIKE '%' || sqlc.narg('search')::text || '%'
+    OR (
+      length(sqlc.narg('search')::text) >= 4
+      AND EXISTS (
+        SELECT 1 FROM proxies p
+        WHERE p.user_id = users.id
+          AND (
+            replace(lower(p.settings->>'id'), '-', '') LIKE '%' || replace(lower(sqlc.narg('search')::text), '-', '') || '%'
+            OR p.settings->>'password' ILIKE '%' || sqlc.narg('search')::text || '%'
+          )
+      )
+    )
   );

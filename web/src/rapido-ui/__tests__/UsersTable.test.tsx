@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import dayjs from "dayjs";
 import Duration from "dayjs/plugin/duration";
 import utc from "dayjs/plugin/utc";
@@ -6,13 +6,23 @@ import i18n from "locales/i18n";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { User } from "types/User";
 
-const state = vi.hoisted(() => ({ users: [] as unknown[] }));
+const state = vi.hoisted(() => ({
+  users: [] as unknown[],
+  sudo: false,
+  admins: [] as { username: string }[],
+}));
 
 vi.mock("hooks/useUsersQuery", () => ({
   useUsersQuery: () => ({ data: { users: state.users, total: state.users.length }, isLoading: false }),
 }));
 
+// The reseller filter needs the role and the admin list; neither is under test
+// here, so they are stubbed instead of standing up a QueryClient.
+vi.mock("hooks/useCurrentAdminQuery", () => ({ useIsSudo: () => state.sudo }));
+vi.mock("hooks/useAdminsQuery", () => ({ useAdminsQuery: () => ({ data: state.admins }) }));
+
 import { UsersTable } from "../UsersTable";
+import { useUsersUiStore } from "../usersUiStore";
 
 // main.tsx registers these; the "last seen" text needs them.
 dayjs.extend(utc);
@@ -89,5 +99,44 @@ describe("Users table presence", () => {
   it("says never connected when there is no activity and the user is not online", () => {
     renderUser({ online: false, online_at: null });
     expect(screen.getByText("Never connected")).toBeInTheDocument();
+  });
+});
+
+describe("Users table filters", () => {
+  afterEach(() => {
+    state.sudo = false;
+    state.admins = [];
+    act(() => useUsersUiStore.getState().setFilters({ admin: undefined }));
+  });
+
+  it("lets the search box take a config UID, not just a username", () => {
+    render(<UsersTable />);
+    expect(screen.getByPlaceholderText(/config UID/i)).toBeInTheDocument();
+  });
+
+  it("offers a reseller filter to the sudo admin, listing every admin", () => {
+    state.sudo = true;
+    state.admins = [{ username: "reseller-a" }, { username: "reseller-b" }];
+    render(<UsersTable />);
+    const select = screen.getByLabelText("Filter by reseller") as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.text)).toEqual(["All resellers", "reseller-a", "reseller-b"]);
+  });
+
+  it("filters the list to one reseller's configs and back to everyone", () => {
+    state.sudo = true;
+    state.admins = [{ username: "reseller-a" }];
+    render(<UsersTable />);
+    const select = screen.getByLabelText("Filter by reseller");
+    fireEvent.change(select, { target: { value: "reseller-a" } });
+    expect(useUsersUiStore.getState().filters.admin).toBe("reseller-a");
+    fireEvent.change(select, { target: { value: "" } });
+    expect(useUsersUiStore.getState().filters.admin).toBeUndefined();
+  });
+
+  it("hides the reseller filter from a reseller, who only ever sees their own configs", () => {
+    state.sudo = false;
+    state.admins = [{ username: "reseller-a" }];
+    render(<UsersTable />);
+    expect(screen.queryByLabelText("Filter by reseller")).not.toBeInTheDocument();
   });
 });

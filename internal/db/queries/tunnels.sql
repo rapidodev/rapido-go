@@ -10,12 +10,14 @@ INSERT INTO tunnels (
     node_ssh_port, node_ssh_user, node_ssh_password,
     relay_host, relay_ssh_port, relay_ssh_user, relay_ssh_password,
     ports, interface_name, tunnel_subnet, frp_control_port, frp_token,
+    node_tunnel_addr, relay_tunnel_addr,
     status
 ) VALUES (
     $1, $2, $3,
     $4, $5, $6,
     $7, $8, $9, $10,
     $11, $12, $13, $14, $15,
+    $17, $18,
     $16
 ) RETURNING *;
 

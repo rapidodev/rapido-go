@@ -11,7 +11,7 @@ import {
 } from "hooks/useTunnelsQuery";
 import { useNodesQuery } from "hooks/useNodesQuery";
 import { useInboundPortsQuery } from "hooks/useInboundsQuery";
-import { Tunnel, TunnelCreatePayload, TunnelStatus } from "types/Tunnel";
+import { Tunnel, TunnelCreatePayload, TunnelMethod, TunnelStatus, TUNNEL_METHODS } from "types/Tunnel";
 import { Node } from "types/Node";
 import { parseInboundPortInput } from "utils/inboundPorts";
 import { formatBytes } from "utils/formatByte";
@@ -106,6 +106,9 @@ type FormValues = {
   relaySshUser: string;
   relaySshPassword: string;
   customPorts: string;
+  method: TunnelMethod;
+  nodeTunnelAddr: string;
+  relayTunnelAddr: string;
 };
 
 const emptyForm = (): FormValues => ({
@@ -119,6 +122,9 @@ const emptyForm = (): FormValues => ({
   relaySshUser: "root",
   relaySshPassword: "",
   customPorts: "",
+  method: "frp_direct",
+  nodeTunnelAddr: "",
+  relayTunnelAddr: "",
 });
 
 // A node's own candidate ports: its explicit listen_ports profile if it has
@@ -196,6 +202,9 @@ const TunnelFormModal: FC<{ onClose: () => void; onCreated: () => void }> = ({ o
       relay_ssh_user: values.relaySshUser.trim(),
       relay_ssh_password: values.relaySshPassword,
       ports: allPorts,
+      method: values.method,
+      node_tunnel_addr: values.nodeTunnelAddr.trim() || undefined,
+      relay_tunnel_addr: values.relayTunnelAddr.trim() || undefined,
     };
     createTunnel.mutate(body, {
       onSuccess: onCreated,
@@ -233,6 +242,39 @@ const TunnelFormModal: FC<{ onClose: () => void; onCreated: () => void }> = ({ o
             ))}
           </Select>
         </label>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-rapido-muted">{t("rapido.tunnels.method")}</span>
+          <Select value={values.method} onChange={(e) => set({ method: e.target.value as TunnelMethod })}>
+            {TUNNEL_METHODS.map((m) => (
+              <option key={m} value={m}>
+                {t(`rapido.tunnels.method.${m}`)}
+              </option>
+            ))}
+          </Select>
+          <span className="text-xs text-rapido-muted">{t(`rapido.tunnels.methodHint.${values.method}`)}</span>
+        </label>
+
+        <div className="grid grid-cols-2 gap-2">
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-rapido-muted">{t("rapido.tunnels.nodeTunnelAddr")}</span>
+            <Input
+              dir="ltr"
+              placeholder={values.method === "ip6gre_dnat" ? "2a12:de40:51::1" : t("rapido.tunnels.addrOptional")}
+              value={values.nodeTunnelAddr}
+              onChange={(e) => set({ nodeTunnelAddr: e.target.value })}
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-rapido-muted">{t("rapido.tunnels.relayTunnelAddr")}</span>
+            <Input
+              dir="ltr"
+              placeholder={values.method === "ip6gre_dnat" ? "2a05:9080:3::1" : t("rapido.tunnels.addrOptional")}
+              value={values.relayTunnelAddr}
+              onChange={(e) => set({ relayTunnelAddr: e.target.value })}
+            />
+          </label>
+        </div>
 
         <div className="flex flex-col gap-2 rounded-lg border border-rapido-border p-3">
           <span className="text-xs font-medium text-rapido-muted">{t("rapido.tunnels.relaySection")}</span>
@@ -498,6 +540,10 @@ const TunnelCard: FC<{ tunnel: Tunnel; nodeName: string | undefined }> = ({ tunn
         <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-rapido-muted">
           <span>
             {t("rapido.tunnels.node")}: <span className="text-rapido-text">{nodeName ?? tunnel.node_id}</span>
+          </span>
+          <span>
+            {t("rapido.tunnels.method")}:{" "}
+            <span className="text-rapido-text">{t(`rapido.tunnels.method.${tunnel.method}`)}</span>
           </span>
           <span>
             {t("rapido.tunnels.relayHost")}:{" "}

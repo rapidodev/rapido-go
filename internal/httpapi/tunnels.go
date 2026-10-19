@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/legendary1205/rapido-go/internal/db/generated"
 	"github.com/legendary1205/rapido-go/internal/relayhealth"
@@ -69,6 +70,10 @@ type tunnelDTO struct {
 	Ports          []int32 `json:"ports"`
 	InterfaceName  string  `json:"interface_name"`
 	FRPControlPort int32   `json:"frp_control_port"`
+	// NodeTunnelAddr/RelayTunnelAddr: the addresses the tunnel itself runs on
+	// when they differ from the SSH address (e.g. an IPv6 underlay).
+	NodeTunnelAddr  *string `json:"node_tunnel_addr"`
+	RelayTunnelAddr *string `json:"relay_tunnel_addr"`
 	Status         string  `json:"status"`
 	StatusMessage  *string `json:"status_message"`
 
@@ -85,6 +90,12 @@ func toTunnelDTO(t generated.Tunnel, health relayhealth.Status, healthKnown bool
 		ID: t.ID, Name: t.Name, Method: t.Method, NodeID: t.NodeID,
 		RelayHost: t.RelayHost, Ports: t.Ports, InterfaceName: t.InterfaceName,
 		FRPControlPort: t.FrpControlPort, Status: t.Status,
+	}
+	if t.NodeTunnelAddr.Valid {
+		dto.NodeTunnelAddr = &t.NodeTunnelAddr.String
+	}
+	if t.RelayTunnelAddr.Valid {
+		dto.RelayTunnelAddr = &t.RelayTunnelAddr.String
 	}
 	if t.StatusMessage.Valid {
 		dto.StatusMessage = &t.StatusMessage.String
@@ -232,6 +243,13 @@ type createTunnelRequest struct {
 	RelaySSHUser     string  `json:"relay_ssh_user" binding:"required"`
 	RelaySSHPassword string  `json:"relay_ssh_password" binding:"required"`
 	Ports            []int32 `json:"ports" binding:"required"`
+
+	// Method picks the tunnel design (see tunnelprovision.Methods); empty
+	// means frp_direct. NodeTunnelAddr/RelayTunnelAddr are optional: the
+	// addresses the tunnel runs on when they differ from the SSH ones.
+	Method          string `json:"method"`
+	NodeTunnelAddr  string `json:"node_tunnel_addr"`
+	RelayTunnelAddr string `json:"relay_tunnel_addr"`
 }
 
 // handleCreateTunnel implements POST /api/tunnels (sudo only): allocates
@@ -256,6 +274,30 @@ func (h *Handler) handleCreateTunnel(c *gin.Context) {
 		if p <= 0 || p > 65535 {
 			c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": "every port must be between 1 and 65535"})
 			return
+		}
+	}
+	if req.Method == "" {
+		req.Method = tunnelprovision.MethodFRPDirect
+	}
+	if !tunnelprovision.ValidMethod(req.Method) {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": "unknown tunnel method " + req.Method})
+		return
+	}
+	for label, a := range map[string]string{"node_tunnel_addr": req.NodeTunnelAddr, "relay_tunnel_addr": req.RelayTunnelAddr} {
+		if a == "" {
+			continue
+		}
+		if _, err := netip.ParseAddr(a); err != nil {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": label + " must be an IP address"})
+			return
+		}
+	}
+	if tunnelprovision.RequiresIPv6(req.Method) {
+		for label, a := range map[string]string{"node_tunnel_addr": req.NodeTunnelAddr, "relay_tunnel_addr": req.RelayTunnelAddr} {
+			if addr, err := netip.ParseAddr(a); err != nil || !addr.Is6() {
+				c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": label + " must be an IPv6 address for the " + req.Method + " method"})
+				return
+			}
 		}
 	}
 	if req.NodeSSHPort == 0 {
@@ -304,10 +346,11 @@ func (h *Handler) handleCreateTunnel(c *gin.Context) {
 	}
 
 	created, err := h.store.Queries.CreateTunnel(ctx, generated.CreateTunnelParams{
-		Name: req.Name, Method: "gre_frp", NodeID: req.NodeID,
+		Name: req.Name, Method: req.Method, NodeID: req.NodeID,
 		NodeSshPort: req.NodeSSHPort, NodeSshUser: req.NodeSSHUser, NodeSshPassword: req.NodeSSHPassword,
 		RelayHost: req.RelayHost, RelaySshPort: req.RelaySSHPort, RelaySshUser: req.RelaySSHUser, RelaySshPassword: req.RelaySSHPassword,
 		Ports: req.Ports, InterfaceName: ifaceName, TunnelSubnet: subnet, FrpControlPort: controlPort, FrpToken: token,
+		NodeTunnelAddr: textOrNull(req.NodeTunnelAddr), RelayTunnelAddr: textOrNull(req.RelayTunnelAddr),
 		Status: "pending",
 	})
 	if err != nil {
@@ -343,6 +386,7 @@ func tunnelParams(t generated.Tunnel, nodeAddress string) tunnelprovision.Params
 	return tunnelprovision.Params{
 		InterfaceName: t.InterfaceName, NodeAddress: nodeAddress, RelayHost: t.RelayHost,
 		TunnelSubnet: t.TunnelSubnet, FRPControlPort: t.FrpControlPort, FRPToken: t.FrpToken, Ports: t.Ports,
+		Method: t.Method, NodeTunnelAddr: t.NodeTunnelAddr.String, RelayTunnelAddr: t.RelayTunnelAddr.String,
 	}
 }
 
@@ -561,4 +605,13 @@ func teardownErrOrNil(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// textOrNull maps an empty string to SQL NULL ("not set"), anything else to
+// itself.
+func textOrNull(s string) pgtype.Text {
+	if s == "" {
+		return pgtype.Text{}
+	}
+	return pgtype.Text{String: s, Valid: true}
 }

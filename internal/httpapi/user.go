@@ -856,6 +856,15 @@ func (h *Handler) handleListUsers(c *gin.Context) {
 	params := generated.ListUsersParams{}
 	if !identity.IsSudo {
 		params.AdminID = pgInt4FromInt(int(identity.AdminID))
+	} else if v := c.Query("admin"); v != "" {
+		// Sudo only: show just one reseller's configs. An unknown username
+		// matches nothing (an empty list), not "everyone".
+		a, err := h.store.Queries.GetAdminByUsername(c.Request.Context(), v)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"users": []userResponseDTO{}, "total": 0})
+			return
+		}
+		params.AdminID = pgInt4FromInt(int(a.ID))
 	}
 	if v := c.Query("search"); v != "" {
 		params.Search = textFromPtr(&v)

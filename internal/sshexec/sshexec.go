@@ -19,6 +19,7 @@
 package sshexec
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strconv"
@@ -89,6 +90,65 @@ func (c *Client) Run(ctx context.Context, command string) (string, error) {
 		return "", fmt.Errorf("sshexec: new session: %w", err)
 	}
 	defer session.Close()
+
+	type result struct {
+		out []byte
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		out, err := session.CombinedOutput(command)
+		ch <- result{out, err}
+	}()
+	select {
+	case <-ctx.Done():
+		session.Signal(ssh.SIGKILL)
+		return "", ctx.Err()
+	case r := <-ch:
+		if r.err != nil {
+			return string(r.out), fmt.Errorf("sshexec: command failed: %w: %s", r.err, strings.TrimSpace(string(r.out)))
+		}
+		return string(r.out), nil
+	}
+}
+
+// RunOut runs command and returns its stdout only (stderr is dropped), for
+// fetching a file's raw bytes - Run's combined output would mix any warning
+// into the data.
+func (c *Client) RunOut(ctx context.Context, command string) ([]byte, error) {
+	session, err := c.conn.NewSession()
+	if err != nil {
+		return nil, fmt.Errorf("sshexec: new session: %w", err)
+	}
+	defer session.Close()
+
+	var stdout bytes.Buffer
+	session.Stdout = &stdout
+
+	ch := make(chan error, 1)
+	go func() { ch <- session.Run(command) }()
+	select {
+	case <-ctx.Done():
+		session.Signal(ssh.SIGKILL)
+		return nil, ctx.Err()
+	case err := <-ch:
+		if err != nil {
+			return nil, fmt.Errorf("sshexec: command failed: %w", err)
+		}
+		return stdout.Bytes(), nil
+	}
+}
+
+// RunStdin runs command with stdin as its standard input - the way to put a
+// large file (a binary, too big for a command line) on the remote host.
+func (c *Client) RunStdin(ctx context.Context, command string, stdin []byte) (string, error) {
+	session, err := c.conn.NewSession()
+	if err != nil {
+		return "", fmt.Errorf("sshexec: new session: %w", err)
+	}
+	defer session.Close()
+
+	session.Stdin = bytes.NewReader(stdin)
 
 	type result struct {
 		out []byte

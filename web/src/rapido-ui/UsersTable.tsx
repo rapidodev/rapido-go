@@ -3,6 +3,8 @@ import { useTranslation } from "react-i18next";
 import debounce from "lodash.debounce";
 import classNames from "classnames";
 import { useUsersQuery, UsersFilters } from "hooks/useUsersQuery";
+import { useAdminsQuery } from "hooks/useAdminsQuery";
+import { useIsSudo } from "hooks/useCurrentAdminQuery";
 import { useUsersUiStore } from "rapido-ui/usersUiStore";
 import { User, Status } from "types/User";
 import { formatBytes } from "utils/formatByte";
@@ -280,6 +282,9 @@ export const UsersTable: FC = () => {
   const setCreatingNewUser = useUsersUiStore((s) => s.setCreatingNewUser);
 
   const { data, isLoading } = useUsersQuery(filters);
+  const isSudo = useIsSudo();
+  // /admins is sudo-only, so a reseller's session never asks for it.
+  const { data: admins } = useAdminsQuery({ enabled: isSudo });
   const users = data?.users ?? [];
   const total = data?.total ?? 0;
 
@@ -338,6 +343,23 @@ export const UsersTable: FC = () => {
             </option>
           ))}
         </Select>
+
+        {isSudo && (
+          <Select
+            value={filters.admin ?? ""}
+            aria-label={t("rapido.filterByAdmin")}
+            onChange={(e) =>
+              setFilters({ admin: e.target.value || undefined, offset: 0 })
+            }
+          >
+            <option value="">{t("rapido.allAdmins")}</option>
+            {(admins ?? []).map((a) => (
+              <option key={a.username} value={a.username}>
+                {a.username}
+              </option>
+            ))}
+          </Select>
+        )}
 
         <Select
           value={filters.sort}

@@ -12,6 +12,8 @@ import { queryKeys } from "utils/queryClient";
 export type UsersFilters = {
   search?: string;
   status?: Status;
+  // Sudo only: show just this reseller's (admin's) configs.
+  admin?: string;
   sort?: string;
   limit?: number;
   offset?: number;

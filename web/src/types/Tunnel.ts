@@ -3,10 +3,19 @@
 // "Tunnel Relays" page (add a bare host:port for health-only probing) was
 // folded in here, since every real relay this fleet has is a provisioned
 // tunnel, and a tunnel already carries everything a health/resource check
-// needs. `method` only has one value today ("gre_frp") - the field exists
-// so a second kind (e.g. wireguard_frp) can be added later without a
-// schema or DTO change.
+// needs. `method` is the tunnel design (see TUNNEL_METHODS below and
+// internal/tunnelprovision/methods.go for what each one builds).
 export type TunnelStatus = "pending" | "active" | "failed" | "deleting" | "stopped" | "stopping" | "starting";
+
+export const TUNNEL_METHODS = [
+  "frp_direct",
+  "ip6gre_dnat",
+  "wg_dnat",
+  "gre_dnat",
+  "frp_quic",
+  "gre_frp",
+] as const;
+export type TunnelMethod = (typeof TUNNEL_METHODS)[number];
 
 export type TunnelHealth = {
   up: boolean;
@@ -42,12 +51,16 @@ export type TunnelMetrics = {
 export type Tunnel = {
   id: number;
   name: string;
-  method: "gre_frp";
+  method: TunnelMethod;
   node_id: number;
   relay_host: string;
   ports: number[];
   interface_name: string;
   frp_control_port: number;
+  // The addresses the tunnel itself runs on when they differ from the SSH
+  // address (e.g. an IPv6 underlay); null = same as the SSH address.
+  node_tunnel_addr: string | null;
+  relay_tunnel_addr: string | null;
   status: TunnelStatus;
   status_message: string | null;
 
@@ -73,6 +86,9 @@ export type TunnelCreatePayload = {
   relay_ssh_user: string;
   relay_ssh_password: string;
   ports: number[];
+  method?: TunnelMethod;
+  node_tunnel_addr?: string;
+  relay_tunnel_addr?: string;
 };
 
 export type TunnelDeleteResult = {

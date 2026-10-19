@@ -38,6 +38,39 @@ type Params struct {
 	FRPControlPort int32
 	FRPToken       string
 	Ports          []int32
+
+	// Method selects which tunnel design is built (see methods.go). Empty
+	// means gre_frp, the only design before methods existed, so rows created
+	// back then keep behaving exactly as they did.
+	Method string
+	// NodeTunnelAddr/RelayTunnelAddr are the addresses the data path itself
+	// uses - the GRE/WireGuard endpoints, or the frp control address. They
+	// default to NodeAddress/RelayHost, and exist so SSH can keep using one
+	// address family (IPv4) while the tunnel runs over another (IPv6).
+	NodeTunnelAddr  string
+	RelayTunnelAddr string
+}
+
+func (p Params) method() string {
+	if p.Method == "" {
+		return MethodGREFRP
+	}
+	return p.Method
+}
+
+// nodeOuter/relayOuter are the addresses the tunnel itself is built on.
+func (p Params) nodeOuter() string {
+	if p.NodeTunnelAddr != "" {
+		return p.NodeTunnelAddr
+	}
+	return p.NodeAddress
+}
+
+func (p Params) relayOuter() string {
+	if p.RelayTunnelAddr != "" {
+		return p.RelayTunnelAddr
+	}
+	return p.RelayHost
 }
 
 // nodeTunnelIP/relayTunnelIP are the two usable addresses of the /30:
@@ -174,7 +207,7 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=-/sbin/ip tunnel add %s mode gre remote %s local %s ttl 255
-ExecStart=-/sbin/ip link set %s up
+ExecStart=-/sbin/ip link set %s mtu 1452 up
 ExecStart=-/sbin/ip addr add %s/30 dev %s
 ExecStop=-/sbin/ip link del %s
 
@@ -196,7 +229,16 @@ auth.token = "%s"
 `, port, token)
 }
 
+// frpcConfig is the classic TCP-transport client config (kept for gre_frp).
 func frpcConfig(serverAddr string, port int32, token string, ports []int32) string {
+	return frpcConfigFor(serverAddr, port, token, ports, "tcp", 100)
+}
+
+// frpcConfigFor writes one fully expanded [[proxies]] block per port;
+// protocol is "tcp" or "quic", pool is how many work connections the client
+// keeps ready (a new user connection takes one at once instead of paying a
+// round trip to the relay first).
+func frpcConfigFor(serverAddr string, port int32, token string, ports []int32, protocol string, pool int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, `serverAddr = "%s"
 serverPort = %d
@@ -206,19 +248,19 @@ loginFailExit = false
 auth.method = "token"
 auth.token = "%s"
 
-transport.protocol = "tcp"
+transport.protocol = "%s"
 transport.tcpMux = false
 transport.tcpMuxKeepaliveInterval = 10
 transport.dialServerTimeout = 10
 transport.dialServerKeepalive = 120
-transport.poolCount = 20
+transport.poolCount = %d
 transport.heartbeatInterval = 30
 transport.heartbeatTimeout = 90
 transport.tls.enable = false
 transport.quic.keepalivePeriod = 10
 transport.quic.maxIdleTimeout = 30
 transport.quic.maxIncomingStreams = 100000
-`, serverAddr, port, token)
+`, serverAddr, port, token, protocol, pool)
 	for _, p := range ports {
 		fmt.Fprintf(&b, `
 [[proxies]]
@@ -239,7 +281,7 @@ transport.useCompression = false
 // node-side GRE bring-up's own connectivity check (pinging the relay's
 // tunnel address) has something real to reach - a node-first order would
 // make that check meaningless on a first-time setup.
-func Provision(ctx context.Context, relay, node *sshexec.Client, p Params) error {
+func provisionGREFRP(ctx context.Context, relay, node *sshexec.Client, p Params) error {
 	if err := ensureFRPInstalled(ctx, relay); err != nil {
 		return fmt.Errorf("relay: %w", err)
 	}
@@ -291,7 +333,7 @@ func Provision(ctx context.Context, relay, node *sshexec.Client, p Params) error
 	// Every file is in place on both ends - enabling/starting the four
 	// units is the exact same sequence Start uses to resume a stopped
 	// tunnel, so it does that part too rather than repeating it.
-	return Start(ctx, relay, node, p)
+	return startGREFRP(ctx, relay, node, p)
 }
 
 // Start enables and starts the four units Provision writes (or Stop
@@ -299,7 +341,7 @@ func Provision(ctx context.Context, relay, node *sshexec.Client, p Params) error
 // the same ping-based connectivity check Provision uses before trusting
 // frpc to actually work. Writes nothing: every config/unit file is assumed
 // to already be on disk, exactly as Provision left it.
-func Start(ctx context.Context, relay, node *sshexec.Client, p Params) error {
+func startGREFRP(ctx context.Context, relay, node *sshexec.Client, p Params) error {
 	if _, err := relay.Run(ctx, "systemctl daemon-reload && systemctl enable --now gre-"+p.InterfaceName); err != nil {
 		return fmt.Errorf("relay: start GRE tunnel: %w", err)
 	}
@@ -342,7 +384,7 @@ func Start(ctx context.Context, relay, node *sshexec.Client, p Params) error {
 // can be resumed later with nothing re-provisioned. Best-effort, like
 // Teardown: every step runs even if an earlier one fails, errors collected
 // rather than stopping at the first one.
-func Stop(ctx context.Context, relay, node *sshexec.Client, p Params) error {
+func stopGREFRP(ctx context.Context, relay, node *sshexec.Client, p Params) error {
 	var errs []string
 	run := func(c *sshexec.Client, label, cmd string) {
 		if _, err := c.Run(ctx, cmd); err != nil {
@@ -373,7 +415,7 @@ func Restart(ctx context.Context, relay, node *sshexec.Client, p Params) error {
 // runs even if an earlier one fails (a half-provisioned tunnel, or one
 // whose relay is unreachable, must still be deletable), with every error
 // collected rather than stopping at the first one.
-func Teardown(ctx context.Context, relay, node *sshexec.Client, p Params) error {
+func teardownGREFRP(ctx context.Context, relay, node *sshexec.Client, p Params) error {
 	var errs []string
 	run := func(c *sshexec.Client, label, cmd string) {
 		if c == nil {
