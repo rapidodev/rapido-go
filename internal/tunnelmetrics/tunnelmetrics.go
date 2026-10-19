@@ -488,7 +488,11 @@ func Run(ctx context.Context, c *cache.Client, o Options) {
 					return
 				}
 				defer client.Close()
-				m, err := collect(dctx, client, t.InterfaceName, t.RelayNIC, t.Ports)
+				// The login and the reading each get their own budget: a slow
+				// SSH handshake must not eat the time the script itself needs.
+				rctx, rcancel := context.WithTimeout(ctx, runTimeout)
+				defer rcancel()
+				m, err := collect(rctx, client, t.InterfaceName, t.RelayNIC, t.Ports)
 				if err != nil {
 					rows[i].Error = err.Error()
 					return
@@ -533,5 +537,11 @@ func collectNodeFor(ctx context.Context, t Target, dialTimeout time.Duration) No
 		return NodeMetrics{Error: err.Error()}
 	}
 	defer client.Close()
-	return collectNode(dctx, client, t.NodeNIC, t.HAProxySocket, t.PathV6, t.PathV4)
+	rctx, rcancel := context.WithTimeout(ctx, runTimeout)
+	defer rcancel()
+	return collectNode(rctx, client, t.NodeNIC, t.HAProxySocket, t.PathV6, t.PathV4)
 }
+
+// runTimeout bounds one reading (the script on the relay or on the node),
+// separate from the SSH login's own limit.
+const runTimeout = 30 * time.Second

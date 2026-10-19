@@ -52,6 +52,16 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 		Auth:            []ssh.AuthMethod{ssh.Password(cfg.Password)},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         dialTimeout,
+		// The default list leads with the post-quantum hybrid, whose key
+		// exchange packet is far larger than the classic ones. On several
+		// of the filtered paths this panel reaches servers over, the large
+		// packet is dropped and the login hangs until it times out, while
+		// the classic exchange completes in about a second.
+		Config: ssh.Config{KeyExchanges: []string{
+			"curve25519-sha256", "curve25519-sha256@libssh.org",
+			"ecdh-sha2-nistp256", "ecdh-sha2-nistp384", "ecdh-sha2-nistp521",
+			"diffie-hellman-group14-sha256",
+		}},
 	}
 	addr := cfg.Host + ":" + strconv.Itoa(int(port))
 
