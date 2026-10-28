@@ -13,5 +13,6 @@
 .tunnel.log
 
 # Optional private add-ons are supplied locally for private image builds.
+/internal/mullvadexits/
 /internal/httpapi/ext_private_*.go
 /web/src/private/

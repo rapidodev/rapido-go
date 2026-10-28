@@ -403,12 +403,18 @@ unit_fails "building a private edition without its sources fails closed" \
      private_installation() { return 0; }; source_version() { echo test; }
      docker() { echo UNEXPECTED_BUILD; return 0; }; build_local_image'
 unit "available private add-on sources enable the private build tag" 'private-build' \
-    'APP_DIR="$(mktemp -d)"; mkdir -p "$APP_DIR/docker" "$APP_DIR/internal/httpapi" "$APP_DIR/web/src/private"
+    'APP_DIR="$(mktemp -d)"; mkdir -p "$APP_DIR/docker" "$APP_DIR/internal/httpapi" "$APP_DIR/web/src/private" "$APP_DIR/internal/mullvadexits"
      : > "$APP_DIR/docker/Dockerfile.panel"; : > "$APP_DIR/internal/httpapi/ext_private_exits.go"; : > "$APP_DIR/web/src/private/index.tsx"
+     touch "$APP_DIR/internal/mullvadexits/"{service.go,decision.go,relays.go,exits.py}
      WORK_LOG="$(mktemp)"; docker() { echo "$*" >> "$WORK_LOG"; return 0; }
      private_installation() { return 1; }; source_version() { echo test; }; image_list() { :; }
      build_local_image >/dev/null
      grep -q -- "--build-arg GO_TAGS=private" "$WORK_LOG" && grep -q -- "--build-arg VERSION=test-private" "$WORK_LOG" && echo private-build'
+unit_fails "a private add-on without its service dependency fails before Docker build" \
+    'APP_DIR="$(mktemp -d)"; mkdir -p "$APP_DIR/docker" "$APP_DIR/internal/httpapi" "$APP_DIR/web/src/private"
+     touch "$APP_DIR/docker/Dockerfile.panel" "$APP_DIR/internal/httpapi/ext_private_exits.go" "$APP_DIR/web/src/private/index.tsx"
+     private_installation() { return 1; }; source_version() { echo test; }
+     docker() { echo UNEXPECTED_BUILD; return 0; }; build_local_image'
 unit "a local build also updates the private deployment alias" \
     'tag rapido-go-panel:private rapido-go-panel:previous
 tag ghcr.io/rapidodev/rapido-go-panel:latest rapido-go-panel:private' \

@@ -1245,8 +1245,12 @@ build_local_image() {
     [ -f "$APP_DIR/docker/Dockerfile.panel" ] \
         || die "The source tree is not here, so the image cannot be built. Re-run with RAPIDO_BUILD_LOCALLY=1 to fetch it."
     build_version="$(source_version)"
-    if private_installation || [ -d "$APP_DIR/web/src/private" ] || [ -f "$APP_DIR/internal/httpapi/ext_private_exits.go" ]; then
+    if private_installation || [ -d "$APP_DIR/web/src/private" ] || [ -d "$APP_DIR/internal/mullvadexits" ] || [ -f "$APP_DIR/internal/httpapi/ext_private_exits.go" ]; then
         [ -f "$APP_DIR/internal/httpapi/ext_private_exits.go" ] \
+            && [ -f "$APP_DIR/internal/mullvadexits/service.go" ] \
+            && [ -f "$APP_DIR/internal/mullvadexits/decision.go" ] \
+            && [ -f "$APP_DIR/internal/mullvadexits/relays.go" ] \
+            && [ -f "$APP_DIR/internal/mullvadexits/exits.py" ] \
             && { [ -f "$APP_DIR/web/src/private/index.tsx" ] || [ -f "$APP_DIR/web/src/private/index.ts" ]; } \
             || die "Private add-on sources are missing. The current private image will be kept."
         build_tags=private
