@@ -72,6 +72,9 @@ func (c *Console) adminsFor(ctx context.Context, uid int64) ([]generated.Admin, 
 			byID := map[int64][]generated.Admin{}
 			var fallback, ownerFallback string
 			for _, a := range admins {
+				if c.d.SudoUsername != "" && a.Username == c.d.SudoUsername {
+					continue
+				}
 				if a.TelegramID.Valid {
 					byID[a.TelegramID.Int64] = append(byID[a.TelegramID.Int64], a)
 				}

@@ -43,8 +43,8 @@ func TestAPIDocExamplesMatchTheResponseTypes(t *testing.T) {
 				Events        []tunnelEventDTO `json:"events"`
 			}{}
 		},
-		"doctor_running":          func() any { return &tunneldoctor.Job{} },
-		"doctor_job":              func() any { return &tunneldoctor.Job{} },
+		"doctor_running": func() any { return &tunneldoctor.Job{} },
+		"doctor_job":     func() any { return &tunneldoctor.Job{} },
 		"overview": func() any {
 			return &struct {
 				GeneratedAt string             `json:"generated_at"`

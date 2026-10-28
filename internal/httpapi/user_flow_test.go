@@ -479,8 +479,8 @@ func TestListUsersSortMatchesOldDashboardOptions(t *testing.T) {
 		{"created_at", []string{"alice", "bob", "carol"}},  // oldest first
 		{"username", []string{"alice", "bob", "carol"}},    // A-Z
 		{"-used_traffic", []string{"alice", "carol", "bob"}},
-		{"expire", []string{"bob", "carol", "alice"}}, // soonest first
-		{"", []string{"carol", "bob", "alice"}},        // missing -> default newest-first
+		{"expire", []string{"bob", "carol", "alice"}},            // soonest first
+		{"", []string{"carol", "bob", "alice"}},                  // missing -> default newest-first
 		{"not-a-real-option", []string{"carol", "bob", "alice"}}, // unrecognized -> same default
 	}
 	for _, c := range cases {

@@ -147,7 +147,7 @@ func newEnv(t *testing.T) *testEnv {
 		dsn, t.TempDir(), 5, quiet).WithSubscriptionURLPrefixes([]string{"https://panel.test", "https://alt.test"})
 	router := httpapi.NewRouter(handler, quiet, []string{"*"})
 
-	sudoToken, err := issuer.Issue(envSudoUsername, true)
+	sudoToken, err := issuer.IssueBootstrap(envSudoUsername)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}

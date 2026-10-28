@@ -38,9 +38,10 @@ type nodeConfigEntry struct {
 // pulling ~1 MB across the network, and each panel process validating its
 // copy against the shared data version needs no invalidation message.
 type nodeConfigCache struct {
-	mu      sync.Mutex
-	snap    *nodeConfigSnapshot
-	entries map[string]*nodeConfigEntry
+	mu       sync.Mutex
+	snap     *nodeConfigSnapshot
+	entries  map[string]*nodeConfigEntry
+	previous map[string][]*nodeConfigEntry
 
 	snapFlight  singleflight.Group
 	entryFlight singleflight.Group
@@ -67,12 +68,37 @@ func (c *nodeConfigCache) store(key string, e *nodeConfigEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.entries == nil {
-		c.entries = make(map[string]*nodeConfigEntry)
+		c.entries = map[string]*nodeConfigEntry{}
+	}
+	if c.previous == nil {
+		c.previous = map[string][]*nodeConfigEntry{}
 	}
 	now := time.Now()
 	for k, old := range c.entries {
-		if old.version < e.version || now.Sub(old.builtAt) >= nodeConfigSafetyTTL {
+		if old.version < e.version || (k == key && old.etag != e.etag) {
+			if now.Sub(old.builtAt) < nodeConfigSafetyTTL {
+				history := append([]*nodeConfigEntry{old}, c.previous[k]...)
+				if len(history) > 2 {
+					history = history[:2]
+				}
+				c.previous[k] = history
+			}
 			delete(c.entries, k)
+		} else if now.Sub(old.builtAt) >= nodeConfigSafetyTTL {
+			delete(c.entries, k)
+		}
+	}
+	for k, history := range c.previous {
+		valid := history[:0]
+		for _, old := range history {
+			if now.Sub(old.builtAt) < nodeConfigSafetyTTL {
+				valid = append(valid, old)
+			}
+		}
+		if len(valid) == 0 {
+			delete(c.previous, k)
+		} else {
+			c.previous[k] = valid
 		}
 	}
 	c.entries[key] = e
@@ -118,8 +144,12 @@ func (h *Handler) snapshotFor(ctx context.Context, version int64) (*nodeConfigSn
 }
 
 func (h *Handler) renderNodeConfigEntry(snap *nodeConfigSnapshot, p nodeProfile) (*nodeConfigEntry, error) {
+	return h.renderNodeConfigEntrySchema(snap, p, false)
+}
+
+func (h *Handler) renderNodeConfigEntrySchema(snap *nodeConfigSnapshot, p nodeProfile, compact bool) (*nodeConfigEntry, error) {
 	h.nodeConfig.renders.Add(1)
-	payload, canonical, err := snap.render(p)
+	payload, canonical, err := snap.renderSchema(p, compact)
 	if err != nil {
 		return nil, err
 	}
@@ -143,6 +173,10 @@ func (h *Handler) renderNodeConfigEntry(snap *nodeConfigSnapshot, p nodeProfile)
 // next poll see a higher version and rebuild, never serve something older
 // than the version claims.
 func (h *Handler) cachedNodeConfig(ctx context.Context, p nodeProfile) (*nodeConfigEntry, error) {
+	return h.cachedNodeConfigSchema(ctx, p, false)
+}
+
+func (h *Handler) cachedNodeConfigSchema(ctx context.Context, p nodeProfile, compact bool) (*nodeConfigEntry, error) {
 	c := &h.nodeConfig
 	version, err := h.store.Queries.GetDataVersion(ctx, dataVersionNodeConfig)
 	if err != nil {
@@ -153,10 +187,13 @@ func (h *Handler) cachedNodeConfig(ctx context.Context, p nodeProfile) (*nodeCon
 		if err != nil {
 			return nil, err
 		}
-		return h.renderNodeConfigEntry(snap, p)
+		return h.renderNodeConfigEntrySchema(snap, p, compact)
 	}
 
 	key := p.key()
+	if compact {
+		key += "/v2"
+	}
 	if e := c.lookup(key, version); e != nil {
 		return e, nil
 	}
@@ -170,7 +207,7 @@ func (h *Handler) cachedNodeConfig(ctx context.Context, p nodeProfile) (*nodeCon
 		if err != nil {
 			return nil, err
 		}
-		e, err := h.renderNodeConfigEntry(snap, p)
+		e, err := h.renderNodeConfigEntrySchema(snap, p, compact)
 		if err != nil {
 			return nil, err
 		}

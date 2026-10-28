@@ -252,6 +252,6 @@ func (c *naiveH2Conn) UpstreamReader() any                { return c.reader }
 func (c *naiveH2Conn) UpstreamWriter() any                { return c.writer }
 func (c *naiveH2Conn) FrontHeadroom() int                 { return c.frontHeadroom() }
 func (c *naiveH2Conn) RearHeadroom() int                  { return c.rearHeadroom() }
-func (c *naiveH2Conn) WriterMTU() int                      { return c.writerMTU() }
+func (c *naiveH2Conn) WriterMTU() int                     { return c.writerMTU() }
 func (c *naiveH2Conn) ReaderReplaceable() bool            { return c.readerReplaceable() }
 func (c *naiveH2Conn) WriterReplaceable() bool            { return c.writerReplaceable() }

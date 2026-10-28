@@ -232,7 +232,12 @@ CADDY_MANY='RAPIDO_DOMAIN=panel.example.com RAPIDO_EXTRA_DOMAINS="panel2.example
 unit "caddyfile: single domain, compressed and proxied" \
     'panel.example.com {
 	encode zstd gzip
-	reverse_proxy panel:8000
+	handle /api/internal/node-report {
+		reverse_proxy backend:8000
+	}
+	handle {
+		reverse_proxy panel:8000
+	}
 }' \
     "$CADDY_ONE"'; render_caddyfile'
 unit_has   "caddyfile: extra domains share the panel block" 'panel.example.com, panel2.example.com, panel3.example.com {' "$CADDY_MANY"'; render_caddyfile'
@@ -347,9 +352,44 @@ unit "pull_images pulls concurrently" \
      s=$SECONDS; pull_images >/dev/null 2>&1; [ $((SECONDS - s)) -lt 3 ] && echo fast'
 unit "pull_images leaves the panel image to the local build" \
     'other:1' \
-    'image_list() { printf "ghcr.io/x/rapido-go-panel:latest\nother:1\n"; }
+    'image_list() { printf "ghcr.io/x/rapido-go-panel:latest\nrapido-go-panel:private\nother:1\n"; }
      docker() { echo "$*" >> "$WORK_LOG"; return 0; }
      WORK_LOG="$(mktemp)"; RAPIDO_BUILD_LOCALLY=1 pull_images >/dev/null 2>&1; sed "s/pull -q //" "$WORK_LOG"'
+
+unit "the private alias pulls a selected registry image and preserves its predecessor" \
+    'pull -q ghcr.io/rapidodev/rapido-go-panel:release-test
+image inspect rapido-go-panel:private
+tag rapido-go-panel:private rapido-go-panel:previous
+tag ghcr.io/rapidodev/rapido-go-panel:release-test rapido-go-panel:private' \
+    'WORK_LOG="$(mktemp)"; docker() { echo "$*" >> "$WORK_LOG"; return 0; }
+     RAPIDO_PRIVATE_IMAGE_SOURCE=ghcr.io/rapidodev/rapido-go-panel:release-test pull_image rapido-go-panel:private >/dev/null
+     cat "$WORK_LOG"'
+unit "the private alias defaults to the published panel image" \
+    'pull -q ghcr.io/rapidodev/rapido-go-panel:latest' \
+    'WORK_LOG="$(mktemp)"; docker() { echo "$*" >> "$WORK_LOG"; return 0; }
+     APP_DIR="$(mktemp -d)"; unset RAPIDO_PRIVATE_IMAGE_SOURCE
+     pull_image rapido-go-panel:private >/dev/null
+     head -n 1 "$WORK_LOG"'
+unit "a failed private image download leaves the local alias untouched" \
+    'pull -q ghcr.io/rapidodev/rapido-go-panel:release-test' \
+    'WORK_LOG="$(mktemp)"; docker() { echo "$*" >> "$WORK_LOG"; return 1; }
+     if RAPIDO_PRIVATE_IMAGE_SOURCE=ghcr.io/rapidodev/rapido-go-panel:release-test pull_image rapido-go-panel:private >/dev/null; then exit 1; fi
+     cat "$WORK_LOG"'
+unit_fails "the private alias cannot be its own registry source" \
+    'RAPIDO_PRIVATE_IMAGE_SOURCE=rapido-go-panel:private pull_image rapido-go-panel:private'
+unit "a failed image backup prevents replacing the private alias" \
+    'image inspect rapido-go-panel:private
+tag rapido-go-panel:private rapido-go-panel:previous' \
+    'WORK_LOG="$(mktemp)"; docker() { echo "$*" >> "$WORK_LOG"; [ "$1" != tag ]; }
+     if tag_private_panel_image ghcr.io/rapidodev/rapido-go-panel:release-test; then exit 1; fi
+     cat "$WORK_LOG"'
+unit "a local build also updates the private deployment alias" \
+    'tag rapido-go-panel:private rapido-go-panel:previous
+tag ghcr.io/rapidodev/rapido-go-panel:latest rapido-go-panel:private' \
+    'APP_DIR="$(mktemp -d)"; mkdir -p "$APP_DIR/docker"; : > "$APP_DIR/docker/Dockerfile.panel"
+     WORK_LOG="$(mktemp)"; docker() { echo "$*" >> "$WORK_LOG"; return 0; }
+     source_version() { echo test; }; image_list() { echo rapido-go-panel:private; }
+     build_local_image >/dev/null; grep "^tag " "$WORK_LOG"'
 
 # ---- what happens when a pull fails ----
 unit "a failed refresh of an image that is already here is only a warning" 'ready' \

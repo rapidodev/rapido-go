@@ -17,7 +17,11 @@ package resellerusagejob
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"log/slog"
 	"time"
 
@@ -78,6 +82,9 @@ func Tick(ctx context.Context, q Queries, reporter Reporter, settings SettingsFu
 		return nil
 	}
 
+	if batches, ok := q.(batchQueries); ok {
+		return tickDurableBatch(ctx, q, batches, reporter, cfg)
+	}
 	rows, err := q.GetPendingResellerAPIUsage(ctx)
 	if err != nil {
 		return fmt.Errorf("load queued usage: %w", err)
@@ -112,4 +119,49 @@ func Tick(ctx context.Context, q Queries, reporter Reporter, settings SettingsFu
 		return fmt.Errorf("reported %d bytes but could not mark them sent, they will be sent again: %w", total, err)
 	}
 	return nil
+}
+
+type batchQueries interface {
+	GetActiveResellerBatch(context.Context) (generated.ResellerDeliveryBatch, error)
+	CreateResellerBatch(context.Context, generated.CreateResellerBatchParams) (generated.ResellerDeliveryBatch, error)
+	CompleteResellerBatch(context.Context, string) error
+}
+
+func tickDurableBatch(ctx context.Context, q Queries, b batchQueries, reporter Reporter, cfg resellerapi.Config) error {
+	batch, err := b.GetActiveResellerBatch(ctx)
+	if errors.Is(err, pgx.ErrNoRows) {
+		rows, err := q.GetPendingResellerAPIUsage(ctx)
+		if err != nil {
+			return err
+		}
+		if len(rows) == 0 {
+			return nil
+		}
+		usages := make([]resellerapi.Usage, len(rows))
+		ids := make([]int32, len(rows))
+		deltas := make([]int64, len(rows))
+		for i, row := range rows {
+			usages[i] = resellerapi.Usage{Username: row.Username, Usage: row.Pending}
+			ids[i] = row.AdminID
+			deltas[i] = row.Pending
+		}
+		raw, err := json.Marshal(usages)
+		if err != nil {
+			return err
+		}
+		batch, err = b.CreateResellerBatch(ctx, generated.CreateResellerBatchParams{ID: uuid.NewString(), Destination: cfg.URL, Secret: cfg.Secret, Payload: raw, AdminIds: ids, Deltas: deltas})
+		if err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+	var usages []resellerapi.Usage
+	if err := json.Unmarshal(batch.Payload, &usages); err != nil {
+		return err
+	}
+	if err := reporter.ReportUsages(resellerapi.WithReportID(ctx, batch.ID), resellerapi.Config{URL: batch.Destination, Secret: batch.Secret}, usages); err != nil {
+		return err
+	}
+	return b.CompleteResellerBatch(ctx, batch.ID)
 }

@@ -41,7 +41,8 @@ ORDER BY i.tag;
 -- XRayConfig.include_db_users(). A disabled/limited/expired user is
 -- deliberately excluded so a node never even receives credentials it
 -- shouldn't accept traffic for.
-SELECT u.id, u.username, p.type, p.settings
+SELECT u.id, u.username, p.type, p.settings,
+ ARRAY(SELECT inbound_tag FROM exclude_inbounds_association e WHERE e.proxy_id=p.id ORDER BY inbound_tag)::text[] AS excluded_tags
 FROM users u
 JOIN proxies p ON p.user_id = u.id
 WHERE u.status IN ('active', 'on_hold')

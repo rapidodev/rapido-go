@@ -23,8 +23,8 @@ import (
 	"github.com/legendary1205/rapido-go/internal/discord"
 	"github.com/legendary1205/rapido-go/internal/hostmetrics"
 	"github.com/legendary1205/rapido-go/internal/integrationsettings"
-	"github.com/legendary1205/rapido-go/internal/resellerapi"
 	"github.com/legendary1205/rapido-go/internal/report"
+	"github.com/legendary1205/rapido-go/internal/resellerapi"
 	"github.com/legendary1205/rapido-go/internal/telegram"
 )
 
@@ -75,6 +75,7 @@ func newTestRouter(t *testing.T) (http.Handler, string) {
 // the same *Handler at request time, not at registration time.
 func newTestRouterAndHandler(t testing.TB) (http.Handler, string, *Handler) {
 	t.Helper()
+	t.Setenv("TRUSTED_PROXIES", "192.0.2.1")
 	pool := testPool(t)
 	truncateAll(t, pool)
 	cacheClient := testCache(t)
@@ -114,7 +115,7 @@ func newTestRouterAndHandler(t testing.TB) (http.Handler, string, *Handler) {
 		os.Getenv("TEST_DATABASE_URL"), t.TempDir(), 5, logger)
 	router := NewRouter(handler, logger, []string{"*"})
 
-	token, err := issuer.Issue(testSudoUsername, true)
+	token, err := issuer.IssueBootstrap(testSudoUsername)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
@@ -156,7 +157,7 @@ func testCache(t testing.TB) *cache.Client {
 func truncateAll(t testing.TB, pool *pgxpool.Pool) {
 	t.Helper()
 	_, err := pool.Exec(context.Background(),
-		"TRUNCATE admin_usage_logs, users, admins, inbounds, hosts, user_templates, nodes, gateway_peers, gateway_settings RESTART IDENTITY CASCADE")
+		"TRUNCATE reseller_delivery_batches, core_config_snapshots, delivery_outbox, node_report_receipts, admin_usage_logs, users, admins, inbounds, hosts, user_templates, nodes, gateway_peers, gateway_settings RESTART IDENTITY CASCADE")
 	if err != nil {
 		t.Fatalf("truncate: %v", err)
 	}

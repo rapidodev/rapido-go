@@ -157,7 +157,8 @@ type nodeConfigInboundWire struct {
 	Protocol    string                   `json:"protocol"`
 	ListenPort  uint16                   `json:"listen_port"`
 	ListenPorts []uint16                 `json:"listen_ports,omitempty"`
-	Users       json.RawMessage          `json:"users"`
+	Users       json.RawMessage          `json:"users,omitempty"`
+	UsersRef    string                   `json:"users_ref,omitempty"`
 	TLS         *nodeConfigTLSSpec       `json:"tls,omitempty"`
 	Transport   *nodeConfigTransportSpec `json:"transport,omitempty"`
 
@@ -249,11 +250,17 @@ func (h *Handler) loadNodeConfigSnapshot(ctx context.Context, version int64) (*n
 	}
 
 	usersByProtocol := make(map[string][]nodeConfigUserSpec)
+	excludedByUser := map[string]map[string]bool{}
 	for _, p := range proxyRows {
 		settings, err := proxysettings.FromStored(proxysettings.ProxyType(p.Type), p.Settings)
 		if err != nil {
 			continue // a malformed row shouldn't take down every other user's config
 		}
+		denied := map[string]bool{}
+		for _, tag := range p.ExcludedTags {
+			denied[tag] = true
+		}
+		excludedByUser[p.Type+"/"+p.Username] = denied
 		spec := nodeConfigUserSpec{Name: p.Username}
 		switch p.Type {
 		case "vmess":
@@ -312,6 +319,17 @@ func (h *Handler) loadNodeConfigSnapshot(ctx context.Context, version int64) (*n
 		usersKey := in.Protocol
 		if (in.Protocol == "vless" || in.Protocol == "trojan") && !flowApplies(in.Network, in.Security, in.HeaderType.String) {
 			usersKey = noFlowUsersKey(in.Protocol)
+		}
+		base := usersByProtocol[usersKey]
+		filtered := make([]nodeConfigUserSpec, 0, len(base))
+		for _, u := range base {
+			if !excludedByUser[in.Protocol+"/"+u.Name][in.Tag] {
+				filtered = append(filtered, u)
+			}
+		}
+		if len(filtered) != len(base) {
+			usersKey += "/" + in.Tag
+			usersByProtocol[usersKey] = filtered
 		}
 		spec := nodeConfigInboundSpec{
 			Tag: in.Tag, Protocol: in.Protocol, ListenPort: uint16(in.Port.Int32),
@@ -391,6 +409,10 @@ func (h *Handler) loadNodeConfigSnapshot(ctx context.Context, version int64) (*n
 // marshalling it a second time purely to reproduce what this already had in
 // hand.
 func (s *nodeConfigSnapshot) render(p nodeProfile) (nodeConfigResponse, []byte, error) {
+	return s.renderSchema(p, false)
+}
+
+func (s *nodeConfigSnapshot) renderSchema(p nodeProfile, compact bool) (nodeConfigResponse, []byte, error) {
 	inbounds := p.filterInbounds(s.inbounds)
 	core := p.CoreOverrides.apply(s.core)
 	payload := nodeConfigResponse{Inbounds: inbounds, Core: core}
@@ -398,6 +420,10 @@ func (s *nodeConfigSnapshot) render(p nodeProfile) (nodeConfigResponse, []byte, 
 	// emptyUsers matches what the spec form emits for an inbound with no users.
 	emptyUsers := json.RawMessage("[]")
 	wire := make([]nodeConfigInboundWire, 0, len(inbounds))
+	var sets map[string]json.RawMessage
+	if compact {
+		sets = map[string]json.RawMessage{}
+	}
 	for i := range inbounds {
 		in := &inbounds[i]
 		key := in.usersKey
@@ -408,9 +434,16 @@ func (s *nodeConfigSnapshot) render(p nodeProfile) (nodeConfigResponse, []byte, 
 		if !ok {
 			users = emptyUsers
 		}
+		ref := ""
+		if compact {
+			sum := sha256.Sum256(users)
+			ref = hex.EncodeToString(sum[:12])
+			sets[ref] = users
+			users = nil
+		}
 		wire = append(wire, nodeConfigInboundWire{
 			Tag: in.Tag, Protocol: in.Protocol, ListenPort: in.ListenPort, ListenPorts: in.ListenPorts,
-			Users: users, TLS: in.TLS, Transport: in.Transport,
+			Users: users, UsersRef: ref, TLS: in.TLS, Transport: in.Transport,
 			Hysteria2ObfsPassword: in.Hysteria2ObfsPassword, UpMbps: in.UpMbps, DownMbps: in.DownMbps,
 			CongestionControl: in.CongestionControl, ZeroRTTHandshake: in.ZeroRTTHandshake,
 			SnellPSK: in.SnellPSK, SnellV6Mode: in.SnellV6Mode,
@@ -420,9 +453,10 @@ func (s *nodeConfigSnapshot) render(p nodeProfile) (nodeConfigResponse, []byte, 
 	}
 
 	canonical, err := json.Marshal(struct {
-		Inbounds []nodeConfigInboundWire `json:"inbounds"`
-		Core     coreConfigDTO           `json:"core"`
-	}{wire, core})
+		Inbounds []nodeConfigInboundWire    `json:"inbounds"`
+		Core     coreConfigDTO              `json:"core"`
+		UserSets map[string]json.RawMessage `json:"user_sets,omitempty"`
+	}{wire, core, sets})
 	if err != nil {
 		return nodeConfigResponse{}, nil, err
 	}
@@ -529,7 +563,11 @@ func (h *Handler) handleGetNodeConfig(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Node profile is invalid: " + err.Error()})
 		return
 	}
-	entry, err := h.cachedNodeConfig(ctx, profile)
+	if node.Status == "disabled" {
+		c.JSON(http.StatusOK, nodeConfigResponse{Version: "disabled", Inbounds: []nodeConfigInboundSpec{}, Core: coreConfigDTO{LogLevel: "warn"}})
+		return
+	}
+	entry, err := h.cachedNodeConfigSchema(ctx, profile, c.Query("schema") == "2" || c.Query("schema") == "3")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not build node config"})
 		return
@@ -538,6 +576,12 @@ func (h *Handler) handleGetNodeConfig(c *gin.Context) {
 	if etagMatches(c.GetHeader("If-None-Match"), entry.etag) {
 		c.AbortWithStatus(http.StatusNotModified)
 		return
+	}
+	if c.Query("schema") == "3" {
+		if delta := h.nodeConfig.delta(profile.key()+"/v2", c.GetHeader("If-None-Match"), entry); delta != nil {
+			c.Data(200, "application/json; charset=utf-8", delta)
+			return
+		}
 	}
 	c.Data(http.StatusOK, "application/json; charset=utf-8", entry.body)
 }

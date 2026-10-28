@@ -1,3 +1,4 @@
+import { queryClient } from "utils/queryClient";
 import { FC, PropsWithChildren, ReactNode, TouchEvent, useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -24,7 +25,7 @@ import {
   ArrowRightOnRectangleIcon,
   PaintBrushIcon,
 } from "@heroicons/react/24/outline";
-import { ReactComponent as Logo } from "assets/logo.svg";
+import Logo from "assets/logo.svg?react";
 import { useCurrentAdminQuery } from "hooks/useCurrentAdminQuery";
 import { removeAuthToken } from "utils/authStorage";
 import { extensionNavItems, mergeNavItems } from "extensions";
@@ -214,6 +215,7 @@ export const RapidoShell: FC<PropsWithChildren<{ active: RapidoNavKey | (string 
 
   const logout = () => {
     removeAuthToken();
+ queryClient.clear();
     navigate("/login");
   };
 

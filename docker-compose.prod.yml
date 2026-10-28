@@ -23,7 +23,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: rapido
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rapido}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in your .env file}
       POSTGRES_DB: rapido
     # Tuned instead of stock defaults (which assume a tiny machine: 128 MB of
     # shared buffers, JIT on, spinning-disk cost model). The two memory
@@ -57,14 +57,9 @@ services:
       - -c
       - log_min_duration_statement=500
       - -c
-      # Headroom for the api role's own pgxpool ceiling (see cmd/panel/
-      # main.go's dbPoolSize - up to 50 on a many-core box) plus the backend
-      # role's pool, the one-shot migrate job, and a few manual psql
-      # sessions, with plenty to spare. The RAM cost of idle connections is
-      # small (no per-connection work_mem is reserved until a query actually
-      # runs one), so this is cheap insurance against future growth, not
-      # just today's number.
-      - max_connections=200
+      # DB_MAX_CONNECTIONS is passed to API; its pool divides the remaining
+      # budget across PANEL_API_REPLICAS. Keep the values aligned.
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-200}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -101,11 +96,12 @@ services:
   # up against an up-to-date schema with no separate manual step.
   migrate:
     image: ${RAPIDO_IMAGE:-ghcr.io/rapidodev/rapido-go-panel}:${RAPIDO_TAG:-latest}
+    user: "10001:10001"
     depends_on:
       postgres:
         condition: service_healthy
     entrypoint: ["goose", "-dir", "/app/internal/db/migrations", "postgres"]
-    command: ["postgres://rapido:${POSTGRES_PASSWORD:-rapido}@postgres:5432/rapido?sslmode=disable", "up"]
+    command: ["postgres://rapido:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in your .env file}@postgres:5432/rapido?sslmode=disable", "up"]
     restart: "no"
 
   panel:
@@ -123,7 +119,11 @@ services:
       - "8000"
     environment:
       ROLE: api
-      DATABASE_URL: postgres://rapido:${POSTGRES_PASSWORD:-rapido}@postgres:5432/rapido?sslmode=disable
+      DB_MAX_CONNECTIONS: ${POSTGRES_MAX_CONNECTIONS:-200}
+      API_REPLICA_COUNT: ${PANEL_API_REPLICAS:-1}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.16.0.0/12,127.0.0.1/8,::1}
+      SSH_KNOWN_HOSTS_FILE: /var/lib/rapido-go/ssh/known_hosts
+      DATABASE_URL: postgres://rapido:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in your .env file}@postgres:5432/rapido?sslmode=disable
       REDIS_ADDR: redis:6379
       SUDO_USERNAME: ${SUDO_USERNAME:-admin}
       SUDO_PASSWORD: ${SUDO_PASSWORD:?set SUDO_PASSWORD in your .env file - this is the one-time bootstrap login, see the README}
@@ -141,7 +141,7 @@ services:
       SUB_SUPPORT_URL: ${SUB_SUPPORT_URL:-https://t.me/}
       SUB_PROFILE_TITLE: ${SUB_PROFILE_TITLE:-Subscription}
       SUB_UPDATE_INTERVAL: ${SUB_UPDATE_INTERVAL:-12}
-      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-*}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-https://panel.example.com}
       # Both empty by default (no override - see internal/subscription's
       # ClashConfig/V2rayJSONConfig doc comments for the built-in minimal
       # fallback that produces). Point these at real files bind-mounted
@@ -175,6 +175,7 @@ services:
       CONFIG_SORT_BY_LOAD: ${CONFIG_SORT_BY_LOAD:-false}
     volumes:
       - ./templates:/app/templates:ro
+      - ssh_data:/var/lib/rapido-go/ssh
 
   backend:
     image: ${RAPIDO_IMAGE:-ghcr.io/rapidodev/rapido-go-panel}:${RAPIDO_TAG:-latest}
@@ -189,12 +190,16 @@ services:
     # architecture section on why there are two roles to begin with).
     environment:
       ROLE: backend
-      DATABASE_URL: postgres://rapido:${POSTGRES_PASSWORD:-rapido}@postgres:5432/rapido?sslmode=disable
+      SSH_KNOWN_HOSTS_FILE: /var/lib/rapido-go/ssh/known_hosts
+      DATABASE_URL: postgres://rapido:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in your .env file}@postgres:5432/rapido?sslmode=disable
       REDIS_ADDR: redis:6379
       SUDO_USERNAME: ${SUDO_USERNAME:-admin}
       SUDO_PASSWORD: ${SUDO_PASSWORD:?set SUDO_PASSWORD in your .env file - this is the one-time bootstrap login, see the README}
       PUBLIC_IP: ${PUBLIC_IP:-}
       USAGE_RETENTION_DAYS: ${USAGE_RETENTION_DAYS:-90}
+
+    volumes:
+      - ssh_data:/var/lib/rapido-go/ssh
 
   # The panel binary itself has no built-in TLS (no reverse-proxy-free
   # HTTPS listener like the Python-era panel's UVICORN_SSL_CERTFILE/
@@ -218,6 +223,7 @@ services:
       - panel
 
 volumes:
+  ssh_data:
   postgres_data:
   redis_data:
   caddy_data:

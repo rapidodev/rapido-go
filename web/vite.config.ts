@@ -1,5 +1,5 @@
 import react from "@vitejs/plugin-react";
-import { splitVendorChunkPlugin } from "vite";
+
 // vitest/config re-exports defineConfig with the `test` field typed in,
 // on top of vite's own config shape - the dev server and build are
 // unaffected, this only makes `test` below type-check.
@@ -42,12 +42,13 @@ export default defineConfig({
       // preamble" - fast refresh has nothing to refresh in a test run
       // anyway. process.env.VITEST is set automatically by the test
       // runner, so `npm run dev`'s real HMR is untouched.
-      fastRefresh: !process.env.VITEST,
+
     }),
     svgr(),
     visualizer(),
-    splitVendorChunkPlugin(),
+
   ],
+  build: { rollupOptions: { output: { manualChunks: (id: string) => id.includes("node_modules") ? "vendor" : undefined } } },
   server: {
     // The Go panel (`go run ./cmd/panel`) listens on :8000 by default
     // (UVICORN_PORT) and answers every API route under /api, plus the

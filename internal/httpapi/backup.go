@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"fmt"
+	"github.com/google/uuid"
 	"io"
 	"net/http"
 	"os"
@@ -105,7 +106,7 @@ type dumpDatabaseFn func(ctx context.Context, w *os.File) error
 // writing a gzip-compressed plain-SQL dump to w.
 func execPgDump(ctx context.Context, databaseURL string, w *os.File) error {
 	gz := gzip.NewWriter(w)
-	cmd := exec.CommandContext(ctx, "pg_dump", databaseURL,
+	cmd := exec.CommandContext(ctx, "pg_dump", "--dbname="+databaseURL,
 		"--format=plain", "--no-owner", "--no-privileges", "--clean", "--if-exists")
 	cmd.Stdout = gz
 	var stderr bytes.Buffer
@@ -221,7 +222,7 @@ func execPsqlRestore(ctx context.Context, databaseURL string, gz io.Reader) erro
 	}
 	defer gzr.Close()
 
-	cmd := exec.CommandContext(ctx, "psql", databaseURL,
+	cmd := exec.CommandContext(ctx, "psql", "--dbname="+databaseURL,
 		"--set", "ON_ERROR_STOP=1", "--single-transaction", "-q")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -276,6 +277,21 @@ type restoreResultDTO struct {
 // overwriting" - otherwise a write landing in that gap would be silently
 // lost by the restore with no backup covering it either.
 func (h *Handler) restoreFromReader(ctx context.Context, gz io.Reader) (restoreResultDTO, error) {
+	restoreTx, err := h.store.Pool.Begin(ctx)
+	if err != nil {
+		return restoreResultDTO{}, err
+	}
+	defer restoreTx.Rollback(context.Background())
+	var owns bool
+	if err := restoreTx.QueryRow(ctx, "SELECT pg_try_advisory_xact_lock(814720033)").Scan(&owns); err != nil || !owns {
+		return restoreResultDTO{}, fmt.Errorf("another restore or active mutation is in progress; retry shortly")
+	}
+	lockID := uuid.NewString()
+	locked, lockErr := h.store.Cache.Raw().SetNX(ctx, "rapido:restore-lock", lockID, 15*time.Minute).Result()
+	if lockErr != nil || !locked {
+		return restoreResultDTO{}, fmt.Errorf("another restore is active or restore lock unavailable")
+	}
+	defer h.store.Cache.Raw().Eval(context.Background(), `if redis.call('GET',KEYS[1])==ARGV[1] then return redis.call('DEL',KEYS[1]) end return 0`, []string{"rapido:restore-lock"}, lockID)
 	if err := h.store.Cache.SetMaintenanceMode(ctx, true); err != nil {
 		return restoreResultDTO{}, fmt.Errorf("could not enter maintenance mode: %w", err)
 	}
@@ -290,6 +306,19 @@ func (h *Handler) restoreFromReader(ctx context.Context, gz io.Reader) (restoreR
 		return restoreResultDTO{}, fmt.Errorf("restore failed after a safety backup (%s) was already taken - restore that backup to recover: %w", safety.Filename, err)
 	}
 
+	if h.afterRestore != nil {
+		if err := h.afterRestore(ctx); err != nil {
+			file, openErr := os.Open(filepath.Join(h.backupDir, safety.Filename))
+			if openErr != nil {
+				return restoreResultDTO{}, fmt.Errorf("post-restore migration failed and safety backup could not be opened: %w", err)
+			}
+			defer file.Close()
+			if recoveryErr := h.restoreDatabase(ctx, file); recoveryErr != nil {
+				return restoreResultDTO{}, fmt.Errorf("post-restore migration failed; automatic recovery also failed: %w", recoveryErr)
+			}
+			return restoreResultDTO{}, fmt.Errorf("backup schema could not be upgraded; original database restored: %w", err)
+		}
+	}
 	// Every cached value (admin lookups, core config, node config, ...) is
 	// definitionally stale the instant the database it was read from gets
 	// replaced wholesale - flush rather than try to invalidate individual

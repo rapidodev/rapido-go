@@ -1,0 +1,64 @@
+name: Validate
+on:
+  pull_request:
+  push:
+    branches: [dev]
+  workflow_call:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: rapido
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: rapido_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U rapido -d rapido_test"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgres://rapido:test-only@localhost:5432/rapido_test?sslmode=disable
+      TEST_REDIS_ADDR: localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1
+      - run: sqlc generate
+      - run: go install -tags 'no_clickhouse no_libsql no_mssql no_mysql no_sqlite3 no_vertica no_ydb' github.com/pressly/goose/v3/cmd/goose@v3.28.0
+      - run: goose -dir internal/db/migrations postgres "$TEST_DATABASE_URL" up
+      - run: go vet ./...
+      - run: go test -race -p 1 -timeout 15m ./...
+      - name: Security and delivery coverage
+        run: go test -race -cover -p 1 -timeout 5m ./internal/config ./internal/controlurl ./internal/gatewayclient ./internal/delivery
+      - run: bash -n rapido-go.sh && bash -n migrate-from-rapido.sh && bash scripts/installer_test.sh
+      - run: go test ./internal/httpapi -run '^$' -bench '^BenchmarkConfigRender50K$' -benchtime=5x
+  dashboard:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm audit --audit-level=moderate
+      - run: npm test
+      - run: npm run build

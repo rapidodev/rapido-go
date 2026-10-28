@@ -1,3 +1,4 @@
+import { CoreSnapshots } from "rapido-ui/CoreSnapshots";
 import { FC } from "react";
 import { useTranslation } from "react-i18next";
 import { RapidoShell } from "rapido-ui/Shell";
@@ -16,6 +17,7 @@ export const CoreConfigPage: FC = () => {
         <h1 className="mb-1 text-2xl font-bold">{t("rapido.xrayConfig.title")}</h1>
         <p className="mb-6 text-sm text-rapido-muted">{t("rapido.xrayConfig.subtitle")}</p>
         <XrayConfigAdmin />
+ <CoreSnapshots />
       </div>
     </RapidoShell>
   );

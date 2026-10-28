@@ -12,6 +12,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"sync/atomic"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
@@ -44,13 +45,14 @@ type Inbound struct {
 	router                   adapter.ConnectionRouterEx
 	logger                   log.ContextLogger
 	listener                 *listener.Listener
-	service                  *trojan.Service[*userkey.Key]
+	service                  atomic.Pointer[trojan.Service[*userkey.Key]]
 	tlsConfig                tls.ServerConfig
 	fallbackAddr             M.Socksaddr
 	fallbackAddrTLSNextProto map[string]M.Socksaddr
 	transport                adapter.V2RayServerTransport
 	trafficMgr               *traffic.Manager
 	conns                    *traffic.ConnGroup
+	fallbackHandler          N.TCPConnectionHandlerEx
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.TrojanInboundOptions) (adapter.Inbound, error) {
@@ -98,8 +100,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		}
 		fallbackHandler = adapter.NewUpstreamContextHandler(inbound.fallbackConnection, nil)
 	}
-	service := trojan.NewService[*userkey.Key](adapter.NewUpstreamContextHandler(inbound.newConnection, inbound.newPacketConnection), fallbackHandler, logger)
-	inbound.service = service
+	inbound.fallbackHandler = fallbackHandler
 	err := inbound.UpdateUsers(options.Users)
 	if err != nil {
 		return nil, err
@@ -128,11 +129,16 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 // already passed the handshake are unaffected. Fails, changing nothing, if two
 // users share a password.
 func (h *Inbound) UpdateUsers(users []option.TrojanUser) error {
-	return h.service.UpdateUsers(userkey.Build(common.Map(users, func(it option.TrojanUser) string {
-		return it.Name
-	})), common.Map(users, func(it option.TrojanUser) string {
+	service := trojan.NewService[*userkey.Key](adapter.NewUpstreamContextHandler(h.newConnection, h.newPacketConnection), h.fallbackHandler, h.logger)
+	err := service.UpdateUsers(userkey.BuildOptions(users), common.Map(users, func(it option.TrojanUser) string {
 		return it.Password
 	}))
+	if err != nil {
+		return err
+	}
+	traffic.SetUserPolicy(h.conns, h.Tag(), users)
+	h.service.Store(service)
+	return nil
 }
 
 func (h *Inbound) Start(stage adapter.StartStage) error {
@@ -193,7 +199,7 @@ func (h *Inbound) NewConnection(ctx context.Context, conn net.Conn, metadata ada
 		}
 		conn = tlsConn
 	}
-	err := h.service.NewConnection(adapter.WithContext(ctx, &metadata), conn, metadata.Source, onClose)
+	err := h.service.Load().NewConnection(adapter.WithContext(ctx, &metadata), conn, metadata.Source, onClose)
 	if err != nil {
 		N.CloseOnHandshakeFailure(conn, onClose, err)
 		h.logger.ErrorContext(ctx, E.Cause(err, "process connection from ", metadata.Source))
@@ -216,7 +222,7 @@ func (h *Inbound) newConnection(ctx context.Context, conn net.Conn, metadata ada
 	// Closing the core closes every connection it accepted: the router only
 	// drops the ones it is relaying, and a multiplexed session's carrier is not
 	// one of those. See traffic.ConnGroup.
-	onClose = h.conns.Track(conn, onClose)
+	onClose = h.conns.TrackAuthenticated(h.Tag(), user, key.Fingerprint, conn, onClose)
 	if h.trafficMgr != nil {
 		// Presence: the user is known, so this connection is now open. The router
 		// calls onClose for every way it can end, including a refused route.
@@ -239,7 +245,7 @@ func (h *Inbound) newPacketConnection(ctx context.Context, conn N.PacketConn, me
 		metadata.User = key.Name
 	}
 	h.logger.InfoContext(ctx, "[", user, "] inbound packet connection to ", metadata.Destination)
-	onClose = h.conns.Track(conn, onClose)
+	onClose = h.conns.TrackAuthenticated(h.Tag(), user, key.Fingerprint, conn, onClose)
 	if h.trafficMgr != nil {
 		conn = traffic.WrapPacketConn(conn, user, h.trafficMgr)
 	}

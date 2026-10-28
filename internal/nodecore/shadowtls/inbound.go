@@ -181,6 +181,7 @@ func (h *Inbound) UpdateUsers(users []option.ShadowTLSUser) {
 	h.service.UpdateUsers(common.Map(users, func(it option.ShadowTLSUser) shadowtls.User {
 		return shadowtls.User(it)
 	}))
+	traffic.SetUserPolicy(h.conns, h.Tag(), users)
 }
 
 func (h *Inbound) Start(stage adapter.StartStage) error {
@@ -265,7 +266,7 @@ func (h *Inbound) newConnection(ctx context.Context, conn net.Conn, metadata ada
 	//nolint:staticcheck
 	metadata.InboundDetour = h.listener.ListenOptions().Detour
 	// Closing the core closes every connection it accepted; see traffic.ConnGroup.
-	defer h.conns.Hold(conn)()
+	defer h.conns.HoldUser(h.Tag(), userName, conn)()
 	if h.trafficMgr != nil && userName != "" {
 		defer h.trafficMgr.OpenConn(userName, traffic.LocalPort(conn, h.listener.ListenOptions().ListenPort))()
 		conn = traffic.WrapConn(conn, userName, h.trafficMgr)

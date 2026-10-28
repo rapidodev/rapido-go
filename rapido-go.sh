@@ -1019,7 +1019,12 @@ render_caddyfile() {
     cat <<EOF
 ${panel_hosts} {
 	encode zstd gzip
-	reverse_proxy panel:8000
+	handle /api/internal/node-report {
+		reverse_proxy backend:8000
+	}
+	handle {
+		reverse_proxy panel:8000
+	}
 }
 EOF
     if [ -n "$RAPIDO_SUB_DOMAIN" ]; then
@@ -1077,6 +1082,10 @@ RAPIDO_SUB_DOMAIN="${RAPIDO_SUB_DOMAIN}"
 
 # ── database ────────────────────────────────────────────────────────────────
 POSTGRES_PASSWORD="${db_pass}"
+# The API pool shares this server-wide connection budget with backend.
+POSTGRES_MAX_CONNECTIONS="200"
+# Set this to the number of panel API containers when scaling the service.
+PANEL_API_REPLICAS="1"
 # Sized from this machine's RAM at install time (about 25% and 60%).
 POSTGRES_SHARED_BUFFERS="${sb}"
 POSTGRES_EFFECTIVE_CACHE_SIZE="${ecs}"
@@ -1100,7 +1109,7 @@ XRAY_SUBSCRIPTION_URL_PREFIXES="${SUB_PREFIXES}"
 PUBLIC_IP="${ip}"
 
 # ── CORS ────────────────────────────────────────────────────────────────────
-ALLOWED_ORIGINS="*"
+ALLOWED_ORIGINS="https://${RAPIDO_DOMAIN}${RAPIDO_EXTRA_DOMAINS:+,https://${RAPIDO_EXTRA_DOMAINS//,/,https://}}"
 
 # ── optional ────────────────────────────────────────────────────────────────
 # Days of usage history to keep (the compose default is 90).
@@ -1139,6 +1148,30 @@ image_list() { compose config --images 2>/dev/null | sort -u || true; }
 
 is_panel_image() { case "$1" in *rapido-go-panel*) return 0 ;; *) return 1 ;; esac; }
 
+# Keep the previous local alias available for an operator rollback.
+tag_private_panel_image() {
+    local source="$1" target="rapido-go-panel:private"
+    if docker image inspect "$target" >/dev/null 2>&1; then
+        docker tag "$target" rapido-go-panel:previous || return
+    fi
+    docker tag "$source" "$target"
+}
+
+pull_image() {
+    local img="$1" source
+    if [ "$img" != "rapido-go-panel:private" ]; then
+        docker pull -q "$img"
+        return
+    fi
+    # This is a local deployment alias, not a Docker Hub repository. A
+    # commit-tagged source can be selected before promoting it to latest.
+    source="${RAPIDO_PRIVATE_IMAGE_SOURCE:-$(env_get RAPIDO_PRIVATE_IMAGE_SOURCE "${PANEL_IMAGE}:latest")}"
+    [ "$source" != "$img" ] || { err "The private image source must be a registry image, not the local alias."; return 1; }
+    printf 'Downloading %s for %s\n' "$source" "$img"
+    docker pull -q "$source" || return
+    tag_private_panel_image "$source"
+}
+
 # Image IDs, to tell whether a pull changed anything.
 images_fingerprint() {
     local img out=""
@@ -1166,7 +1199,7 @@ pull_images() {
         if [ "${RAPIDO_BUILD_LOCALLY:-}" = "1" ] && is_panel_image "$img"; then continue; fi
         n=$((n + 1))
         printf '%s\n' "$img" > "$tmp/$n.img"
-        ( if docker pull -q "$img" > "$tmp/$n.out" 2>&1; then echo 0; else echo 1; fi > "$tmp/$n.rc" ) &
+        ( if pull_image "$img" > "$tmp/$n.out" 2>&1; then echo 0; else echo 1; fi > "$tmp/$n.rc" ) &
     done
     wait
     i=1
@@ -1195,6 +1228,10 @@ build_local_image() {
         --build-arg "VERSION=$(source_version)" -t "${PANEL_IMAGE}:latest" . )
     docker image inspect "${PANEL_IMAGE}:latest" >/dev/null 2>&1 \
         || die "The image was not built - see the output above."
+    if image_list | grep -qx 'rapido-go-panel:private'; then
+        tag_private_panel_image "${PANEL_IMAGE}:latest" \
+            || die "The image was built but could not be assigned to the private deployment tag."
+    fi
     ok "Image built."
 }
 
@@ -1449,6 +1486,14 @@ cmd_update() {
     require_root
     require_installed
     ensure_docker
+    log "Backing up before modifying the installation..."
+    cmd_backup
+    local archive="$DATA_DIR/install-$(date +%Y%m%d-%H%M%S).tar.gz" optional
+    local backup_files=(.env "$(compose_file)")
+    for optional in rapido-go.sh Caddyfile; do
+        if [ -f "$APP_DIR/$optional" ]; then backup_files+=("$optional"); fi
+    done
+    (umask 077; tar czf "$archive" -C "$APP_DIR" "${backup_files[@]}")
     resolve_repo_access lenient
     local before_sum after_sum before_fp
     before_sum="$(file_sum "$APP_DIR/$(compose_file)")"
@@ -1463,16 +1508,6 @@ cmd_update() {
     if ! update_needed "$before_fp"; then
         ok "Already up to date ($(installed_version_label))."
         return 0
-    fi
-    # Nothing has been recreated yet: the pull above only downloaded images.
-    # The backup still comes before the stack changes, and a failed backup
-    # stops the update (cmd_backup exits) - set RAPIDO_SKIP_BACKUP=1 to
-    # override on a box whose database is already broken.
-    if [ "${RAPIDO_SKIP_BACKUP:-0}" = "1" ]; then
-        warn "RAPIDO_SKIP_BACKUP=1 - skipping the pre-update backup."
-    else
-        log "Backing up the database first..."
-        cmd_backup
     fi
     log "Applying the update..."
     compose up -d  # re-applies migrations via the migrate service, then recreates whatever image tag or config changed
@@ -1915,6 +1950,8 @@ usage() {
     _u_row  "RAPIDO_REPO_TOKEN"      "Only for a private fork or images"
     _u_row  "RAPIDO_REPO_BRANCH"     "Branch or tag to install (default: master)"
     _u_row  "RAPIDO_BUILD_LOCALLY=1" "Build here instead of pulling from ghcr.io"
+    _u_wide "RAPIDO_PRIVATE_IMAGE_SOURCE"
+    _u_wide "  Registry image used for the local :private alias"
     _u_join
 
     _u_wide "EXAMPLES"

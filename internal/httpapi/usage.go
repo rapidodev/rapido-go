@@ -82,8 +82,8 @@ func parseISOTime(raw string) (time.Time, error) {
 // vanishing from the response (the real panel's own behaviour, and what
 // makes a client's per-node chart keep a stable set of series).
 type usageAccumulator struct {
-	order   []int32 // 0 = Master
-	byNode  map[int32]*userUsageDTO
+	order  []int32 // 0 = Master
+	byNode map[int32]*userUsageDTO
 }
 
 func (h *Handler) newUsageAccumulator(ctx context.Context) (*usageAccumulator, error) {

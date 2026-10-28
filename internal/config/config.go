@@ -23,9 +23,15 @@ type Config struct {
 	HTTPPort int
 
 	DatabaseURL string
-	RedisAddr   string
-	RedisPass   string
-	RedisDB     int
+	// DatabaseMaxConnections and APIReplicaCount bound each API process's
+	// pgxpool so scaling the stateless API role does not consume PostgreSQL's
+	// entire connection budget. Reserve 10 connections for the singleton
+	// backend and 20 for migrations, administration, and operational headroom.
+	DatabaseMaxConnections int
+	APIReplicaCount        int
+	RedisAddr              string
+	RedisPass              string
+	RedisDB                int
 
 	JWTAccessTTL time.Duration
 
@@ -34,8 +40,9 @@ type Config struct {
 
 	CertsDir string
 
-	// AllowedOrigins mirrors ALLOWED_ORIGINS in the current config.py
-	// (comma-separated, defaulting to "*").
+	// AllowedOrigins is the explicit browser-origin allow-list. The local Vite
+	// origins are the development default; production Compose supplies the
+	// configured HTTPS panel domain instead of reflecting every Origin.
 	AllowedOrigins []string
 
 	// PublicIP feeds the {SERVER_IP} placeholder in subscription remark
@@ -183,7 +190,7 @@ func Load() (*Config, error) {
 		SudoPassword:                  getEnv("SUDO_PASSWORD", ""),
 		CertsDir:                      getEnv("CERTS_DIR", "./certs"),
 		JWTAccessTTL:                  24 * time.Hour,
-		AllowedOrigins:                strings.Split(getEnv("ALLOWED_ORIGINS", "*"), ","),
+		AllowedOrigins:                splitNonEmpty(getEnv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")),
 		PublicIP:                      getEnv("PUBLIC_IP", ""),
 		SubscriptionURLPrefix:         getEnv("XRAY_SUBSCRIPTION_URL_PREFIX", ""),
 		SubscriptionURLPrefixes:       splitNonEmpty(getEnv("XRAY_SUBSCRIPTION_URL_PREFIXES", "")),
@@ -279,6 +286,21 @@ func Load() (*Config, error) {
 
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("config: DATABASE_URL is required")
+	}
+	cfg.DatabaseMaxConnections = 200
+	if n, err := strconv.Atoi(getEnv("DB_MAX_CONNECTIONS", "200")); err != nil || n < 31 {
+		return nil, fmt.Errorf("config: DB_MAX_CONNECTIONS must be an integer of at least 31")
+	} else {
+		cfg.DatabaseMaxConnections = n
+	}
+	cfg.APIReplicaCount = 1
+	if n, err := strconv.Atoi(getEnv("API_REPLICA_COUNT", "1")); err != nil || n < 1 {
+		return nil, fmt.Errorf("config: API_REPLICA_COUNT must be a positive integer")
+	} else {
+		cfg.APIReplicaCount = n
+	}
+	if cfg.Role == RoleAPI && cfg.DatabaseMaxConnections-30 < cfg.APIReplicaCount {
+		return nil, fmt.Errorf("config: DB_MAX_CONNECTIONS leaves no connection budget for %d API replicas after backend and operational reserves", cfg.APIReplicaCount)
 	}
 
 	return cfg, nil

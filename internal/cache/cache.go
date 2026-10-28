@@ -8,6 +8,7 @@ package cache
 import (
 	"context"
 	"fmt"
+	"github.com/legendary1205/rapido-go/internal/txscope"
 	"log/slog"
 	"time"
 
@@ -22,9 +23,13 @@ type Client struct {
 func New(addr, password string, db int, logger *slog.Logger) *Client {
 	return &Client{
 		rdb: redis.NewClient(&redis.Options{
-			Addr:     addr,
-			Password: password,
-			DB:       db,
+			Addr:         addr,
+			Password:     password,
+			DB:           db,
+			DialTimeout:  500 * time.Millisecond,
+			ReadTimeout:  500 * time.Millisecond,
+			WriteTimeout: 500 * time.Millisecond,
+			MaxRetries:   -1,
 		}),
 		logger: logger,
 	}
@@ -148,7 +153,48 @@ func (c *Client) Set(ctx context.Context, key, value string, ttl time.Duration) 
 }
 
 func (c *Client) Del(ctx context.Context, keys ...string) error {
+	if txscope.AfterCommit(ctx, func(after context.Context) {
+		if err := c.rdb.Del(after, keys...).Err(); err != nil {
+			c.logger.Error("post-commit cache invalidation failed", "error", err)
+		}
+	}) {
+		return nil
+	}
 	return c.rdb.Del(ctx, keys...).Err()
+}
+
+// InvalidateFleet clears only derived configuration reads, preserving queues,
+// presence, login limits and maintenance locks in the same Redis database.
+func (c *Client) InvalidateFleet(ctx context.Context) error {
+	clear := func(after context.Context) error {
+		for _, pattern := range []string{"rapido:inbound:*", "rapido:inbound_tags:*", "rapido:excluded_inbounds:*"} {
+			var cursor uint64
+			for {
+				keys, next, err := c.rdb.Scan(after, cursor, pattern, 500).Result()
+				if err != nil {
+					return err
+				}
+				if len(keys) > 0 {
+					if err := c.rdb.Del(after, keys...).Err(); err != nil {
+						return err
+					}
+				}
+				cursor = next
+				if cursor == 0 {
+					break
+				}
+			}
+		}
+		return nil
+	}
+	if txscope.AfterCommit(ctx, func(after context.Context) {
+		if err := clear(after); err != nil {
+			c.logger.Error("fleet cache invalidation failed", "error", err)
+		}
+	}) {
+		return nil
+	}
+	return clear(ctx)
 }
 
 // Incr implements a standard fixed-window counter: increments key by 1 and,
@@ -190,7 +236,7 @@ func (c *Client) SetMaintenanceMode(ctx context.Context, on bool) error {
 	if !on {
 		return c.rdb.Del(ctx, nsMaintenance).Err()
 	}
-	return c.rdb.Set(ctx, nsMaintenance, "1", 0).Err()
+	return c.rdb.Set(ctx, nsMaintenance, "1", 15*time.Minute).Err()
 }
 
 // IsMaintenanceMode reports whether a restore is currently in progress.

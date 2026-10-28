@@ -105,7 +105,7 @@ func apiClientLogMiddleware(logger *slog.Logger) gin.HandlerFunc {
 			"ip", clientIP(c),
 			"ua", ua,
 			"method", c.Request.Method,
-			"path", c.Request.URL.Path,
+			"path", safeLogPath(c.Request.URL.Path),
 			"status", status,
 			"duration_ms", time.Since(start).Milliseconds(),
 		}

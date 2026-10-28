@@ -51,7 +51,7 @@ func runConcurrentUsageCheck(t *testing.T, mgr *traffic.Manager, user string, n 
 		t.Errorf("connection failed: %v", err)
 	}
 
-	usage := mgr.Drain()[user]
+	usage := drainUntil(t, mgr, user, traffic.Usage{Up: wantTotal, Down: wantTotal})[user]
 	if usage.Up != wantTotal || usage.Down != wantTotal {
 		t.Errorf("usage after %d concurrent connections = {Up:%d Down:%d}, want {Up:%d Down:%d} (%.2fx up, %.2fx down)",
 			n, usage.Up, usage.Down, wantTotal, wantTotal,

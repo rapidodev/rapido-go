@@ -196,7 +196,7 @@ func hasAnyPrefix(lowerUserAgent string, prefixes ...string) bool {
 // An id-based token (PasarGuard's "v3,<id>,<ts>") is looked up by users.id,
 // which is why a PasarGuard import keeps every user's original id.
 func (h *Handler) loadSubscriptionUser(c *gin.Context) (generated.User, bool) {
-	claims, ok := subscription.ParseToken(c.Param("token"), h.jwtSecret)
+	claims, ok := subscription.ParseToken(c.Param("token"), h.signingSecret())
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"detail": "Not Found"})
 		return generated.User{}, false

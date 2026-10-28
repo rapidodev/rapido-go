@@ -124,7 +124,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 // error, changing nothing, exactly like the original constructor's own
 // per-user validation.
 func (h *Inbound) UpdateUsers(users []option.TUICUser) error {
-	keys := userkey.Build(common.Map(users, func(it option.TUICUser) string { return it.Name }))
+	keys := userkey.BuildOptions(users)
 	uuidList := make([][16]byte, len(users))
 	passwordList := make([]string, len(users))
 	for index, user := range users {
@@ -139,6 +139,7 @@ func (h *Inbound) UpdateUsers(users []option.TUICUser) error {
 		passwordList[index] = user.Password
 	}
 	h.server.UpdateUsers(keys, uuidList, passwordList)
+	traffic.SetUserPolicy(h.conns, h.Tag(), users)
 	return nil
 }
 
@@ -167,7 +168,7 @@ func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
 		onClose = h.trafficMgr.TrackClose(user, conn, h.listener.ListenOptions().ListenPort, onClose)
 		conn = traffic.WrapConn(conn, user, h.trafficMgr)
 	}
-	onClose = h.conns.Track(conn, onClose)
+	onClose = h.conns.TrackAuthenticated(h.Tag(), user, key.Fingerprint, conn, onClose)
 	h.router.RouteConnectionEx(ctx, conn, metadata, onClose)
 }
 
@@ -192,7 +193,7 @@ func (h *Inbound) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 		metadata.User = key.Name
 	}
 	h.logger.InfoContext(ctx, "[", user, "] inbound packet connection to ", metadata.Destination)
-	onClose = h.conns.Track(conn, onClose)
+	onClose = h.conns.TrackAuthenticated(h.Tag(), user, key.Fingerprint, conn, onClose)
 	if h.trafficMgr != nil {
 		conn = traffic.WrapPacketConn(conn, user, h.trafficMgr)
 	}

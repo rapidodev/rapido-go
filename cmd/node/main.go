@@ -6,7 +6,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -33,6 +32,7 @@ import (
 	"github.com/sagernet/sing/common/auth"
 	"github.com/sagernet/sing/common/json/badoption"
 
+	"github.com/legendary1205/rapido-go/internal/controlurl"
 	"github.com/legendary1205/rapido-go/internal/hostmetrics"
 	"github.com/legendary1205/rapido-go/internal/nodecore"
 	forkedshadowtls "github.com/legendary1205/rapido-go/internal/nodecore/shadowtls"
@@ -56,6 +56,7 @@ type config struct {
 	PanelURL       string
 	ReportSecret   string
 	ReportInterval time.Duration
+	StateDir       string
 }
 
 func loadConfig() config {
@@ -66,6 +67,7 @@ func loadConfig() config {
 		}
 	}
 	cfg := config{
+		StateDir:       getEnv("NODE_STATE_DIR", "/var/lib/rapido-node"),
 		ListenAddr:     getEnv("NODE_LISTEN_ADDR", "0.0.0.0:62051"),
 		CertFile:       getEnv("NODE_CERT_FILE", "/etc/rapido-node/cert.pem"),
 		KeyFile:        getEnv("NODE_KEY_FILE", "/etc/rapido-node/key.pem"),
@@ -126,6 +128,10 @@ func applyNodeSetupBlob(blob string, cfg *config) error {
 	if parsed.Cert == "" || parsed.Key == "" || parsed.CA == "" || parsed.Secret == "" {
 		return fmt.Errorf("setup blob is missing cert/key/ca/secret")
 	}
+	panelURL, err := controlurl.Normalize(parsed.PanelURL)
+	if err != nil {
+		return fmt.Errorf("invalid panel URL: %w", err)
+	}
 
 	writes := []struct {
 		path string
@@ -137,17 +143,14 @@ func applyNodeSetupBlob(blob string, cfg *config) error {
 		{cfg.CAFile, parsed.CA, 0o644},
 	}
 	for _, w := range writes {
-		if err := os.MkdirAll(filepath.Dir(w.path), 0o755); err != nil {
-			return fmt.Errorf("create directory for %s: %w", w.path, err)
-		}
-		if err := os.WriteFile(w.path, []byte(w.data), w.mode); err != nil {
+		if err := writeFileAtomic(w.path, []byte(w.data), w.mode); err != nil {
 			return fmt.Errorf("write %s: %w", w.path, err)
 		}
 	}
 
 	cfg.ReportSecret = parsed.Secret
 	if parsed.PanelURL != "" {
-		cfg.PanelURL = parsed.PanelURL
+		cfg.PanelURL = panelURL
 	}
 	return nil
 }
@@ -168,6 +171,11 @@ func writeJSON(w http.ResponseWriter, status int, body map[string]any) {
 // server holds the one sing-box instance this node runs at a time - there
 // is only ever one, matching the current rapido-node's single-core model.
 type server struct {
+	reportMu     sync.Mutex
+	reportState  reportSpool
+	reportLoaded bool
+	stateDir     string
+
 	mu     sync.Mutex
 	node   *nodecore.Node
 	logger *slog.Logger
@@ -287,6 +295,12 @@ func main() {
 	ring := nodelog.NewRing(nodelog.DefaultRingSize)
 	logger := slog.New(slog.NewJSONHandler(ring.TeeJSON(os.Stdout), nil))
 	cfg := loadConfig()
+	panelURL, err := controlurl.Normalize(cfg.PanelURL)
+	if err != nil {
+		logger.Error("invalid panel URL", "error", err)
+		os.Exit(1)
+	}
+	cfg.PanelURL = panelURL
 	if os.Getenv("NODE_SETUP_BLOB") != "" {
 		logger.Info("applied NODE_SETUP_BLOB", "cert_file", cfg.CertFile, "key_file", cfg.KeyFile, "ca_file", cfg.CAFile)
 	}
@@ -325,7 +339,7 @@ func main() {
 		suppressed.Run(ctx, logger, nodelog.FlushInterval)
 	}()
 
-	srv := &server{logger: logger, ctx: ctx, traffic: traffic.NewManager(), ring: ring, suppressed: suppressed}
+	srv := &server{stateDir: cfg.StateDir, logger: logger, ctx: ctx, traffic: traffic.NewManager(), ring: ring, suppressed: suppressed}
 	if runtime.GOOS == "linux" {
 		srv.liveStateFile = defaultLiveStatePath
 	}
@@ -337,22 +351,27 @@ func main() {
 	mux.HandleFunc("POST /stop", srv.handleStop)
 	mux.HandleFunc("PUT /inbounds/{tag}/users", srv.handleUpdateUsers)
 
+	if raw, err := os.ReadFile(filepath.Join(cfg.StateDir, "last-good-config.json")); err == nil {
+		var previous pulledConfig
+		if json.Unmarshal(raw, &previous) == nil {
+			previous.Version = ""
+			srv.mu.Lock()
+			srv.applyFullLocked(previous)
+			srv.mu.Unlock()
+		}
+	}
 	if cfg.PanelURL != "" && cfg.ReportSecret != "" {
 		go srv.syncLoop(ctx, cfg)
+		go srv.configLoop(ctx, cfg)
 		go srv.liveLoop(ctx, cfg)
 	} else {
 		logger.Warn("PANEL_URL/NODE_REPORT_SECRET not set - usage/health reporting and config sync with the panel are both disabled")
 	}
 
 	httpServer := &http.Server{
-		Addr:    cfg.ListenAddr,
-		Handler: mux,
-		TLSConfig: &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			ClientAuth:   tls.RequireAndVerifyClientCert,
-			ClientCAs:    caPool,
-			MinVersion:   tls.VersionTLS12,
-		},
+		Addr:              cfg.ListenAddr,
+		Handler:           mux,
+		TLSConfig:         controlTLSConfig(cert, caPool),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -367,6 +386,11 @@ func main() {
 		srv.mu.Lock()
 		srv.stopNodeLocked()
 		srv.mu.Unlock()
+		if cfg.PanelURL != "" {
+			flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			srv.pushOnce(flushCtx, &http.Client{Timeout: 5 * time.Second}, cfg)
+			flushCancel()
+		}
 	}()
 
 	// finish is the ordered end of the process: let the shutdown above close the
@@ -612,6 +636,14 @@ func (s *server) handleStart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"detail": err.Error()})
 		return
 	}
+	core := coreSpec{}
+	if req.Core != nil {
+		core = *req.Core
+	}
+	s.lastPulled = &pulledConfig{Inbounds: req.Inbounds, Core: core}
+	if err := s.persistConfig("last-good-config.json", s.lastPulled); err != nil {
+		s.logger.Error("persist started config", "error", err)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"detail": "started"})
 }
 
@@ -666,11 +698,48 @@ func (s *server) handleUpdateUsers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if s.lastPulled != nil {
+		for _, in := range s.lastPulled.Inbounds {
+			if in.Tag == tag && in.Protocol != req.Protocol {
+				writeJSON(w, 422, map[string]any{"detail": "inbound protocol mismatch: running " + in.Protocol})
+				return
+			}
+		}
+	}
+	for _, listener := range s.plan.listenerTags(tag) {
+		protocol, err := s.node.InboundProtocol(listener)
+		if err != nil || protocol != req.Protocol {
+			writeJSON(w, 422, map[string]any{"detail": "inbound is missing or has a different protocol"})
+			return
+		}
+	}
+	if err := validateUserList(req.Protocol, req.Users); err != nil {
+		writeJSON(w, 422, map[string]any{"detail": err.Error()})
+		return
+	}
+	if err := s.persistConfig("previous-config.json", s.lastPulled); err != nil {
+		writeJSON(w, 503, map[string]any{"detail": "snapshot failed; users unchanged"})
+		return
+	}
 	users := nodeUsers(req.Users)
 	for _, listener := range s.plan.listenerTags(tag) {
 		if err := s.node.UpdateUsers(listener, req.Protocol, users); err != nil {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"detail": err.Error()})
 			return
+		}
+	}
+	if s.lastPulled != nil {
+		next := *s.lastPulled
+		next.Inbounds = append([]inboundSpec(nil), next.Inbounds...)
+		next.Version = ""
+		for i := range next.Inbounds {
+			if next.Inbounds[i].Tag == tag {
+				next.Inbounds[i].Users = req.Users
+			}
+		}
+		s.lastPulled = &next
+		if err := s.persistConfig("last-good-config.json", s.lastPulled); err != nil {
+			s.logger.Error("persist updated config", "error", err)
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"detail": "updated"})
@@ -808,6 +877,9 @@ func buildOptionsPlan(req startRequest) (sbox.Options, nodePlan, error) {
 	portsByTag := make(map[string][]uint16, len(req.Inbounds))
 	inbounds := make([]sbox.Inbound, 0, len(req.Inbounds))
 	for _, in := range req.Inbounds {
+		if err := validateUserList(in.Protocol, in.Users); err != nil {
+			return sbox.Options{}, nodePlan{}, err
+		}
 		ports := in.ports()
 		portsByTag[in.Tag] = ports
 		for _, port := range ports {
@@ -1410,8 +1482,9 @@ type reportUserUsage struct {
 }
 
 type reportRequest struct {
-	Users []reportUserUsage  `json:"users"`
-	Host  hostmetrics.Sample `json:"host"`
+	ReportID string             `json:"report_id"`
+	Users    []reportUserUsage  `json:"users"`
+	Host     hostmetrics.Sample `json:"host"`
 }
 
 // syncLoop is both halves of the node<->panel sync mechanism: Phase 7.3's
@@ -1433,47 +1506,13 @@ func (s *server) syncLoop(ctx context.Context, cfg config) {
 			return
 		case <-ticker.C:
 			s.pushOnce(ctx, client, cfg)
-			s.pullOnce(ctx, client, cfg)
 		}
 	}
 }
 
 func (s *server) pushOnce(ctx context.Context, client *http.Client, cfg config) {
-	usage := s.traffic.Drain()
-	users := make([]reportUserUsage, 0, len(usage))
-	for username, u := range usage {
-		users = append(users, reportUserUsage{Username: username, Uplink: u.Up, Downlink: u.Down})
-	}
-
-	s.mu.Lock()
-	running := s.node != nil
-	s.mu.Unlock()
-
-	sample := hostmetrics.Collect(running, singBoxVersion)
-	sample.Tunnels = s.tunnelReport(sample.Tunnels)
-	sample.ClientConnections = s.clientConnections()
-	body, err := json.Marshal(reportRequest{Users: users, Host: sample})
-	if err != nil {
-		s.logger.Error("push report: marshal", "error", err)
-		return
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.PanelURL+"/api/internal/node-report", bytes.NewReader(body))
-	if err != nil {
-		s.logger.Error("push report: build request", "error", err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+cfg.ReportSecret)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		s.logger.Warn("push report: request failed, will retry next tick", "error", err)
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		s.logger.Warn("push report: panel rejected report", "status", resp.StatusCode)
+	if err := s.pushReport(ctx, client, cfg); err != nil {
+		s.logger.Warn("usage remains queued for retry", "error", err)
 	}
 }
 
@@ -1514,9 +1553,10 @@ func (s *server) tunnelReport(read []hostmetrics.Tunnel) []hostmetrics.Tunnel {
 // field-for-field (Inbounds reuses the exact same inboundSpec/userSpec/
 // tlsSpec/realitySpec types startRequest already decodes for POST /start).
 type pulledConfig struct {
-	Version  string        `json:"version"`
-	Inbounds []inboundSpec `json:"inbounds"`
-	Core     coreSpec      `json:"core"`
+	UserSets map[string][]userSpec `json:"-"`
+	Version  string                `json:"version"`
+	Inbounds []inboundSpec         `json:"inbounds"`
+	Core     coreSpec              `json:"core"`
 }
 
 // pullOnce fetches the panel's current desired config and, if it differs
@@ -1530,7 +1570,7 @@ type pulledConfig struct {
 // implement that just answers 200 with the full body, which the version
 // comparison below handles exactly as it always did.
 func (s *server) pullOnce(ctx context.Context, client *http.Client, cfg config) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.PanelURL+"/api/internal/node-config", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.PanelURL+"/api/internal/node-config?schema=3", nil)
 	if err != nil {
 		s.logger.Error("pull config: build request", "error", err)
 		return
@@ -1551,13 +1591,34 @@ func (s *server) pullOnce(ctx context.Context, client *http.Client, cfg config) 
 	if resp.StatusCode == http.StatusNotModified {
 		return
 	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		s.mu.Lock()
+		_ = s.stopNodeLocked()
+		s.lastPulled = nil
+		if s.stateDir != "" {
+			_ = os.Remove(filepath.Join(s.stateDir, "last-good-config.json"))
+		}
+		s.mu.Unlock()
+		return
+	}
 	if resp.StatusCode != http.StatusOK {
 		s.logger.Warn("pull config: panel rejected request", "status", resp.StatusCode)
 		return
 	}
 	var pulled pulledConfig
+	s.mu.Lock()
+	if s.lastPulled != nil {
+		pulled.Version = s.lastPulled.Version
+		pulled.UserSets = s.lastPulled.UserSets
+	}
+	s.mu.Unlock()
 	if err := json.NewDecoder(resp.Body).Decode(&pulled); err != nil {
-		s.logger.Error("pull config: decode response", "error", err)
+		s.mu.Lock()
+		if s.lastPulled != nil {
+			s.lastPulled.Version = ""
+		}
+		s.mu.Unlock()
+		s.logger.Error("pull config: decode response; full refresh next tick", "error", err)
 		return
 	}
 
@@ -1573,6 +1634,7 @@ func (s *server) pullOnce(ctx context.Context, client *http.Client, cfg config) 
 	if s.node == nil {
 		if len(pulled.Inbounds) == 0 {
 			s.lastPulled = &pulled
+			_ = s.persistConfig("last-good-config.json", s.lastPulled)
 			return
 		}
 		needsRestart = true
@@ -1583,6 +1645,18 @@ func (s *server) pullOnce(ctx context.Context, client *http.Client, cfg config) 
 		return
 	}
 
+	for _, in := range pulled.Inbounds {
+		if err := validateUserList(in.Protocol, in.Users); err != nil {
+			s.logger.Error("reject invalid hot configuration", "error", err)
+			return
+		}
+	}
+	if len(hot) > 0 {
+		if err := s.persistConfig("previous-config.json", s.lastPulled); err != nil {
+			s.logger.Error("snapshot failed; users unchanged", "error", err)
+			return
+		}
+	}
 	byTag := make(map[string]inboundSpec, len(pulled.Inbounds))
 	for _, in := range pulled.Inbounds {
 		byTag[in.Tag] = in
@@ -1603,11 +1677,18 @@ func (s *server) pullOnce(ctx context.Context, client *http.Client, cfg config) 
 		failed = failed || !applied
 	}
 	if failed {
-		// Keep the previous version so the next tick diffs against what is really
-		// running and tries again; recording this one would hide the failure.
+		// Earlier listeners may already have changed. Restore a coherent
+		// generation rather than leaving a partially applied credential set.
+		if s.lastPulled != nil {
+			previous := *s.lastPulled
+			s.applyFullLocked(previous)
+		}
 		return
 	}
 	s.lastPulled = &pulled
+	if err := s.persistConfig("last-good-config.json", s.lastPulled); err != nil {
+		s.logger.Error("persist hot configuration", "error", err)
+	}
 }
 
 // runningLastPulledLocked reports whether what this node is running is
@@ -1623,15 +1704,44 @@ func (s *server) runningLastPulledLocked() bool {
 // starts fresh from pulled - the same internal path POST /start already
 // uses. Caller must hold s.mu.
 func (s *server) applyFullLocked(pulled pulledConfig) {
-	if err := s.stopNodeLocked(); err != nil {
-		s.logger.Warn("pull config: close previous node before restart", "error", err)
-	}
-	if err := s.startNodeLocked(startRequest{Inbounds: pulled.Inbounds, Core: &pulled.Core}); err != nil {
-		s.logger.Error("pull config: start node", "error", err)
+	opts, plan, err := buildOptionsPlan(startRequest{Inbounds: pulled.Inbounds, Core: &pulled.Core})
+	if err != nil {
+		s.logger.Error("new config rejected before stopping core", "error", err)
 		return
 	}
+	candidate, err := nodecore.New(s.ctx, opts, s.traffic)
+	if err != nil {
+		s.logger.Error("new config rejected before stopping core", "error", err)
+		return
+	}
+	previous := s.lastPulled
+	if err := s.persistConfig("previous-config.json", previous); err != nil {
+		candidate.Close()
+		s.logger.Error("snapshot failed; core unchanged", "error", err)
+		return
+	}
+	if err := s.stopNodeLocked(); err != nil {
+		s.logger.Warn("close core", "error", err)
+	}
+	if err := candidate.Start(); err != nil {
+		candidate.Close()
+		s.logger.Error("new core failed; restoring previous config", "error", err)
+		if previous != nil {
+			if recoveryErr := s.startNodeLocked(startRequest{Inbounds: previous.Inbounds, Core: &previous.Core}); recoveryErr != nil {
+				s.logger.Error("core rollback failed", "error", recoveryErr)
+			}
+			s.lastPulled = previous
+		}
+		return
+	}
+	s.node = candidate
+	s.plan = plan
+	s.startSupervisorLocked(plan)
 	s.lastPulled = &pulled
-	s.logger.Info("pull config: applied full restart", "inbounds", len(pulled.Inbounds), "version", pulled.Version)
+	if err := s.persistConfig("last-good-config.json", s.lastPulled); err != nil {
+		s.logger.Error("persist last good config", "error", err)
+	}
+	s.logger.Info("validated core config applied", "version", pulled.Version)
 }
 
 // userUpdate names an inbound whose user list changed and should be hot-applied.

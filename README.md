@@ -136,6 +136,8 @@ rapido-go update
 
 It refreshes the installer files, pulls every image in parallel and stops there if nothing changed. Otherwise it backs up the database first (the last 5 backups are kept), recreates what changed - migrations run automatically - and checks the stack came back healthy. Installs made by older versions (a git checkout in `/opt/rapido-go`) update the same way.
 
+Deployments using the local `rapido-go-panel:private` alias download the published GHCR panel image and assign it to that alias after a successful pull. The previous image is retained as `rapido-go-panel:previous`. To select a verified commit image, pass `RAPIDO_PRIVATE_IMAGE_SOURCE=ghcr.io/rapidodev/rapido-go-panel:<full-commit-sha>` to the update command. Select the matching source branch with `RAPIDO_REPO_BRANCH` when the commit has not reached `master`. An explicitly requested local build also updates the deployment alias.
+
 ### Backup and restore
 
 ```bash
@@ -168,10 +170,12 @@ Everything is env-var driven (`internal/config/config.go`), and the installer wr
 |---|---|---|
 | `ROLE` | `api` | `api` (scalable) or `backend` (singleton). |
 | `DATABASE_URL` | *(required)* | `postgres://user:pass@host:5432/db?sslmode=disable` |
+| `POSTGRES_MAX_CONNECTIONS` | `200` | Compose Postgres limit. Keep aligned with `DB_MAX_CONNECTIONS` in the panel. |
+| `PANEL_API_REPLICAS` | `1` | Number of API containers; each API divides the connection budget across this count. |
 | `REDIS_ADDR` | `127.0.0.1:6379` | Cache for hot read paths. |
 | `SUDO_USERNAME` / `SUDO_PASSWORD` | *(none)* | Bootstrap admin, checked before the database - the way in on an empty install. |
 | `UVICORN_HOST` / `UVICORN_PORT` | `0.0.0.0` / `8000` | HTTP bind address. |
-| `ALLOWED_ORIGINS` | `*` | CORS allow-list - lock this down in production. |
+| `ALLOWED_ORIGINS` | panel domain | CORS allow-list; add other browser origins explicitly, comma-separated. |
 | `XRAY_SUBSCRIPTION_URL_PREFIX` | *(relative)* | Prepended to `/sub/<token>` in generated links. |
 | `XRAY_SUBSCRIPTION_URL_PREFIXES` | *(none)* | Every address a subscription answers on, comma-separated, in dashboard order; the first is what reseller bots read. |
 | `USAGE_RETENTION_DAYS` | `90` | Days of usage history to keep. |
@@ -181,6 +185,8 @@ Everything is env-var driven (`internal/config/config.go`), and the installer wr
 | `POSTGRES_SHARED_BUFFERS`, `POSTGRES_EFFECTIVE_CACHE_SIZE` | sized from RAM | Postgres memory in the compose stack (`256MB` / `1GB` if unset); the installer sets them from the server's RAM. |
 
 Telegram, Discord and webhook settings exist as env vars too, but are also editable live from the dashboard's **Integrations** page, which overrides them.
+
+To add API replicas, set `PANEL_API_REPLICAS` in `.env` to the intended count and run `docker compose -f docker-compose.prod.yml --env-file .env up -d --scale panel=<count>`. Keep `POSTGRES_MAX_CONNECTIONS` equal to the Postgres `max_connections` setting. Each API pool is then capped to its share after reserving 10 connections for the backend and 20 for migrations and operations. The generated Caddyfile sends node usage reports to the backend singleton and other API traffic to the scalable panel service.
 
 Node settings are separate and almost always come from the setup blob; `NODE_LISTEN_ADDR` (`0.0.0.0:62051`) and `NODE_REPORT_INTERVAL_SECONDS` (`10`) are the only ones usually worth changing.
 

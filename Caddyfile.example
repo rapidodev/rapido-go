@@ -16,7 +16,14 @@
 # block and one reverse proxy).
 panel.example.com {
 	encode zstd gzip
-	reverse_proxy panel:8000
+	# Node reports contain process-local rate baselines and must reach the
+	# backend singleton. All other API and config-pull traffic stays stateless.
+	handle /api/internal/node-report {
+		reverse_proxy backend:8000
+	}
+	handle {
+		reverse_proxy panel:8000
+	}
 }
 
 # Optional: a separate subscription domain (or several). Serves only what

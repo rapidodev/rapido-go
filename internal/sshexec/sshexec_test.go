@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -162,7 +163,13 @@ func serveOneSSHConn(t *testing.T, nc net.Conn, cfg *ssh.ServerConfig) {
 				if req.WantReply {
 					req.Reply(true, nil)
 				}
-				cmd := exec.Command("sh", "-c", payload.Command)
+				shell, flag := "sh", "-c"
+				if runtime.GOOS == "windows" {
+					// The test exercises POSIX heredoc scripts. Windows runners do
+					// not ship sh on PATH, but Git for Windows provides a real bash.
+					shell = `C:\Program Files\Git\bin\bash.exe`
+				}
+				cmd := exec.Command(shell, flag, payload.Command)
 				cmd.Stdout = ch
 				cmd.Stderr = ch
 				runErr := cmd.Run()

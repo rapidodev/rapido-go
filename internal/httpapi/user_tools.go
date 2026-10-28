@@ -62,7 +62,7 @@ func (h *Handler) userListFilter(ctx context.Context, identity *auth.Identity, a
 	if search != "" {
 		params.Search = textFromPtr(&search)
 		if token := extractSubscriptionToken(search); token != "" {
-			if claims, ok := subscription.ParseToken(token, h.jwtSecret); ok {
+			if claims, ok := subscription.ParseToken(token, h.signingSecret()); ok {
 				username := claims.Username
 				if claims.ByID {
 					if u, err := h.store.Queries.GetUserByID(ctx, int32(claims.UserID)); err == nil {

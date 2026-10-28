@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -58,16 +59,19 @@ type adminCreateRequest struct {
 // is owner-only, but leaving a field out of the request must never revoke
 // it by accident just because Go's bool zero value is false.
 type adminModifyRequest struct {
-	Password       *string `json:"password"`
-	IsSudo         *bool   `json:"is_sudo"`
-	IsOwner        *bool   `json:"is_owner"`
-	TelegramID     *int64  `json:"telegram_id"`
-	DiscordWebhook *string `json:"discord_webhook"`
+	Password       *string            `json:"password"`
+	IsSudo         *bool              `json:"is_sudo"`
+	IsOwner        *bool              `json:"is_owner"`
+	TelegramID     patchField[int64]  `json:"telegram_id"`
+	DiscordWebhook patchField[string] `json:"discord_webhook"`
 }
 
 func validateDiscordWebhook(v *string) error {
-	if v != nil && *v != "" && !strings.HasPrefix(*v, "https://discord.com") {
-		return errors.New("Discord webhook must start with 'https://discord.com'")
+	if v != nil && *v != "" {
+		u, err := url.Parse(*v)
+		if err != nil || u.Scheme != "https" || u.Host != "discord.com" || u.User != nil || !strings.HasPrefix(u.Path, "/api/webhooks/") {
+			return errors.New("Discord webhook must be an https://discord.com/api/webhooks/ URL")
+		}
 	}
 	return nil
 }
@@ -139,11 +143,17 @@ func (h *Handler) handleLogin(c *gin.Context) {
 		return
 	}
 
-	var isSudo bool
+	var isSudo, bootstrap bool
 	switch {
 	case h.sudoUsername != "" && username == h.sudoUsername && password == h.sudoPassword:
-		isSudo = true
+		isSudo, bootstrap = true, true
 	default:
+		if h.sudoUsername != "" && username == h.sudoUsername {
+			h.recordFailedLogin(ctx, ip)
+			h.reports.Login(ctx, username, ip, loginStatusFailed)
+			c.JSON(http.StatusUnauthorized, gin.H{"detail": "Incorrect username or password"})
+			return
+		}
 		admin, err := h.store.Queries.GetAdminByUsername(ctx, username)
 		if err != nil {
 			// Logged at warn with the attempted username and source IP -
@@ -174,6 +184,9 @@ func (h *Handler) handleLogin(c *gin.Context) {
 	}
 
 	token, err := h.issuer.Issue(username, isSudo)
+	if bootstrap {
+		token, err = h.issuer.IssueBootstrap(username)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not issue token"})
 		return
@@ -232,6 +245,10 @@ func (h *Handler) handleCreateAdmin(c *gin.Context) {
 	var req adminCreateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": err.Error()})
+		return
+	}
+	if h.sudoUsername != "" && req.Username == h.sudoUsername {
+		c.JSON(http.StatusConflict, gin.H{"detail": "This username is reserved for the environment account"})
 		return
 	}
 	if err := validateDiscordWebhook(req.DiscordWebhook); err != nil {
@@ -308,7 +325,7 @@ func (h *Handler) handleUpdateAdmin(c *gin.Context) {
 	// not, is still refused outright from touching another sudo account at
 	// all - matching the existing password/telegram/discord protection
 	// sudo accounts have always had from each other.
-	if admin.Username != current.Username && admin.IsSudo && !current.IsOwner {
+	if admin.Username != current.Username && (admin.IsSudo || admin.IsOwner) && !current.IsOwner {
 		c.JSON(http.StatusForbidden, gin.H{"detail": "You're not allowed to edit another sudoer's account. Use rapido-cli instead."})
 		return
 	}
@@ -318,7 +335,7 @@ func (h *Handler) handleUpdateAdmin(c *gin.Context) {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": err.Error()})
 		return
 	}
-	if err := validateDiscordWebhook(req.DiscordWebhook); err != nil {
+	if err := validateDiscordWebhook(&req.DiscordWebhook.Value); err != nil {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": err.Error()})
 		return
 	}
@@ -370,6 +387,10 @@ func (h *Handler) handleUpdateAdmin(c *gin.Context) {
 		}
 		params.IsOwner = *req.IsOwner
 	}
+	if params.IsOwner && !params.IsSudo {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": "An owner must also have sudo access"})
+		return
+	}
 	if req.Password != nil && *req.Password != "" {
 		hashed, err := auth.HashPassword(*req.Password)
 		if err != nil {
@@ -381,11 +402,17 @@ func (h *Handler) handleUpdateAdmin(c *gin.Context) {
 			params.PasswordResetAt = timestamptzFromTime(time.Now().UTC())
 		}
 	}
-	if req.TelegramID != nil && *req.TelegramID != 0 {
-		params.TelegramID = int8FromPtr(req.TelegramID)
+	if req.TelegramID.Set {
+		params.TelegramID = int8FromPtr(nil)
+		if !req.TelegramID.Null && req.TelegramID.Value != 0 {
+			params.TelegramID = int8FromPtr(&req.TelegramID.Value)
+		}
 	}
-	if req.DiscordWebhook != nil && *req.DiscordWebhook != "" {
-		params.DiscordWebhook = textFromPtr(req.DiscordWebhook)
+	if req.DiscordWebhook.Set {
+		params.DiscordWebhook = textFromPtr(nil)
+		if !req.DiscordWebhook.Null && req.DiscordWebhook.Value != "" {
+			params.DiscordWebhook = textFromPtr(&req.DiscordWebhook.Value)
+		}
 	}
 
 	updated, err := h.store.Queries.UpdateAdmin(c.Request.Context(), params)

@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+# The panel needs write access only to its backup directory and the shared
+# SSH known_hosts volume. Preserve existing data while repairing ownership
+# when upgrading from the previous root-running image.
+mkdir -p /app/db_backups /var/lib/rapido-go/ssh
+chown -R rapido:rapido /app/db_backups /var/lib/rapido-go/ssh
+
+exec su-exec rapido:rapido "$@"

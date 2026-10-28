@@ -801,6 +801,7 @@ func (h *Handler) resetUsageCore(ctx context.Context, dbuser generated.User, byU
 		return generated.User{}, errors.New("Could not clear next_plan")
 	}
 	h.reports.UserDataUsageReset(ctx, updated.Username, byUsername, h.resolveAdminRef(ctx, updated.AdminID))
+	h.dispatchGatewayUserSync(ctx, updated)
 	return updated, nil
 }
 
@@ -845,6 +846,7 @@ func (h *Handler) handleRevokeUserSub(c *gin.Context) {
 		return
 	}
 	h.reports.UserSubscriptionRevoked(ctx, updated.Username, identity.Username, h.resolveAdminRef(ctx, updated.AdminID))
+	h.dispatchGatewayUserSync(ctx, updated)
 	h.attachUserLinks(ctx, updated, &resp)
 	c.JSON(http.StatusOK, resp)
 }
@@ -877,6 +879,7 @@ func (h *Handler) handleListUsers(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"users": []userResponseDTO{}, "total": 0})
 		return
 	}
+	params.Limit = pgInt4FromInt(100)
 	if v := c.Query("offset"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			params.Offset = pgInt4FromInt(n)
@@ -884,7 +887,9 @@ func (h *Handler) handleListUsers(c *gin.Context) {
 	}
 	if v := c.Query("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
-			params.Limit = pgInt4FromInt(n)
+			if n > 0 && n <= 500 {
+				params.Limit = pgInt4FromInt(n)
+			}
 		}
 	}
 	sort := validUserSort(c.Query("sort"))
@@ -1050,7 +1055,7 @@ func (h *Handler) buildUserResponses(ctx context.Context, users []generated.User
 		// still deferred - see the Phase 2/4 reports. `links` is populated
 		// for real only by handleGetUser's single-user path, deliberately
 		// not here (see userResponseDTO's own doc comment on Links).
-		subToken := subscription.CreateToken(u.Username, h.jwtSecret)
+		subToken := subscription.CreateToken(u.Username, h.signingSecret())
 		subURL := h.subURLPrefix + "/sub/" + subToken
 
 		out = append(out, userResponseDTO{

@@ -488,6 +488,9 @@ func (h *Handler) handleCreateInbound(c *gin.Context) {
 		return
 	}
 
+	if e.Security == "" && tlsRequiredProtocols[e.Protocol] {
+		e.Security = "tls"
+	}
 	if (e.Security == "tls" || tlsRequiredProtocols[e.Protocol]) && e.TLSCertificate == "" && e.TLSKey == "" {
 		e.Security = "tls"
 		cn := e.TLSServerName

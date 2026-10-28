@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 
+	vmess "github.com/legendary1205/rapido-go/internal/nodecore/vmessservice"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
 	"github.com/sagernet/sing-box/common/listener"
@@ -23,7 +24,6 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/transport/v2ray"
-	"github.com/sagernet/sing-vmess"
 	"github.com/sagernet/sing-vmess/packetaddr"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/auth"
@@ -109,13 +109,11 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 // UpdateUsers replaces the user list on the running service. Connections that
 // already passed the handshake are unaffected.
 func (h *Inbound) UpdateUsers(users []option.VMessUser) error {
-	return h.service.UpdateUsers(userkey.Build(common.Map(users, func(it option.VMessUser) string {
-		return it.Name
-	})), common.Map(users, func(it option.VMessUser) string {
-		return it.UUID
-	}), common.Map(users, func(it option.VMessUser) int {
-		return it.AlterId
-	}))
+	err := h.service.UpdateUsers(userkey.BuildOptions(users), common.Map(users, func(it option.VMessUser) string { return it.UUID }), common.Map(users, func(it option.VMessUser) int { return it.AlterId }))
+	if err == nil {
+		traffic.SetUserPolicy(h.conns, h.Tag(), users)
+	}
+	return err
 }
 
 func (h *Inbound) Start(stage adapter.StartStage) error {
@@ -204,7 +202,7 @@ func (h *Inbound) newConnectionEx(ctx context.Context, conn net.Conn, metadata a
 	// Closing the core closes every connection it accepted: the router only
 	// drops the ones it is relaying, and a multiplexed session's carrier is not
 	// one of those. See traffic.ConnGroup.
-	onClose = h.conns.Track(conn, onClose)
+	onClose = h.conns.TrackAuthenticated(h.Tag(), user, key.Fingerprint, conn, onClose)
 	if h.trafficMgr != nil {
 		// Presence: the user is known, so this connection is now open. The router
 		// calls onClose for every way it can end, including a refused route.
@@ -233,7 +231,7 @@ func (h *Inbound) newPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 	} else {
 		h.logger.InfoContext(ctx, "[", user, "] inbound packet connection to ", metadata.Destination)
 	}
-	onClose = h.conns.Track(conn, onClose)
+	onClose = h.conns.TrackAuthenticated(h.Tag(), user, key.Fingerprint, conn, onClose)
 	if h.trafficMgr != nil {
 		conn = traffic.WrapPacketConn(conn, user, h.trafficMgr)
 	}

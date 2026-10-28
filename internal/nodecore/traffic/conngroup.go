@@ -2,6 +2,7 @@ package traffic
 
 import (
 	"context"
+	"github.com/legendary1205/rapido-go/internal/nodecore/userkey"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -30,10 +31,12 @@ import (
 //
 // A nil *ConnGroup is valid and tracks nothing.
 type ConnGroup struct {
-	mu     sync.Mutex
-	conns  map[uint64]io.Closer
-	next   uint64
-	closed bool
+	mu       sync.Mutex
+	conns    map[uint64]io.Closer
+	next     uint64
+	closed   bool
+	users    map[uint64]connectionUser
+	policies map[string]map[string][32]byte
 }
 
 func NewConnGroup() *ConnGroup {
@@ -120,8 +123,14 @@ func (g *ConnGroup) CloseAll() {
 		all = append(all, c)
 	}
 	clear(g.conns)
+	clear(g.users)
+	clear(g.policies)
 	g.mu.Unlock()
 
+	closeConnections(all)
+}
+
+func closeConnections(all []io.Closer) {
 	work := make(chan io.Closer)
 	var wg sync.WaitGroup
 	for range min(closeWorkers, len(all)) {
@@ -160,4 +169,103 @@ func WithConnGroup(ctx context.Context, g *ConnGroup) context.Context {
 func ConnGroupFromContext(ctx context.Context) *ConnGroup {
 	g, _ := ctx.Value(connGroupKey{}).(*ConnGroup)
 	return g
+}
+
+// connectionUser binds a carrier or packet stream to its authenticated account.
+type connectionUser struct {
+	tag, name   string
+	fingerprint [32]byte
+}
+
+// SetUserPolicy closes only removed accounts or changed credentials. Unchanged
+// users keep their streams even if the option list is reordered.
+func SetUserPolicy[T any](g *ConnGroup, tag string, users []T) {
+	if g == nil {
+		return
+	}
+	policy := make(map[string][32]byte, len(users))
+	for i, u := range users {
+		key := userkey.OptionKey(u, i)
+		policy[key.Label] = key.Fingerprint
+	}
+	g.mu.Lock()
+	if g.policies == nil {
+		g.policies = map[string]map[string][32]byte{}
+	}
+	g.policies[tag] = policy
+	var removed []io.Closer
+	for id, identity := range g.users {
+		if identity.tag != tag {
+			continue
+		}
+		fp, ok := policy[identity.name]
+		if !ok || fp != identity.fingerprint {
+			if c := g.conns[id]; c != nil {
+				removed = append(removed, c)
+			}
+			delete(g.conns, id)
+			delete(g.users, id)
+		}
+	}
+	g.mu.Unlock()
+	closeConnections(removed)
+}
+
+func (g *ConnGroup) HoldUser(tag, name string, c io.Closer) func() {
+	return g.holdAuthenticated(tag, name, nil, c)
+}
+
+func (g *ConnGroup) HoldAuthenticated(tag, name string, fingerprint [32]byte, c io.Closer) func() {
+	return g.holdAuthenticated(tag, name, &fingerprint, c)
+}
+
+func (g *ConnGroup) holdAuthenticated(tag, name string, authenticated *[32]byte, c io.Closer) func() {
+	if g == nil {
+		return func() {}
+	}
+	g.mu.Lock()
+	policy, restricted := g.policies[tag]
+	fp, allowed := policy[name]
+	if g.closed || (restricted && (!allowed || authenticated != nil && fp != *authenticated)) {
+		g.mu.Unlock()
+		c.Close()
+		return func() {}
+	}
+	g.next++
+	id := g.next
+	g.conns[id] = c
+	if g.users == nil {
+		g.users = map[uint64]connectionUser{}
+	}
+	g.users[id] = connectionUser{tag, name, fp}
+	g.mu.Unlock()
+	var released atomic.Bool
+	return func() {
+		if released.CompareAndSwap(false, true) {
+			g.mu.Lock()
+			delete(g.conns, id)
+			delete(g.users, id)
+			g.mu.Unlock()
+		}
+	}
+}
+
+func (g *ConnGroup) TrackAuthenticated(tag, name string, fingerprint [32]byte, c io.Closer, onClose N.CloseHandlerFunc) N.CloseHandlerFunc {
+	release := g.HoldAuthenticated(tag, name, fingerprint, c)
+	return func(err error) {
+		release()
+		if onClose != nil {
+			onClose(err)
+		}
+	}
+}
+
+func (g *ConnGroup) TrackUser(tag, name string, c io.Closer, onClose N.CloseHandlerFunc) N.CloseHandlerFunc {
+	release := g.HoldUser(tag, name, c)
+	return func(err error) {
+		release()
+		if onClose != nil {
+			onClose(err)
+		}
+	}
 }

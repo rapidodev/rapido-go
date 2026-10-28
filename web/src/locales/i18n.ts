@@ -1,4 +1,4 @@
-import { joinPaths } from "@remix-run/router";
+const joinPaths = (parts: string[]) => parts.join("/").replace(/\/+/g, "/");
 
 // Every translation is bundled into the app instead of being fetched at
 // runtime. Loading them over HTTP failed in a way that was almost impossible

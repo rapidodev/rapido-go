@@ -145,7 +145,16 @@ func (h *Inbound) UpdateUsers(users []option.SnellUser) error {
 		}
 		names, keys = []string{""}, [][]byte{unreachable}
 	}
-	return h.service.UpdateUsers(userkey.Build(names), keys)
+	err := h.service.UpdateUsers(func() []*userkey.Key {
+		if len(users) == 0 {
+			return userkey.Build(names)
+		}
+		return userkey.BuildOptions(users)
+	}(), keys)
+	if err == nil {
+		traffic.SetUserPolicy(h.conns, h.Tag(), users)
+	}
+	return err
 }
 
 func (h *Inbound) Start(stage adapter.StartStage) error {
@@ -210,7 +219,7 @@ func (h *Inbound) newConnection(ctx context.Context, conn net.Conn, metadata ada
 		onClose = h.trafficMgr.TrackClose(user, conn, h.listener.ListenOptions().ListenPort, onClose)
 		conn = traffic.WrapConn(conn, user, h.trafficMgr)
 	}
-	onClose = h.conns.Track(conn, onClose)
+	onClose = h.conns.TrackAuthenticated(h.Tag(), user, key.Fingerprint, conn, onClose)
 	h.router.RouteConnectionEx(ctx, conn, metadata, onClose)
 }
 
@@ -230,7 +239,7 @@ func (h *Inbound) newPacketConnection(ctx context.Context, conn N.PacketConn, me
 		metadata.User = key.Name
 	}
 	h.logger.InfoContext(ctx, "[", user, "] inbound packet connection from ", metadata.Source)
-	onClose = h.conns.Track(conn, onClose)
+	onClose = h.conns.TrackAuthenticated(h.Tag(), user, key.Fingerprint, conn, onClose)
 	if h.trafficMgr != nil {
 		conn = traffic.WrapPacketConn(conn, user, h.trafficMgr)
 	}

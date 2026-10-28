@@ -554,8 +554,11 @@ func TestPullOnceRecoversWhenTheConfigIsRevertedAfterAFailedRestart(t *testing.T
 
 	panel.set(bad)
 	pull()
-	if srv.node != nil {
-		t.Fatal("setup: the bad config was expected to leave the node stopped")
+	if srv.node == nil {
+		t.Fatal("invalid config interrupted the last good core")
+	}
+	if err := f.echoProxied(port, alice, echoHost, echoPort); err != nil {
+		t.Fatalf("previous core unavailable after rejected config: %v", err)
 	}
 
 	panel.set(good)

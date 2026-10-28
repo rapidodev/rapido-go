@@ -1,3 +1,4 @@
+import { queryClient } from "utils/queryClient";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { FC, useEffect, useState } from "react";
 import { FieldValues, useForm } from "react-hook-form";
@@ -8,7 +9,7 @@ import { fetch } from "service/http";
 import { errorText } from "service/errors";
 import { removeAuthToken, setAuthToken } from "utils/authStorage";
 import { LoginResponse } from "types/Login";
-import { ReactComponent as Logo } from "assets/logo.svg";
+import Logo from "assets/logo.svg?react";
 import { LanguageSwitcher } from "rapido-ui/LanguageSwitcher";
 import { RapidoFooter } from "rapido-ui/Footer";
 import { Card } from "rapido-ui/Card";
@@ -37,6 +38,7 @@ export const Login: FC = () => {
   });
   useEffect(() => {
     removeAuthToken();
+ queryClient.clear();
     if (location.pathname !== "/login") {
       navigate("/login", { replace: true });
     }
