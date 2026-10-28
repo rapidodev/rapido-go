@@ -24,7 +24,12 @@ import (
 
 func startEcho(t *testing.T) (host string, port int) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	return startEchoAt(t, "127.0.0.1")
+}
+
+func startEchoAt(t *testing.T, host string) (string, int) {
+	t.Helper()
+	ln, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
 	if err != nil {
 		t.Fatalf("listen echo server: %v", err)
 	}
@@ -337,7 +342,40 @@ func (f *fakeHealth) setDown(iface string, down bool) {
 // gone still carries traffic once the supervisor sees the tunnel is down, and
 // goes back to the tunnel when it recovers.
 func TestExitFallsBackToDirectWhileItsTunnelIsDownAndReturnsWhenItRecovers(t *testing.T) {
-	echoHost, echoPort := startEcho(t)
+	// sing deliberately bypasses interface binding for loopback destinations.
+	// Use a real local interface address so the recovered primary must bind.
+	var echoHost string
+	var echoPort int
+	if runtime.GOOS == "linux" {
+		interfaces, err := net.Interfaces()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, iface := range interfaces {
+			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+				continue
+			}
+			addrs, err := iface.Addrs()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, addr := range addrs {
+				ip, _, err := net.ParseCIDR(addr.String())
+				if err == nil && ip.To4() != nil && !ip.IsLoopback() {
+					echoHost, echoPort = startEchoAt(t, ip.String())
+					break
+				}
+			}
+			if echoHost != "" {
+				break
+			}
+		}
+		if echoHost == "" {
+			t.Skip("interface-binding test requires an active non-loopback IPv4 address")
+		}
+	} else {
+		echoHost, echoPort = startEcho(t)
+	}
 	p1 := freeTCPPort(t)
 	const iface = "rapido-test-gone0"
 

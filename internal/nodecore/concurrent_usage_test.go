@@ -88,7 +88,8 @@ func TestConcurrentConnectionsForOneUserAreNotDoubleCounted(t *testing.T) {
 		t.Errorf("connection failed: %v", err)
 	}
 
-	usage := mgr.Drain()["idmuser"]
+	// Receiving the echo can precede the server's post-write counter callback.
+	usage := drainUntil(t, mgr, "idmuser", traffic.Usage{Up: wantTotal, Down: wantTotal})["idmuser"]
 	if usage.Up != wantTotal || usage.Down != wantTotal {
 		t.Errorf("usage after %d concurrent connections = {Up:%d Down:%d}, want {Up:%d Down:%d} (%.2fx up, %.2fx down)",
 			conns, usage.Up, usage.Down, wantTotal, wantTotal,
@@ -170,7 +171,7 @@ func TestConcurrentAnyTLSStreamsOnOneSessionAreNotDoubleCounted(t *testing.T) {
 		t.Errorf("stream failed: %v", err)
 	}
 
-	usage := mgr.Drain()["idmuser"]
+	usage := drainUntil(t, mgr, "idmuser", traffic.Usage{Up: wantTotal, Down: wantTotal})["idmuser"]
 	if usage.Up != wantTotal || usage.Down != wantTotal {
 		t.Errorf("usage after %d concurrent anytls streams on one session = {Up:%d Down:%d}, want {Up:%d Down:%d} (%.2fx up, %.2fx down)",
 			streams, usage.Up, usage.Down, wantTotal, wantTotal,

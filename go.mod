@@ -124,3 +124,6 @@ require (
 // exactly what changed and why. Everything else is upstream v0.2.1
 // verbatim.
 replace github.com/sagernet/sing-shadowtls => ./third_party/sing-shadowtls
+
+// Keep QUIC authentication tables safe during live user updates.
+replace github.com/sagernet/sing-quic => ./third_party/sing-quic
