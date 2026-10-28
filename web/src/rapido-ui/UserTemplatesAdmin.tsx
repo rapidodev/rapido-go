@@ -140,7 +140,7 @@ export const UserTemplatesAdmin: FC = () => {
       )}
 
       {isLoading ? (
-        <p className="text-sm text-rapido-muted">{t("rapido.tickets.loading")}</p>
+        <p className="text-sm text-rapido-muted">{t("rapido.pleaseWait")}</p>
       ) : (templates ?? []).length === 0 ? (
         <Card className="p-6 text-center text-sm text-rapido-muted">
           {t("rapido.templates.empty")}

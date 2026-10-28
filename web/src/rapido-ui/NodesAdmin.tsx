@@ -835,7 +835,7 @@ const UsagePanel: FC = () => {
           {t("rapido.nodes.usageFailed")}
         </div>
       ) : isLoading ? (
-        <p className="text-sm text-rapido-muted">{t("rapido.tickets.loading")}</p>
+        <p className="text-sm text-rapido-muted">{t("rapido.pleaseWait")}</p>
       ) : rows.length === 0 ? (
         <p className="text-sm text-rapido-muted">{t("rapido.nodes.usageEmpty")}</p>
       ) : (
@@ -931,7 +931,7 @@ export const NodesAdmin: FC = () => {
       )}
 
       {isLoading ? (
-        <p className="text-sm text-rapido-muted">{t("rapido.tickets.loading")}</p>
+        <p className="text-sm text-rapido-muted">{t("rapido.pleaseWait")}</p>
       ) : rows.length === 0 ? (
         <Card className="p-6 text-center text-sm text-rapido-muted">{t("rapido.nodes.empty")}</Card>
       ) : (

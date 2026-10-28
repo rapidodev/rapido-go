@@ -61,7 +61,7 @@ const CopyField: FC<{ label: string; value: string }> = ({ label, value }) => {
 // doc comment) - masking would defeat the only thing this card exists for.
 const ThisPanelCard: FC = () => {
   const { t } = useTranslation();
-  const { data: settings, isLoading } = useGatewaySettingsQuery();
+  const { data: settings, isLoading, isError, refetch } = useGatewaySettingsQuery();
   const [name, setName] = useState("");
   const [confirmRotate, setConfirmRotate] = useState(false);
   const update = useUpdateGatewaySettingsMutation();
@@ -84,8 +84,14 @@ const ThisPanelCard: FC = () => {
     update.mutate({ rotate_secret: true }, { onError: (e) => setError(errorText(e, t("rapido.gateway.saveFailed"))) });
   };
 
+  if (isError && !settings) {
+    return <div role="alert" className="text-sm text-rapido-bad">
+      <p>{t("rapido.gateway.settingsLoadFailed")}</p>
+      <Button variant="chip" onClick={() => void refetch()}>{t("rapido.retry")}</Button>
+    </div>;
+  }
   if (isLoading || !settings) {
-    return <p className="text-sm text-rapido-muted">{t("rapido.tickets.loading")}</p>;
+    return <p className="text-sm text-rapido-muted">{t("rapido.pleaseWait")}</p>;
   }
 
   return (
@@ -322,8 +328,8 @@ export const GatewayAdmin: FC = () => {
       )}
 
       {isLoading ? (
-        <p className="text-sm text-rapido-muted">{t("rapido.tickets.loading")}</p>
-      ) : (peers ?? []).length === 0 ? (
+        <p className="text-sm text-rapido-muted">{t("rapido.pleaseWait")}</p>
+      ) : isError ? null : (peers ?? []).length === 0 ? (
         <Card className="p-6 text-center text-sm text-rapido-muted">{t("rapido.gateway.empty")}</Card>
       ) : (
         <div className="flex flex-col gap-3">

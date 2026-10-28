@@ -423,7 +423,7 @@ export const XrayConfigAdmin: FC = () => {
     );
   }
   if (isLoading || !data) {
-    return <p className="text-sm text-rapido-muted">{t("rapido.tickets.loading")}</p>;
+    return <p className="text-sm text-rapido-muted">{t("rapido.pleaseWait")}</p>;
   }
 
   return (

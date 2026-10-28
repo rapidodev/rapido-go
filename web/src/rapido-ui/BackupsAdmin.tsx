@@ -300,7 +300,7 @@ export const BackupsAdmin: FC = () => {
       <UploadRestoreCard onRestored={handleRestored} />
 
       {isLoading ? (
-        <p className="text-sm text-rapido-muted">{t("rapido.tickets.loading")}</p>
+        <p className="text-sm text-rapido-muted">{t("rapido.pleaseWait")}</p>
       ) : rows.length === 0 ? (
         <Card className="p-6 text-center text-sm text-rapido-muted">{t("rapido.backups.empty")}</Card>
       ) : (
