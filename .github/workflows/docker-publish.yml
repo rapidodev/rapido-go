@@ -8,6 +8,7 @@ name: Build and publish Docker images
 # The panel image is multi-arch (linux/amd64 + linux/arm64) and carries the
 # node agent binaries it serves to nodes (docker/Dockerfile.panel). Release
 # tags (v*) are built by release.yml.
+# Manual builds of other branches publish only their commit tag.
 on:
   push:
     branches: [master]
@@ -69,6 +70,20 @@ jobs:
         id: version
         run: echo "value=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
+      - name: Select image tags
+        id: tags
+        shell: bash
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/rapido-go-panel"
+          {
+            echo 'value<<IMAGE_TAGS'
+            echo "${image}:${GITHUB_SHA}"
+            if [ "$GITHUB_REF" = 'refs/heads/master' ]; then
+              echo "${image}:latest"
+            fi
+            echo 'IMAGE_TAGS'
+          } >> "$GITHUB_OUTPUT"
+
       # The final alpine stage of the multi-arch build runs once per target
       # architecture; the Go and Node stages cross-compile natively.
       - uses: docker/setup-qemu-action@v3
@@ -92,8 +107,6 @@ jobs:
           provenance: false
           build-args: |
             VERSION=${{ steps.version.outputs.value }}
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/rapido-go-panel:latest
-            ghcr.io/${{ github.repository_owner }}/rapido-go-panel:${{ github.sha }}
+          tags: ${{ steps.tags.outputs.value }}
           cache-from: type=gha,scope=panel
           cache-to: type=gha,mode=max,scope=panel
