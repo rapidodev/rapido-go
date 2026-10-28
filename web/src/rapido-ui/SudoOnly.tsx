@@ -8,13 +8,13 @@ import { useCurrentAdminQuery } from "hooks/useCurrentAdminQuery";
 // 403 for those endpoints; this only hides a page a non-sudo admin could do
 // nothing with anyway.
 export const SudoOnly: FC<{ children: ReactNode }> = ({ children }) => {
-  const { data, isPending } = useCurrentAdminQuery();
+  const { data, isPending, isSuccess } = useCurrentAdminQuery();
 
   // is_sudo defaults to false until the admin query resolves, so redirecting
   // during the pending window would bounce a legitimate sudo admin.
   if (isPending) return null;
 
-  return data?.is_sudo ? <>{children}</> : <Navigate to="/" replace />;
+  return isSuccess && data?.is_sudo ? <>{children}</> : <Navigate to="/" replace />;
 };
 
 export default SudoOnly;

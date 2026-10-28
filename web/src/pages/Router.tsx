@@ -1,6 +1,6 @@
 import { Suspense, lazy } from "react";
 import { Navigate, createHashRouter } from "react-router-dom";
-import { loadCurrentAdmin } from "hooks/useCurrentAdminQuery";
+import { loadCurrentAdminForNavigation } from "hooks/useCurrentAdminQuery";
 import { SudoOnly } from "rapido-ui/SudoOnly";
 import { extensionRoutes } from "extensions";
 import { Login } from "./Login";
@@ -18,7 +18,7 @@ import { pageImports } from "./pageImports";
 // reads the exact same queryKey, so Shell/SudoOnly render with data already
 // in hand instead of a second round trip on every navigation.
 const fetchAdminLoader = async () => {
-  return loadCurrentAdmin();
+  return loadCurrentAdminForNavigation();
 };
 
 // Lazy-loaded so each page's dependencies are a separate chunk that Login
