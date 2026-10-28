@@ -6,7 +6,23 @@ import { queryKeys } from "utils/queryClient";
 export const useHostsQuery = () =>
   useQuery({
     queryKey: queryKeys.hosts,
-    queryFn: () => fetch<HostsMap>("/hosts"),
+    // A stalled browser connection must not leave the page loading forever.
+    // Cancel the request when the user leaves this page.
+    queryFn: async ({ signal }) => {
+      const controller = new AbortController();
+      const cancel = () => controller.abort(signal.reason);
+      if (signal.aborted) cancel();
+      else signal.addEventListener("abort", cancel, { once: true });
+      const timer = setTimeout(() => controller.abort(new DOMException("Request timed out", "TimeoutError")), 8000);
+      try {
+        return await fetch<HostsMap>("/hosts", { signal: controller.signal, retry: 0 });
+      } finally {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", cancel);
+      }
+    },
+    retry: 1,
+    retryDelay: 500,
   });
 
 // PUT /api/hosts is a full replace, not a per-tag patch (see

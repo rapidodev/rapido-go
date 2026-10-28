@@ -401,13 +401,14 @@ export const HostsAdmin: FC = () => {
 
   if (isError) {
     return (
-      <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">
-        {t("rapido.hosts.loadFailed")}
+      <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+        <p>{t("rapido.hosts.loadFailed")}</p>
+        <Button variant="chip" onClick={() => void refetch()}>{t("rapido.retry")}</Button>
       </div>
     );
   }
   if (isLoading || !hosts) {
-    return <p className="text-sm text-rapido-muted">{t("rapido.tickets.loading")}</p>;
+    return <p className="text-sm text-rapido-muted">{t("rapido.pleaseWait")}</p>;
   }
 
   return (
