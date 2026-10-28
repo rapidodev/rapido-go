@@ -4,11 +4,13 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/legendary1205/rapido-go/internal/auth"
+	"github.com/legendary1205/rapido-go/internal/db/generated"
 	"github.com/legendary1205/rapido-go/internal/proxysettings"
 	"github.com/legendary1205/rapido-go/internal/xrayimport"
 )
@@ -119,27 +121,55 @@ func (h *Handler) handleValidateRawXrayConfig(c *gin.Context) {
 	})
 }
 
-// handleListCoreConfigBackups implements GET /api/core/config/backups
-// (sudo only). The API contract is a list of timestamped copies of the core
-// config kept on disk; this panel has no such file to copy (its core config
-// lives in Postgres, and whole-database backups are their own endpoint family under
-// /api/settings/backup), so the honest answer is an empty list rather than
-// a 404 a dashboard would render as an error.
+// Config snapshots preserve fleet routing, inbounds, hosts and node profiles.
 func (h *Handler) handleListCoreConfigBackups(c *gin.Context) {
-	c.JSON(http.StatusOK, []any{})
+	rows, err := h.store.Queries.ListCoreSnapshots(c.Request.Context())
+	if err != nil {
+		c.JSON(500, gin.H{"detail": "Could not list snapshots"})
+		return
+	}
+	if rows == nil {
+		rows = []generated.ListCoreSnapshotsRow{}
+	}
+	c.JSON(200, rows)
 }
-
-// handleGetCoreConfigBackup implements GET /api/core/config/backups/:id.
-// Nothing is ever stored (see handleListCoreConfigBackups), so every id is
-// genuinely absent.
 func (h *Handler) handleGetCoreConfigBackup(c *gin.Context) {
-	c.JSON(http.StatusNotFound, gin.H{"detail": "Backup not found"})
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(404, gin.H{"detail": "Backup not found"})
+		return
+	}
+	row, err := h.store.Queries.GetCoreSnapshot(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(404, gin.H{"detail": "Backup not found"})
+		return
+	}
+	c.JSON(200, row)
 }
-
-// handleRestoreCoreConfigBackup implements
-// POST /api/core/config/backups/:id/restore - same reasoning as above.
 func (h *Handler) handleRestoreCoreConfigBackup(c *gin.Context) {
-	c.JSON(http.StatusNotFound, gin.H{"detail": "Backup not found"})
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(404, gin.H{"detail": "Backup not found"})
+		return
+	}
+	row, err := h.store.Queries.GetCoreSnapshot(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(404, gin.H{"detail": "Backup not found"})
+		return
+	}
+	var confirmation struct {
+		Confirm bool `json:"confirm"`
+	}
+	if c.ShouldBindJSON(&confirmation) != nil || !confirmation.Confirm {
+		c.JSON(400, gin.H{"detail": "Restoring configuration may disconnect users; confirm=true is required"})
+		return
+	}
+	saved, err := h.restoreFleetSnapshot(c.Request.Context(), row.Config)
+	if err != nil {
+		c.JSON(422, gin.H{"detail": err.Error()})
+		return
+	}
+	c.JSON(200, saved)
 }
 
 // handleGetNodeSettings implements GET /api/node/settings (sudo only) -

@@ -147,16 +147,29 @@ func ensureFRPInstalled(ctx context.Context, c *sshexec.Client) error {
 	if strings.TrimSpace(out) == "present" {
 		return nil
 	}
+	archOut, err := c.Run(ctx, "uname -m")
+	if err != nil {
+		return err
+	}
+	arch := "amd64"
+	switch strings.TrimSpace(archOut) {
+	case "x86_64", "amd64":
+	case "aarch64", "arm64":
+		arch = "arm64"
+	default:
+		return fmt.Errorf("unsupported FRP architecture %q", strings.TrimSpace(archOut))
+	}
+	downloadURL := strings.ReplaceAll(frpDownloadURL(), "linux_amd64", "linux_"+arch)
 	installCmd := fmt.Sprintf(`set -e
 cd /tmp
 curl -fsSL %s -o frp.tar.gz
 tar -xzf frp.tar.gz
-cd frp_%s_linux_amd64
+cd frp_%s_linux_%s
 install -m 755 frps /usr/local/bin/frps
 install -m 755 frpc /usr/local/bin/frpc
 cd /tmp
-rm -rf frp.tar.gz frp_%s_linux_amd64
-`, frpDownloadURL(), frpVersion, frpVersion)
+rm -rf frp.tar.gz frp_%s_linux_%s
+`, downloadURL, frpVersion, arch, frpVersion, arch)
 	if _, err := c.Run(ctx, installCmd); err != nil {
 		return fmt.Errorf("install frp binaries: %w", err)
 	}

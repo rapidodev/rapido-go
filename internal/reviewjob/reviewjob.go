@@ -28,6 +28,7 @@ import (
 	"github.com/legendary1205/rapido-go/internal/cache"
 	"github.com/legendary1205/rapido-go/internal/db/generated"
 	"github.com/legendary1205/rapido-go/internal/report"
+	"github.com/legendary1205/rapido-go/internal/txscope"
 )
 
 // Run ticks every interval until ctx is canceled, calling review once per
@@ -119,6 +120,38 @@ func reviewActiveUsers(ctx context.Context, q *generated.Queries, dispatcher *re
 // data_limit/expire, matching Python's reset_user_by_next_report, which
 // builds its UserResponse from the row only after the reset UPDATE runs.
 func fireNextPlan(ctx context.Context, q *generated.Queries, user generated.User) (generated.User, error) {
+	if pool := txscope.Pool(ctx); pool != nil && txscope.Tx(ctx) == nil {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			return generated.User{}, err
+		}
+		defer tx.Rollback(context.Background())
+		scoped := txscope.WithTransaction(ctx, tx)
+		if _, err = tx.Exec(scoped, "SELECT pg_advisory_xact_lock_shared(814720033)"); err != nil {
+			return generated.User{}, err
+		}
+		if _, err = tx.Exec(scoped, "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", "user:"+user.Username); err != nil {
+			return generated.User{}, err
+		}
+		queries := q.WithTx(tx)
+		fresh, err := queries.GetUserByID(scoped, user.ID)
+		if err != nil {
+			return generated.User{}, err
+		}
+		if _, err = queries.GetNextPlanByUserID(scoped, user.ID); err != nil {
+			return generated.User{}, err
+		}
+		updated, err := fireNextPlan(scoped, queries, fresh)
+		if err != nil {
+			return generated.User{}, err
+		}
+		if err = tx.Commit(scoped); err != nil {
+			return generated.User{}, err
+		}
+		txscope.RunAfterCommit(scoped)
+		return updated, nil
+	}
+
 	if err := q.CreateUserUsageLog(ctx, generated.CreateUserUsageLogParams{
 		UserID: pgtype.Int4{Int32: user.ID, Valid: true}, UsedTrafficAtReset: user.UsedTraffic,
 	}); err != nil {

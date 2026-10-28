@@ -29,7 +29,7 @@
 # --- dashboard -------------------------------------------------------------
 # Static files - identical for every target architecture, so this stage never
 # runs more than once per build.
-FROM --platform=$BUILDPLATFORM node:18-alpine AS dashboard
+FROM --platform=$BUILDPLATFORM node:22-alpine AS dashboard
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm \
@@ -152,7 +152,9 @@ FROM alpine:3.20
 # this gap was never exposed until an actual restore was attempted through
 # this image: "pg_dump: exec: \"pg_dump\": executable file not found in
 # $PATH". Matches postgres:16-alpine in docker-compose.prod.yml.
-RUN apk add --no-cache ca-certificates postgresql16-client
+RUN apk add --no-cache ca-certificates postgresql16-client su-exec \
+    && addgroup -S -g 10001 rapido \
+    && adduser -S -D -H -u 10001 -G rapido rapido
 WORKDIR /app
 COPY --from=goose /out/goose /usr/local/bin/goose
 COPY internal/db/migrations ./internal/db/migrations
@@ -160,9 +162,11 @@ COPY --from=dashboard /src/web/dist ./web/dist
 COPY --from=node-amd64 /out/nodebin/ ./nodebin/
 COPY --from=node-arm64 /out/nodebin/ ./nodebin/
 COPY --from=panelbuild /out/panel ./panel
+COPY docker/panel-entrypoint.sh /usr/local/bin/panel-entrypoint
+RUN chmod 0755 /usr/local/bin/panel-entrypoint
 # Last, so a new VERSION only touches this metadata layer. `rapido-go doctor`
 # and `rapido-go version` read it from the running container.
 ARG VERSION=dev
 LABEL org.opencontainers.image.version="${VERSION}"
 EXPOSE 8000 8001
-ENTRYPOINT ["./panel"]
+ENTRYPOINT ["/usr/local/bin/panel-entrypoint"]

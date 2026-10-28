@@ -121,6 +121,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 // way the other forks' UpdateUsers document.
 func (h *Inbound) UpdateUsers(users []option.AnyTLSUser) {
 	h.service.UpdateUsers(common.Map(users, func(it option.AnyTLSUser) anytls.User { return anytls.User(it) }))
+	traffic.SetUserPolicy(h.conns, h.Tag(), users)
 }
 
 func (h *Inbound) Start(stage adapter.StartStage) error {
@@ -178,6 +179,6 @@ func (h *inboundHandler) NewConnectionEx(ctx context.Context, conn net.Conn, sou
 		onClose = h.trafficMgr.TrackClose(user, conn, h.listener.ListenOptions().ListenPort, onClose)
 		conn = traffic.WrapConn(conn, user, h.trafficMgr)
 	}
-	onClose = h.conns.Track(conn, onClose)
+	onClose = h.conns.TrackUser(h.Tag(), user, conn, onClose)
 	h.router.RouteConnectionEx(ctx, conn, metadata, onClose)
 }

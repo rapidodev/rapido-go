@@ -108,6 +108,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 // upstream mutator (there isn't one).
 func (n *Inbound) UpdateUsers(users []auth.User) {
 	n.authenticator.Store(auth.NewAuthenticator(users))
+	traffic.SetUserPolicy(n.conns, n.Tag(), users)
 }
 
 func (n *Inbound) Start(stage adapter.StartStage) error {
@@ -227,7 +228,7 @@ func (n *Inbound) newConnection(ctx context.Context, waitForClose bool, conn net
 		onClose = n.trafficMgr.TrackClose(userName, conn, n.listener.ListenOptions().ListenPort, nil)
 		conn = traffic.WrapConn(conn, userName, n.trafficMgr)
 	}
-	onClose = n.conns.Track(conn, onClose)
+	onClose = n.conns.TrackUser(n.Tag(), userName, conn, onClose)
 
 	if !waitForClose {
 		n.router.RouteConnectionEx(ctx, conn, metadata, onClose)

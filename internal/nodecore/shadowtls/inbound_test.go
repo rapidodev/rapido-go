@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	box "github.com/sagernet/sing-box"
+	box "github.com/legendary1205/rapido-go/internal/nodecore/box"
 	"github.com/sagernet/sing-box/adapter"
 	boxCertificate "github.com/sagernet/sing-box/adapter/certificate"
 	"github.com/sagernet/sing-box/adapter/endpoint"

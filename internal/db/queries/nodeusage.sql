@@ -104,10 +104,12 @@ RETURNING *;
 -- GROUP BY node_id / MAX(id) then a self-join back to the full row, not an
 -- N+1 loop. NULLS NOT DISTINCT-style grouping works naturally here since
 -- Postgres GROUP BY already treats every NULL as one group.
-SELECT hm.* FROM host_metrics hm
-JOIN (
-    SELECT node_id, MAX(id) AS max_id FROM host_metrics GROUP BY node_id
-) latest ON latest.max_id = hm.id;
+SELECT hm.* FROM (SELECT id AS node_id FROM nodes UNION ALL SELECT NULL::integer) n
+JOIN LATERAL (
+ SELECT * FROM host_metrics
+ WHERE (n.node_id IS NULL AND host_metrics.node_id IS NULL) OR host_metrics.node_id=n.node_id
+ ORDER BY id DESC LIMIT 1
+) hm ON true;
 
 -- name: GetHostMetricHistory :many
 SELECT * FROM host_metrics

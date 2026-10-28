@@ -2,7 +2,8 @@
 SELECT * FROM jwt_secrets ORDER BY id LIMIT 1;
 
 -- name: CreateJWTSecret :one
-INSERT INTO jwt_secrets (secret_key) VALUES ($1)
+INSERT INTO jwt_secrets (id,secret_key) VALUES (1,$1)
+ON CONFLICT(id) DO UPDATE SET secret_key=jwt_secrets.secret_key
 RETURNING *;
 
 -- name: ReplaceJWTSecret :exec

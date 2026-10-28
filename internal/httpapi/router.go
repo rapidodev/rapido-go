@@ -64,6 +64,8 @@ type Handler struct {
 	loadCapacity  int
 	sortByLoad    bool
 
+	keyLoader       func(context.Context) ([]byte, error)
+	afterRestore    func(context.Context) error
 	databaseURL     string
 	backupDir       string
 	backupKeep      int
@@ -153,7 +155,14 @@ func (h *Handler) subscriptionURLs(token string) []string {
 func NewRouter(h *Handler, logger *slog.Logger, allowedOrigins []string) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	r.Use(slogMiddleware(logger), apiClientLogMiddleware(logger), gin.Recovery(), CORS(allowedOrigins), maintenanceMiddleware(h.store))
+	proxies := []string(nil)
+	if raw := os.Getenv("TRUSTED_PROXIES"); raw != "" {
+		proxies = strings.Split(raw, ",")
+	}
+	if err := r.SetTrustedProxies(proxies); err != nil {
+		panic("invalid TRUSTED_PROXIES: " + err.Error())
+	}
+	r.Use(requestBudget(), slogMiddleware(logger), apiClientLogMiddleware(logger), gin.Recovery(), CORS(allowedOrigins), maintenanceMiddleware(h.store), h.refreshSigningIdentity(), atomicMutations(h))
 
 	// Gin's own defaults answer an unknown path with the plain-text body
 	// "404 page not found" and a wrong method with that same 404. FastAPI -
@@ -406,9 +415,37 @@ func slogMiddleware(logger *slog.Logger) gin.HandlerFunc {
 		}
 		logger.Info("http",
 			"method", c.Request.Method,
-			"path", c.Request.URL.Path,
+			"path", safeLogPath(c.Request.URL.Path),
 			"status", c.Writer.Status(),
 			"duration_ms", time.Since(start).Milliseconds(),
 		)
+	}
+}
+
+func (h *Handler) signingSecret() []byte {
+	if h.issuer != nil {
+		return h.issuer.Secret()
+	}
+	return h.jwtSecret
+}
+func (h *Handler) WithSigningKeyLoader(fn func(context.Context) ([]byte, error)) *Handler {
+	h.keyLoader = fn
+	return h
+}
+func (h *Handler) WithAfterRestore(fn func(context.Context) error) *Handler {
+	h.afterRestore = fn
+	return h
+}
+func (h *Handler) refreshSigningIdentity() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if h.keyLoader != nil && c.Request.URL.Path != "/health" {
+			secret, err := h.keyLoader(c.Request.Context())
+			if err != nil {
+				c.AbortWithStatusJSON(503, gin.H{"detail": "Signing identity unavailable"})
+				return
+			}
+			h.issuer.UpdateSecret(secret)
+		}
+		c.Next()
 	}
 }

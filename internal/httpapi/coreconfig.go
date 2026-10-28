@@ -205,6 +205,9 @@ func validateCoreConfig(dto coreConfigDTO) string {
 	}
 	tags := map[string]bool{}
 	for _, ob := range dto.Outbounds {
+		if ob.ServerPort < 0 || ob.ServerPort > 65535 {
+			return "outbound server_port must be 1-65535"
+		}
 		if ob.Tag == "" || implicitOutboundTags[ob.Tag] {
 			return "outbound tag must be non-empty and not 'direct'/'block' (reserved)"
 		}
@@ -310,6 +313,34 @@ func validateCoreConfig(dto coreConfigDTO) string {
 			if !validTarget(member) {
 				return "outbound " + ob.Tag + ": unknown member outbound " + member
 			}
+		}
+	}
+	edges := make(map[string][]string, len(dto.Outbounds))
+	for _, ob := range dto.Outbounds {
+		edges[ob.Tag] = ob.Outbounds
+	}
+	visiting, done := map[string]bool{}, map[string]bool{}
+	var cycle func(string) bool
+	cycle = func(tag string) bool {
+		if visiting[tag] {
+			return true
+		}
+		if done[tag] {
+			return false
+		}
+		visiting[tag] = true
+		for _, member := range edges[tag] {
+			if cycle(member) {
+				return true
+			}
+		}
+		delete(visiting, tag)
+		done[tag] = true
+		return false
+	}
+	for tag := range edges {
+		if cycle(tag) {
+			return "outbound dependency cycle: " + tag
 		}
 	}
 	for _, rule := range dto.RoutingRules {

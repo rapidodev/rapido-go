@@ -75,6 +75,9 @@ type UserSummary struct {
 }
 
 type Dispatcher struct {
+	webhook func(context.Context, integrationsettings.Values, string, any) error
+	changed func(context.Context, string)
+
 	flags      NotifyFlags
 	settingsFn SettingsFunc
 	telegram   *telegram.Sender
@@ -141,6 +144,9 @@ func belongsTo(userAdmin *AdminRef) *string {
 }
 
 func (d *Dispatcher) StatusChange(ctx context.Context, username, status string, userAdmin *AdminRef) {
+	if d.changed != nil {
+		d.changed(ctx, username)
+	}
 	if !d.flags.StatusChange {
 		return
 	}
@@ -148,6 +154,7 @@ func (d *Dispatcher) StatusChange(ctx context.Context, username, status string, 
 	if !ok {
 		return
 	}
+	d.emitWebhook(ctx, vals, CategoryStatusChange, map[string]any{"username": username, "status": status})
 	text := telegram.StatusChangeMessage(username, status, belongsTo(userAdmin))
 	d.telegram.Report(ctx, tgCfg, text, dmChatID(userAdmin), d.logger)
 
@@ -163,6 +170,7 @@ func (d *Dispatcher) UserCreated(ctx context.Context, user UserSummary, byUserna
 	if !ok {
 		return
 	}
+	d.emitWebhook(ctx, vals, CategoryUserCreated, user)
 	text := telegram.NewUserMessage(user.Username, byUsername, user.DataLimit, user.Expire, user.Proxies, user.HasNextPlan, user.DataLimitResetStrategy, belongsTo(userAdmin))
 	d.telegram.Report(ctx, tgCfg, text, dmChatID(userAdmin), d.logger)
 
@@ -178,6 +186,7 @@ func (d *Dispatcher) UserUpdated(ctx context.Context, user UserSummary, byUserna
 	if !ok {
 		return
 	}
+	d.emitWebhook(ctx, vals, CategoryUserUpdated, user)
 	text := telegram.ModifiedMessage(user.Username, byUsername, user.DataLimit, user.Expire, user.Proxies, user.HasNextPlan, user.DataLimitResetStrategy, belongsTo(userAdmin))
 	d.telegram.Report(ctx, tgCfg, text, dmChatID(userAdmin), d.logger)
 
@@ -193,6 +202,7 @@ func (d *Dispatcher) UserDeleted(ctx context.Context, username, byUsername strin
 	if !ok {
 		return
 	}
+	d.emitWebhook(ctx, vals, CategoryUserDeleted, map[string]any{"username": username})
 	text := telegram.DeletedMessage(username, byUsername, belongsTo(userAdmin))
 	d.telegram.Report(ctx, tgCfg, text, dmChatID(userAdmin), d.logger)
 
@@ -208,6 +218,7 @@ func (d *Dispatcher) UserDataUsageReset(ctx context.Context, username, byUsernam
 	if !ok {
 		return
 	}
+	d.emitWebhook(ctx, vals, CategoryUserDataUsedReset, map[string]any{"username": username})
 	text := telegram.UsageResetMessage(username, byUsername, belongsTo(userAdmin))
 	d.telegram.Report(ctx, tgCfg, text, dmChatID(userAdmin), d.logger)
 
@@ -216,6 +227,9 @@ func (d *Dispatcher) UserDataUsageReset(ctx context.Context, username, byUsernam
 }
 
 func (d *Dispatcher) UserDataResetByNext(ctx context.Context, user UserSummary, userAdmin *AdminRef) {
+	if d.changed != nil {
+		d.changed(ctx, user.Username)
+	}
 	if !d.flags.UserDataUsedReset {
 		return
 	}
@@ -223,6 +237,7 @@ func (d *Dispatcher) UserDataResetByNext(ctx context.Context, user UserSummary, 
 	if !ok {
 		return
 	}
+	d.emitWebhook(ctx, vals, CategoryUserDataUsedReset, user)
 	text := telegram.DataResetByNextMessage(user.Username, user.DataLimit, user.Expire)
 	d.telegram.Report(ctx, tgCfg, text, dmChatID(userAdmin), d.logger)
 
@@ -238,6 +253,7 @@ func (d *Dispatcher) UserSubscriptionRevoked(ctx context.Context, username, byUs
 	if !ok {
 		return
 	}
+	d.emitWebhook(ctx, vals, CategoryUserSubRevoked, map[string]any{"username": username})
 	text := telegram.SubscriptionRevokedMessage(username, byUsername, belongsTo(userAdmin))
 	d.telegram.Report(ctx, tgCfg, text, dmChatID(userAdmin), d.logger)
 
@@ -357,9 +373,23 @@ func (d *Dispatcher) Login(ctx context.Context, username, clientIP, status strin
 	if !ok {
 		return
 	}
+	d.emitWebhook(ctx, vals, CategoryLogin, map[string]any{"username": username, "ip": clientIP, "status": status})
 	text := telegram.LoginMessage(username, clientIP, status)
 	d.telegram.Report(ctx, tgCfg, text, nil, d.logger)
 
 	payload := discord.LoginPayload(username, clientIP, status)
 	d.discord.Send(ctx, payload, vals.DiscordWebhookURL, nil, d.logger)
+}
+
+func (d *Dispatcher) OnUserChanged(fn func(context.Context, string)) { d.changed = fn }
+
+func (d *Dispatcher) SetWebhookSink(fn func(context.Context, integrationsettings.Values, string, any) error) {
+	d.webhook = fn
+}
+func (d *Dispatcher) emitWebhook(ctx context.Context, values integrationsettings.Values, event string, payload any) {
+	if d.webhook != nil {
+		if err := d.webhook(ctx, values, event, payload); err != nil {
+			d.logger.Error("persist generic webhook", "event", event, "error", err)
+		}
+	}
 }

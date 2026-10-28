@@ -55,3 +55,25 @@ UPDATE users u SET
 FROM next_plans np
 WHERE u.id = $1 AND np.user_id = u.id
 RETURNING u.*;
+
+-- name: ResetDuePeriodicUsers :many
+WITH due AS (
+ SELECT * FROM users WHERE data_limit_reset_strategy != 'no_reset'
+ AND COALESCE(last_usage_reset_at,created_at) <= now() - CASE data_limit_reset_strategy
+ WHEN 'day' THEN interval '1 day' WHEN 'week' THEN interval '1 week'
+ WHEN 'month' THEN interval '1 month' WHEN 'year' THEN interval '1 year' ELSE interval '1000 years' END
+ ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 500
+), logged AS (
+ INSERT INTO user_usage_logs(user_id,used_traffic_at_reset) SELECT id,used_traffic FROM due WHERE used_traffic>0
+)
+UPDATE users u SET used_traffic=0,last_usage_reset_at=now(),
+ status=CASE WHEN u.status='limited' AND (u.expire IS NULL OR u.expire=0 OR u.expire>extract(epoch FROM now())) THEN 'active' ELSE u.status END
+FROM due WHERE u.id=due.id RETURNING u.*;
+
+-- name: RemoveAutoExpiredUsers :many
+WITH due AS (
+ SELECT id FROM users WHERE status IN ('expired','limited') AND auto_delete_in_days>0
+ AND last_status_change<=now()-make_interval(days=>auto_delete_in_days)
+ ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 500
+)
+DELETE FROM users WHERE id IN(SELECT id FROM due) RETURNING *;

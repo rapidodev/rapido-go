@@ -8,22 +8,24 @@
 // node itself (see migration 00023's own doc comment on why the node side
 // is SSH'd into too, rather than going through the node agent's API).
 //
-// Host key verification is deliberately skipped (InsecureIgnoreHostKey):
-// the credentials themselves are the trust decision an admin already made
-// by typing them into the create-tunnel form, and pinning a host key would
-// mean this package (or its caller) persisting and managing fingerprints
-// for boxes that are not part of this fleet - a real feature, not a small
-// addition, and out of scope for a first version of panel-driven
-// provisioning. The same tradeoff most infra-automation tools (Ansible,
-// Terraform's ssh provisioner) make by default.
+// Host keys use trust on first use: the first key is recorded in the shared
+// known_hosts file, and later connections fail if the key changes. This
+// prevents credentials from being sent to an untrusted replacement host
+// after the initial connection.
 package sshexec
 
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"golang.org/x/crypto/ssh/knownhosts"
+	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -50,7 +52,7 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 	sshCfg := &ssh.ClientConfig{
 		User:            cfg.User,
 		Auth:            []ssh.AuthMethod{ssh.Password(cfg.Password)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: verifyHostKey,
 		Timeout:         dialTimeout,
 		// The default list leads with the post-quantum hybrid, whose key
 		// exchange packet is far larger than the classic ones. On several
@@ -65,24 +67,28 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 	}
 	addr := cfg.Host + ":" + strconv.Itoa(int(port))
 
-	type result struct {
-		conn *ssh.Client
-		err  error
+	raw, err := (&net.Dialer{Timeout: dialTimeout}).DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
 	}
-	ch := make(chan result, 1)
-	go func() {
-		conn, err := ssh.Dial("tcp", addr, sshCfg)
-		ch <- result{conn, err}
-	}()
-	select {
-	case <-ctx.Done():
+	stop := context.AfterFunc(ctx, func() { raw.Close() })
+	defer stop()
+	deadline := time.Now().Add(dialTimeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	_ = raw.SetDeadline(deadline)
+	conn, channels, requests, err := ssh.NewClientConn(raw, addr, sshCfg)
+	if err != nil {
+		raw.Close()
+		return nil, fmt.Errorf("sshexec: SSH authentication/host verification failed: %w", err)
+	}
+	if !stop() && ctx.Err() != nil {
+		conn.Close()
 		return nil, ctx.Err()
-	case r := <-ch:
-		if r.err != nil {
-			return nil, fmt.Errorf("sshexec: dial %s: %w", addr, r.err)
-		}
-		return &Client{conn: r.conn}, nil
 	}
+	_ = raw.SetDeadline(time.Time{})
+	return &Client{conn: ssh.NewClient(conn, channels, requests)}, nil
 }
 
 func (c *Client) Close() error { return c.conn.Close() }
@@ -197,6 +203,9 @@ func (c *Client) WriteFile(ctx context.Context, remotePath string, content []byt
 // this and write the file" path needs one.
 func buildWriteFileScript(remotePath string, content []byte, mode string) string {
 	marker := "SSHEXEC_EOF_8f2a1c"
+	for strings.Contains("\n"+string(content)+"\n", "\n"+marker+"\n") {
+		marker += "_X"
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "cat > %s <<'%s'\n", shellQuote(remotePath), marker)
 	b.Write(content)
@@ -209,4 +218,49 @@ func buildWriteFileScript(remotePath string, content []byte, mode string) string
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+var hostKeysMu sync.Mutex
+
+func verifyHostKey(host string, remote net.Addr, key ssh.PublicKey) error {
+	hostKeysMu.Lock()
+	defer hostKeysMu.Unlock()
+	path := os.Getenv("SSH_KNOWN_HOSTS_FILE")
+	if path == "" {
+		base, err := os.UserConfigDir()
+		if err != nil {
+			return err
+		}
+		path = filepath.Join(base, "rapido-go", "known_hosts")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return err
+	}
+	f.Close()
+	callback, err := knownhosts.New(path)
+	if err != nil {
+		return err
+	}
+	err = callback(host, remote, key)
+	if err == nil {
+		return nil
+	}
+	var mismatch *knownhosts.KeyError
+	if !errors.As(err, &mismatch) || len(mismatch.Want) > 0 {
+		return err
+	}
+	f, err = os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = fmt.Fprintln(f, knownhosts.Line([]string{knownhosts.Normalize(host)}, key))
+	if err == nil {
+		err = f.Sync()
+	}
+	return err
 }

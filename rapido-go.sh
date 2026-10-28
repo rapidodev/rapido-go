@@ -1019,7 +1019,12 @@ render_caddyfile() {
     cat <<EOF
 ${panel_hosts} {
 	encode zstd gzip
-	reverse_proxy panel:8000
+	handle /api/internal/node-report {
+		reverse_proxy backend:8000
+	}
+	handle {
+		reverse_proxy panel:8000
+	}
 }
 EOF
     if [ -n "$RAPIDO_SUB_DOMAIN" ]; then
@@ -1077,6 +1082,10 @@ RAPIDO_SUB_DOMAIN="${RAPIDO_SUB_DOMAIN}"
 
 # ── database ────────────────────────────────────────────────────────────────
 POSTGRES_PASSWORD="${db_pass}"
+# The API pool shares this server-wide connection budget with backend.
+POSTGRES_MAX_CONNECTIONS="200"
+# Set this to the number of panel API containers when scaling the service.
+PANEL_API_REPLICAS="1"
 # Sized from this machine's RAM at install time (about 25% and 60%).
 POSTGRES_SHARED_BUFFERS="${sb}"
 POSTGRES_EFFECTIVE_CACHE_SIZE="${ecs}"
@@ -1100,7 +1109,7 @@ XRAY_SUBSCRIPTION_URL_PREFIXES="${SUB_PREFIXES}"
 PUBLIC_IP="${ip}"
 
 # ── CORS ────────────────────────────────────────────────────────────────────
-ALLOWED_ORIGINS="*"
+ALLOWED_ORIGINS="https://${RAPIDO_DOMAIN}${RAPIDO_EXTRA_DOMAINS:+,https://${RAPIDO_EXTRA_DOMAINS//,/,https://}}"
 
 # ── optional ────────────────────────────────────────────────────────────────
 # Days of usage history to keep (the compose default is 90).
@@ -1449,6 +1458,14 @@ cmd_update() {
     require_root
     require_installed
     ensure_docker
+    log "Backing up before modifying the installation..."
+    cmd_backup
+    local archive="$DATA_DIR/install-$(date +%Y%m%d-%H%M%S).tar.gz" optional
+    local backup_files=(.env "$(compose_file)")
+    for optional in rapido-go.sh Caddyfile; do
+        if [ -f "$APP_DIR/$optional" ]; then backup_files+=("$optional"); fi
+    done
+    (umask 077; tar czf "$archive" -C "$APP_DIR" "${backup_files[@]}")
     resolve_repo_access lenient
     local before_sum after_sum before_fp
     before_sum="$(file_sum "$APP_DIR/$(compose_file)")"
@@ -1463,16 +1480,6 @@ cmd_update() {
     if ! update_needed "$before_fp"; then
         ok "Already up to date ($(installed_version_label))."
         return 0
-    fi
-    # Nothing has been recreated yet: the pull above only downloaded images.
-    # The backup still comes before the stack changes, and a failed backup
-    # stops the update (cmd_backup exits) - set RAPIDO_SKIP_BACKUP=1 to
-    # override on a box whose database is already broken.
-    if [ "${RAPIDO_SKIP_BACKUP:-0}" = "1" ]; then
-        warn "RAPIDO_SKIP_BACKUP=1 - skipping the pre-update backup."
-    else
-        log "Backing up the database first..."
-        cmd_backup
     fi
     log "Applying the update..."
     compose up -d  # re-applies migrations via the migrate service, then recreates whatever image tag or config changed

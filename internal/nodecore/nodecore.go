@@ -2,9 +2,10 @@ package nodecore
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
-	box "github.com/sagernet/sing-box"
+	box "github.com/legendary1205/rapido-go/internal/nodecore/box"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/auth"
 
@@ -12,8 +13,8 @@ import (
 	forkedhysteria "github.com/legendary1205/rapido-go/internal/nodecore/hysteria"
 	forkedhysteria2 "github.com/legendary1205/rapido-go/internal/nodecore/hysteria2"
 	forkednaive "github.com/legendary1205/rapido-go/internal/nodecore/naive"
-	forkedshadowtls "github.com/legendary1205/rapido-go/internal/nodecore/shadowtls"
 	forkedshadowsocks "github.com/legendary1205/rapido-go/internal/nodecore/shadowsocks"
+	forkedshadowtls "github.com/legendary1205/rapido-go/internal/nodecore/shadowtls"
 	forkedsnell "github.com/legendary1205/rapido-go/internal/nodecore/snell"
 	"github.com/legendary1205/rapido-go/internal/nodecore/traffic"
 	forkedtrojan "github.com/legendary1205/rapido-go/internal/nodecore/trojan"
@@ -46,6 +47,19 @@ func New(ctx context.Context, opts option.Options, mgr *traffic.Manager) (*Node,
 	conns := traffic.NewConnGroup()
 	ctx = traffic.WithConnGroup(traffic.NewContext(ctx, mgr), conns)
 	ctx = box.Context(ctx, InboundRegistry(), OutboundRegistry(), EndpointRegistry(), DNSTransportRegistry(), ServiceRegistry(), CertificateProviderRegistry())
+	for _, in := range opts.Inbounds {
+		raw, err := json.Marshal(in.Options)
+		if err != nil {
+			return nil, err
+		}
+		var options struct {
+			Users []json.RawMessage `json:"users"`
+		}
+		if err := json.Unmarshal(raw, &options); err != nil {
+			return nil, err
+		}
+		traffic.SetUserPolicy(conns, in.Tag, options.Users)
+	}
 	instance, err := box.New(box.Options{
 		Context: ctx,
 		Options: opts,
@@ -167,6 +181,14 @@ func runningInbound[T any](n *Node, tag, protocol string) (T, error) {
 	return in, nil
 }
 
+func (n *Node) InboundProtocol(tag string) (string, error) {
+	in, ok := n.box.Inbound().Get(tag)
+	if !ok {
+		return "", fmt.Errorf("no running inbound tagged %q", tag)
+	}
+	return in.Type(), nil
+}
+
 // UpdateVLESSUsers is UpdateUsers for a VLESS inbound - the entire reason
 // internal/nodecore/vless exists. Returns an error if no VLESS inbound with
 // that tag is currently running.
@@ -185,7 +207,8 @@ func (n *Node) UpdateVMessUsers(tag string, users []option.VMessUser) error {
 	if err != nil {
 		return err
 	}
-	return in.UpdateUsers(users)
+	err = in.UpdateUsers(users)
+	return err
 }
 
 // UpdateTrojanUsers is UpdateUsers for a Trojan inbound. It fails, changing
@@ -195,7 +218,8 @@ func (n *Node) UpdateTrojanUsers(tag string, users []option.TrojanUser) error {
 	if err != nil {
 		return err
 	}
-	return in.UpdateUsers(users)
+	err = in.UpdateUsers(users)
+	return err
 }
 
 // UpdateShadowsocksUsers is UpdateUsers for a Shadowsocks inbound. The cipher
@@ -205,7 +229,8 @@ func (n *Node) UpdateShadowsocksUsers(tag string, users []option.ShadowsocksUser
 	if err != nil {
 		return err
 	}
-	return in.UpdateUsers(users)
+	err = in.UpdateUsers(users)
+	return err
 }
 
 // UpdateHysteria2Users is UpdateUsers for a Hysteria2 inbound.
@@ -265,7 +290,8 @@ func (n *Node) UpdateTUICUsers(tag string, users []option.TUICUser) error {
 	if err != nil {
 		return err
 	}
-	return in.UpdateUsers(users)
+	err = in.UpdateUsers(users)
+	return err
 }
 
 // UpdateSnellUsers is UpdateUsers for a Snell inbound. It fails, changing
@@ -275,7 +301,8 @@ func (n *Node) UpdateSnellUsers(tag string, users []option.SnellUser) error {
 	if err != nil {
 		return err
 	}
-	return in.UpdateUsers(users)
+	err = in.UpdateUsers(users)
+	return err
 }
 
 // UpdateAnyTLSUsers is UpdateUsers for an AnyTLS inbound.

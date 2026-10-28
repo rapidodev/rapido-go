@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -15,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/legendary1205/rapido-go/internal/certs"
+	"github.com/legendary1205/rapido-go/internal/controlurl"
 	"github.com/legendary1205/rapido-go/internal/db/generated"
 )
 
@@ -104,6 +106,10 @@ type nodeSetupBlob struct {
 // node needs to bootstrap itself - see cmd/node/main.go's NODE_SETUP_BLOB
 // consumer, the other half of this pair.
 func buildNodeSetupBlob(cert, key, ca, secret, panelURL string) (string, error) {
+	panelURL, err := controlurl.Normalize(panelURL)
+	if err != nil {
+		return "", err
+	}
 	raw, err := json.Marshal(nodeSetupBlob{Cert: cert, Key: key, CA: ca, Secret: secret, PanelURL: panelURL})
 	if err != nil {
 		return "", err
@@ -194,6 +200,12 @@ func (h *Handler) handleCreateNode(c *gin.Context) {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": err.Error()})
 		return
 	}
+	panelURL, err := controlurl.Normalize(req.PanelURL)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": err.Error()})
+		return
+	}
+	req.PanelURL = panelURL
 	usageCoefficient := 1.0
 	if req.UsageCoefficient != nil {
 		usageCoefficient = *req.UsageCoefficient
@@ -205,6 +217,10 @@ func (h *Handler) handleCreateNode(c *gin.Context) {
 		req.APIPort = defaultNodeAPIPort
 	}
 
+	if req.Port < 1 || req.Port > 65535 || req.APIPort < 1 || req.APIPort > 65535 || usageCoefficient <= 0 || usageCoefficient > 1000000 || math.IsNaN(usageCoefficient) || math.IsInf(usageCoefficient, 0) {
+		c.JSON(422, gin.H{"detail": "ports must be 1-65535 and usage_coefficient must be positive and at most 1000000"})
+		return
+	}
 	capacity, msg := req.Capacity.column()
 	if msg != "" {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": msg})
@@ -349,6 +365,10 @@ func (h *Handler) handleUpdateNode(c *gin.Context) {
 		return
 	}
 
+	if req.Port != nil && (*req.Port < 1 || *req.Port > 65535) || req.APIPort != nil && (*req.APIPort < 1 || *req.APIPort > 65535) || req.UsageCoefficient != nil && (*req.UsageCoefficient <= 0 || *req.UsageCoefficient > 1000000 || math.IsNaN(*req.UsageCoefficient) || math.IsInf(*req.UsageCoefficient, 0)) {
+		c.JSON(422, gin.H{"detail": "invalid port or usage_coefficient"})
+		return
+	}
 	ctx := c.Request.Context()
 	if req.onlyCapacity() {
 		// Its own statement: UpdateNode names the profile columns in its SET

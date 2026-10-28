@@ -2,7 +2,10 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"github.com/legendary1205/rapido-go/internal/delivery"
+	"github.com/legendary1205/rapido-go/internal/integrationsettings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -35,14 +38,14 @@ type Store struct {
 }
 
 func NewStore(pool *pgxpool.Pool, cacheClient *cache.Client) *Store {
-	return &Store{Pool: pool, Queries: generated.New(pool), Cache: cacheClient}
+	return &Store{Pool: pool, Queries: generated.New(requestDB{pool: pool}), Cache: cacheClient}
 }
 
 // ResolveAdmin implements auth.Resolver against the real admins table -
 // cached, since this runs on nearly every authenticated request (see
 // RequireAdmin/RequireSudo).
 func (s *Store) ResolveAdmin(ctx context.Context, username string) (adminID int32, isSudo bool, isOwner bool, passwordResetAt *time.Time, found bool, err error) {
-	admin, err := s.CachedGetAdminByUsername(ctx, username)
+	admin, err := s.Queries.GetAdminByUsername(ctx, username)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, false, false, nil, false, nil
@@ -153,4 +156,27 @@ func (s *Store) InvalidateNodeConfigPayload(ctx context.Context) error {
 		err = delErr
 	}
 	return err
+}
+
+func (s *Store) EnqueueDelivery(ctx context.Context, kind, destination string, payload delivery.Payload) error {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return s.Queries.EnqueueDelivery(ctx, generated.EnqueueDeliveryParams{Kind: kind, Destination: destination, Payload: raw})
+}
+
+func (s *Store) TransactionalQueries() *generated.Queries { return s.Queries }
+
+func (s *Store) EnqueueWebhook(ctx context.Context, values integrationsettings.Values, event string, data any) error {
+	raw, err := json.Marshal(map[string]any{"event": event, "data": data, "timestamp": time.Now().UTC()})
+	if err != nil {
+		return err
+	}
+	for _, destination := range values.WebhookAddresses {
+		if err := s.EnqueueDelivery(ctx, "notification", destination, delivery.Payload{Body: raw, Headers: map[string]string{"X-Webhook-Secret": values.WebhookSecret}}); err != nil {
+			return err
+		}
+	}
+	return nil
 }

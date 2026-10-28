@@ -149,7 +149,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 // package's own doc comment.
 func (h *Inbound) UpdateUsers(users []option.HysteriaUser) {
 	h.service.UpdateUsers(
-		userkey.Build(common.Map(users, func(it option.HysteriaUser) string { return it.Name })),
+		userkey.BuildOptions(users),
 		common.Map(users, func(it option.HysteriaUser) string {
 			if it.AuthString != "" {
 				return it.AuthString
@@ -157,6 +157,7 @@ func (h *Inbound) UpdateUsers(users []option.HysteriaUser) {
 			return string(it.Auth)
 		}),
 	)
+	traffic.SetUserPolicy(h.conns, h.Tag(), users)
 }
 
 func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
@@ -184,7 +185,7 @@ func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
 		onClose = h.trafficMgr.TrackClose(user, conn, h.listener.ListenOptions().ListenPort, onClose)
 		conn = traffic.WrapConn(conn, user, h.trafficMgr)
 	}
-	onClose = h.conns.Track(conn, onClose)
+	onClose = h.conns.TrackAuthenticated(h.Tag(), user, key.Fingerprint, conn, onClose)
 	h.router.RouteConnectionEx(ctx, conn, metadata, onClose)
 }
 
@@ -209,7 +210,7 @@ func (h *Inbound) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 		metadata.User = key.Name
 	}
 	h.logger.InfoContext(ctx, "[", user, "] inbound packet connection to ", metadata.Destination)
-	onClose = h.conns.Track(conn, onClose)
+	onClose = h.conns.TrackAuthenticated(h.Tag(), user, key.Fingerprint, conn, onClose)
 	if h.trafficMgr != nil {
 		conn = traffic.WrapPacketConn(conn, user, h.trafficMgr)
 	}

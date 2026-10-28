@@ -26,6 +26,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"sync/atomic"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
@@ -63,7 +64,7 @@ type Inbound struct {
 	router     adapter.ConnectionRouterEx
 	logger     logger.ContextLogger
 	listener   *listener.Listener
-	service    *vless.Service[*userkey.Key]
+	service    atomic.Pointer[vless.Service[*userkey.Key]]
 	tlsConfig  tls.ServerConfig
 	transport  adapter.V2RayServerTransport
 	references []string
@@ -85,7 +86,6 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	if err != nil {
 		return nil, err
 	}
-	inbound.service = vless.NewService[*userkey.Key](logger, adapter.NewUpstreamContextHandler(inbound.newConnectionEx, inbound.newPacketConnectionEx))
 	inbound.UpdateUsers(options.Users)
 	if options.TLS != nil {
 		inbound.tlsConfig, err = tls.NewServerWithOptions(tls.ServerOptions{
@@ -130,11 +130,14 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 // Users are keyed by userkey.Key rather than upstream's index into the option
 // slice; see that package for why.
 func (h *Inbound) UpdateUsers(users []option.VLESSUser) {
-	h.service.UpdateUsers(
-		userkey.Build(common.Map(users, func(it option.VLESSUser) string { return it.Name })),
+	service := vless.NewService[*userkey.Key](h.logger, adapter.NewUpstreamContextHandler(h.newConnectionEx, h.newPacketConnectionEx))
+	service.UpdateUsers(
+		userkey.BuildOptions(users),
 		common.Map(users, func(it option.VLESSUser) string { return it.UUID }),
 		common.Map(users, func(it option.VLESSUser) string { return it.Flow }),
 	)
+	traffic.SetUserPolicy(h.conns, h.Tag(), users)
+	h.service.Store(service)
 }
 
 func (h *Inbound) Start(stage adapter.StartStage) error {
@@ -179,7 +182,6 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 
 func (h *Inbound) Close() error {
 	return common.Close(
-		h.service,
 		h.listener,
 		h.tlsConfig,
 		h.transport,
@@ -196,7 +198,7 @@ func (h *Inbound) NewConnection(ctx context.Context, conn net.Conn, metadata ada
 		}
 		conn = tlsConn
 	}
-	err := h.service.NewConnection(adapter.WithContext(ctx, &metadata), conn, metadata.Source, onClose)
+	err := h.service.Load().NewConnection(adapter.WithContext(ctx, &metadata), conn, metadata.Source, onClose)
 	if err != nil {
 		N.CloseOnHandshakeFailure(conn, onClose, err)
 		h.logger.ErrorContext(ctx, E.Cause(err, "process connection from ", metadata.Source))
@@ -219,7 +221,7 @@ func (h *Inbound) newConnectionEx(ctx context.Context, conn net.Conn, metadata a
 	// Closing the core closes every connection it accepted: the router only
 	// drops the ones it is relaying, and a multiplexed session's carrier is not
 	// one of those. See traffic.ConnGroup.
-	onClose = h.conns.Track(conn, onClose)
+	onClose = h.conns.TrackAuthenticated(h.Tag(), user, key.Fingerprint, conn, onClose)
 	if h.trafficMgr != nil {
 		// Presence: the user is known, so this connection is now open. The router
 		// calls onClose for every way it can end, including a refused route.
@@ -248,7 +250,7 @@ func (h *Inbound) newPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 	} else {
 		h.logger.InfoContext(ctx, "[", user, "] inbound packet connection to ", metadata.Destination)
 	}
-	onClose = h.conns.Track(conn, onClose)
+	onClose = h.conns.TrackAuthenticated(h.Tag(), user, key.Fingerprint, conn, onClose)
 	if h.trafficMgr != nil {
 		conn = traffic.WrapPacketConn(conn, user, h.trafficMgr)
 	}

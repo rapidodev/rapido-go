@@ -1,0 +1,1 @@
+VMess wire service copied from github.com/sagernet/sing-vmess v0.2.8-0.20250909125414-3aed155119a1. Preserve the upstream license. Local change: synchronize user-state publication and legacy-key generation, and snapshot immutable maps before parsing a handshake. Replay protection persists across hot updates. Re-diff on dependency upgrades.

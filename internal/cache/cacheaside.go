@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/legendary1205/rapido-go/internal/txscope"
 	"time"
 )
 
@@ -19,6 +20,9 @@ import (
 // specific error (errors.Is(err, pgx.ErrNoRows)) keep working with no
 // change to their own logic.
 func GetOrSet[T any](ctx context.Context, c *Client, key string, ttl time.Duration, fetch func(context.Context) (T, error)) (T, error) {
+	if txscope.Tx(ctx) != nil {
+		return fetch(ctx)
+	}
 	var zero T
 	if raw, err := c.Get(ctx, key); err == nil {
 		var v T
@@ -54,6 +58,9 @@ func GetOrSet[T any](ctx context.Context, c *Client, key string, ttl time.Durati
 // errors degrade to an uncached fetch rather than failing the request, and
 // fetch's own error propagates unchanged and is never cached.
 func GetOrSetString(ctx context.Context, c *Client, key string, ttl time.Duration, fetch func(context.Context) (string, error)) (string, error) {
+	if txscope.Tx(ctx) != nil {
+		return fetch(ctx)
+	}
 	if raw, err := c.Get(ctx, key); err == nil {
 		return raw, nil
 	} else if !errors.Is(err, ErrNil) {

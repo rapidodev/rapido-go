@@ -68,7 +68,7 @@ func (h *Handler) buildRapidoData(ctx context.Context, user generated.User) (rap
 		s := user.OnlineAt.Time.UTC().Format(time.RFC3339)
 		data.OnlineAt = &s
 	}
-	data.SubURL = h.subURLPrefix + "/sub/" + subscription.CreateToken(user.Username, h.jwtSecret)
+	data.SubURL = h.subURLPrefix + "/sub/" + subscription.CreateToken(user.Username, h.signingSecret())
 	return data, nil
 }
 

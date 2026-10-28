@@ -115,10 +115,9 @@ WHERE (sqlc.narg('admin_id')::int IS NULL OR admin_id = sqlc.narg('admin_id')::i
     -- one- or two-letter query does not match half the proxies table.
     OR (
       length(sqlc.narg('search')::text) >= 4
-      AND EXISTS (
-        SELECT 1 FROM proxies p
-        WHERE p.user_id = users.id
-          AND (
+      AND users.id IN (
+        SELECT p.user_id FROM proxies p
+        WHERE (
             replace(lower(p.settings->>'id'), '-', '') LIKE '%' || replace(lower(sqlc.narg('search')::text), '-', '') || '%'
             OR p.settings->>'password' ILIKE '%' || sqlc.narg('search')::text || '%'
           )
@@ -152,10 +151,9 @@ WHERE (sqlc.narg('admin_id')::int IS NULL OR admin_id = sqlc.narg('admin_id')::i
     OR username = sqlc.narg('search_username')::text
     OR (
       length(sqlc.narg('search')::text) >= 4
-      AND EXISTS (
-        SELECT 1 FROM proxies p
-        WHERE p.user_id = users.id
-          AND (
+      AND users.id IN (
+        SELECT p.user_id FROM proxies p
+        WHERE (
             replace(lower(p.settings->>'id'), '-', '') LIKE '%' || replace(lower(sqlc.narg('search')::text), '-', '') || '%'
             OR p.settings->>'password' ILIKE '%' || sqlc.narg('search')::text || '%'
           )

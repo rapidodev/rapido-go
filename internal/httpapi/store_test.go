@@ -295,7 +295,7 @@ func TestDisableActiveUsersByAdminIDOnlyTouchesThatAdminsActiveAndOnHoldUsers(t 
 	assertStatus(onHold.ID, statusDisabled)
 	assertStatus(alreadyDisabled.ID, statusDisabled) // unchanged, still disabled
 	assertStatus(expired.ID, "expired")              // untouched - not active/on_hold
-	assertStatus(otherAdminsActive.ID, statusActive)  // untouched - different admin
+	assertStatus(otherAdminsActive.ID, statusActive) // untouched - different admin
 }
 
 func TestActivateDisabledUsersByAdminIDOnlyTouchesThatAdminsDisabledUsers(t *testing.T) {

@@ -14,6 +14,8 @@ on:
   workflow_dispatch: {}
 
 jobs:
+  validate:
+    uses: ./.github/workflows/validate.yml
   installer-scripts:
     # The installer is shipped by curl, not by the image, so nothing else in
     # this pipeline would ever catch a break in it. See scripts/installer_test.sh
@@ -49,6 +51,7 @@ jobs:
           docker run --rm -v "$PWD/Caddyfile.example:/etc/caddy/Caddyfile:ro" caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile
 
   build-panel:
+    needs: [validate, installer-scripts]
     runs-on: ubuntu-latest
     permissions:
       contents: read

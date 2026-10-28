@@ -107,7 +107,9 @@ func (s *Sender) send(ctx context.Context, cfg Config, chatID int64, text string
 	req.Header.Set("Content-Type", "application/json")
 
 	client := s.httpClient
-	if cfg.ProxyURL != "" {
+	if _, queued := s.httpClient.Transport.(interface{ QueuedDelivery() }); queued {
+		req.Header.Set("X-Rapido-Delivery-Proxy", cfg.ProxyURL)
+	} else if cfg.ProxyURL != "" {
 		// A one-off client wrapping a proxying transport for this call only -
 		// this is not a hot path (one notification event, not one per
 		// request), so rebuilding a client here rather than caching a

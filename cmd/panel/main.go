@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"runtime"
 	"strconv"
@@ -31,6 +32,7 @@ import (
 	"github.com/legendary1205/rapido-go/internal/certs"
 	"github.com/legendary1205/rapido-go/internal/config"
 	"github.com/legendary1205/rapido-go/internal/db/generated"
+	"github.com/legendary1205/rapido-go/internal/delivery"
 	"github.com/legendary1205/rapido-go/internal/digestjob"
 	"github.com/legendary1205/rapido-go/internal/discord"
 	"github.com/legendary1205/rapido-go/internal/gatewayjob"
@@ -48,6 +50,7 @@ import (
 	"github.com/legendary1205/rapido-go/internal/tunneldiscover"
 	"github.com/legendary1205/rapido-go/internal/tunnelmetrics"
 	"github.com/legendary1205/rapido-go/internal/tunnelwatch"
+	"github.com/legendary1205/rapido-go/internal/txscope"
 	"github.com/legendary1205/rapido-go/internal/usagejob"
 )
 
@@ -81,7 +84,7 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	poolCfg.MaxConns = dbPoolMaxConns(cfg.Role)
+	poolCfg.MaxConns = dbPoolMaxConnsForDeployment(cfg.Role, cfg.DatabaseMaxConnections, cfg.APIReplicaCount)
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return err
@@ -91,6 +94,7 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 	logger.Info("connected to postgres")
+	ctx = txscope.WithPool(ctx, pool)
 
 	redisClient := cache.New(cfg.RedisAddr, cfg.RedisPass, cfg.RedisDB, logger)
 	defer redisClient.Close()
@@ -121,6 +125,7 @@ func run(logger *slog.Logger) error {
 	}
 
 	store := httpapi.NewStore(pool, redisClient)
+	queries = store.TransactionalQueries()
 
 	envDefaults := integrationsettings.Values{
 		ResellerApiSecret: cfg.ResellerApiSecret, ResellerApiUrl: cfg.ResellerApiUrl, ResellerApiLicense: cfg.ResellerApiLicense,
@@ -136,7 +141,7 @@ func run(logger *slog.Logger) error {
 		}
 		return integrationsettings.Resolve(row, envDefaults), nil
 	}
-	notifyHTTPClient := &http.Client{Timeout: 10 * time.Second}
+	notifyHTTPClient := &http.Client{Timeout: 10 * time.Second, Transport: delivery.Transport{Enqueue: store.EnqueueDelivery}}
 	dispatcher := report.New(report.NotifyFlags{
 		StatusChange: cfg.NotifyStatusChange, UserCreated: cfg.NotifyUserCreated, UserUpdated: cfg.NotifyUserUpdated,
 		UserDeleted: cfg.NotifyUserDeleted, UserDataUsedReset: cfg.NotifyUserDataUsedReset,
@@ -148,15 +153,16 @@ func run(logger *slog.Logger) error {
 	// The Telegram admin console runs only in the backend singleton; it is
 	// handed the router below once that exists (SetAPI).
 	var telegramConsole *telegrambot.Console
+	var usageReporter *resellerapi.Client
 	if cfg.Role == config.RoleBackend {
 		// Its own client: see internal/resellerusagejob for why a usage
 		// report must not share the 3s timeout of the per-request lookups.
-		usageReporter := resellerapi.NewClient(&http.Client{Timeout: 30 * time.Second})
+		usageReporter = resellerapi.NewClient(&http.Client{Timeout: 30 * time.Second})
 		telegramConsole = telegrambot.New(telegrambot.Deps{
 			Queries: queries, Cache: redisClient, Issuer: issuer, SudoUsername: cfg.SudoUsername,
 			Settings: settingsFn, Logger: logger,
 		})
-		go runAsBackendSingleton(ctx, cfg.DatabaseURL, queries, dispatcher, hostMetricsTracker, redisClient, usageReporter, settingsFn, cfg.UsageRetentionDays, cfg.AdminDigestHourUTC, telegramConsole.Run, logger)
+
 	}
 
 	formatFlags := httpapi.SubscriptionFormatFlags{
@@ -171,6 +177,21 @@ func run(logger *slog.Logger) error {
 		envDefaults, dispatcher, resellerAPIClient, cfg.LoginNotifyWhitelist, hostMetricsTracker,
 		cfg.DatabaseURL, cfg.BackupDir, cfg.BackupKeep, logger).WithSubscriptionURLPrefixes(cfg.SubscriptionURLPrefixes).WithNodeBinDir(cfg.NodeBinDir).
 		WithConfigLoad(cfg.ConfigLoadIndicator, cfg.ConfigLoadCapacity, cfg.ConfigSortByLoad)
+	handler.WithSigningKeyLoader(func(ctx context.Context) ([]byte, error) {
+		row, err := queries.GetJWTSecret(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return hex.DecodeString(row.SecretKey)
+	})
+	handler.WithAfterRestore(func(ctx context.Context) error {
+		return exec.CommandContext(ctx, "goose", "-dir", "internal/db/migrations", "postgres", cfg.DatabaseURL, "up").Run()
+	})
+	dispatcher.SetWebhookSink(store.EnqueueWebhook)
+	dispatcher.OnUserChanged(handler.SyncUserByName)
+	if cfg.Role == config.RoleBackend {
+		go runAsBackendSingleton(ctx, cfg.DatabaseURL, queries, dispatcher, hostMetricsTracker, redisClient, usageReporter, settingsFn, cfg.UsageRetentionDays, cfg.AdminDigestHourUTC, telegramConsole.Run, logger)
+	}
 	router := httpapi.NewRouter(handler, logger, cfg.AllowedOrigins)
 	httpapi.MountDashboardStatic(router, cfg.DashboardDir)
 	if telegramConsole != nil {
@@ -181,6 +202,9 @@ func run(logger *slog.Logger) error {
 		Addr:              cfg.HTTPHost + ":" + strconv.Itoa(cfg.HTTPPort),
 		Handler:           router,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       2 * time.Minute,
+		WriteTimeout:      11 * time.Minute,
+		IdleTimeout:       time.Minute,
 	}
 
 	go func() {
@@ -245,7 +269,33 @@ func runAsBackendSingleton(ctx context.Context, databaseURL string, queries *gen
 			continue
 		}
 
+		jobsCtx, cancelJobs := context.WithCancel(ctx)
+		monitorDone := make(chan struct{})
+		go func() {
+			defer close(monitorDone)
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-jobsCtx.Done():
+					return
+				case <-ticker.C:
+					check, cancel := context.WithTimeout(jobsCtx, 2*time.Second)
+					err := conn.Ping(check)
+					cancel()
+					if err != nil {
+						logger.Error("lost singleton connection; stopping every backend job", "error", err)
+						cancelJobs()
+						return
+					}
+				}
+			}
+		}()
+		ctx = jobsCtx
+		defer cancelJobs()
 		logger.Info("backend singleton: acquired advisory lock, running background jobs")
+		go delivery.Run(ctx, txscope.Pool(ctx), logger)
+		go reviewjob.PeriodicPolicies(ctx, queries, dispatcher, logger)
 		// Both run only here, not on every stateless API replica - a node's
 		// push report and the panel's own self-sample must each be observed
 		// by exactly one PreviousTracker for their rate/percent math to be
@@ -370,6 +420,8 @@ func runAsBackendSingleton(ctx context.Context, databaseURL string, queries *gen
 
 		// reviewjob.Run only returns once ctx is canceled (process shutdown) -
 		// release the lock and let the deferred loop exit via ctx.Done() above.
+		cancelJobs()
+		<-monitorDone
 		conn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", cache.AdvisoryLockBackendSingleton)
 		conn.Close(context.Background())
 		return
@@ -403,6 +455,26 @@ func dbPoolMaxConns(role config.Role) int32 {
 	}
 }
 
+// dbPoolMaxConnsForDeployment limits an API replica to its share of the
+// configured PostgreSQL connection budget. PostgreSQL's max_connections is
+// server-wide, while pgxpool.MaxConns is per process; without this division,
+// four API replicas each sized at 50 can consume all 200 connections before
+// the backend, migrations, or operators connect.
+func dbPoolMaxConnsForDeployment(role config.Role, databaseMaxConnections, apiReplicas int) int32 {
+	if role == config.RoleBackend {
+		return dbPoolMaxConns(role)
+	}
+	if databaseMaxConnections <= 30 || apiReplicas < 1 {
+		return 1
+	}
+	perReplica := int32((databaseMaxConnections - 10 - 20) / apiReplicas)
+	desired := dbPoolMaxConns(role)
+	if desired > perReplica {
+		return perReplica
+	}
+	return desired
+}
+
 // ensureJWTSecret returns the singleton jwt_secrets row's key, generating
 // and persisting one on first boot - equivalent to app/utils/jwt.py's
 // get_secret_key, which lazily creates the "jwt" table's one row the same
@@ -433,10 +505,11 @@ func ensureJWTSecret(ctx context.Context, q *generated.Queries) ([]byte, error) 
 		return nil, err
 	}
 	secretHex := hex.EncodeToString(raw)
-	if _, err := q.CreateJWTSecret(ctx, secretHex); err != nil {
+	created, err := q.CreateJWTSecret(ctx, secretHex)
+	if err != nil {
 		return nil, err
 	}
-	return raw, nil
+	return hex.DecodeString(created.SecretKey)
 }
 
 // ensureTLS returns the singleton tls row, generating the Rapido-branded

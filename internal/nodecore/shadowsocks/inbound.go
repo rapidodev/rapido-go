@@ -126,14 +126,13 @@ func (h *Inbound) UpdateUsers(users []option.ShadowsocksUser) error {
 	if err != nil {
 		return err
 	}
-	err = service.UpdateUsersWithPasswords(userkey.Build(common.Map(users, func(user option.ShadowsocksUser) string {
-		return user.Name
-	})), common.Map(users, func(user option.ShadowsocksUser) string {
+	err = service.UpdateUsersWithPasswords(userkey.BuildOptions(users), common.Map(users, func(user option.ShadowsocksUser) string {
 		return user.Password
 	}))
 	if err != nil {
 		return err
 	}
+	traffic.SetUserPolicy(h.conns, h.Tag(), users)
 	h.service.Store(service)
 	return nil
 }
@@ -185,7 +184,7 @@ func (h *Inbound) newConnection(ctx context.Context, conn net.Conn, metadata ada
 	//nolint:staticcheck
 	metadata.InboundDetour = h.listener.ListenOptions().Detour
 	// Closing the core closes every connection it accepted; see traffic.ConnGroup.
-	defer h.conns.Hold(conn)()
+	defer h.conns.HoldAuthenticated(h.Tag(), user, key.Fingerprint, conn)()
 	if h.trafficMgr != nil {
 		// This inbound is on the legacy blocking handler interface: RouteConnection
 		// returns only once the connection is over (or refused), so the deferred
@@ -212,7 +211,7 @@ func (h *Inbound) newPacketConnection(ctx context.Context, conn N.PacketConn, me
 	metadata.InboundType = h.Type()
 	//nolint:staticcheck
 	metadata.InboundDetour = h.listener.ListenOptions().Detour
-	defer h.conns.Hold(conn)()
+	defer h.conns.HoldAuthenticated(h.Tag(), user, key.Fingerprint, conn)()
 	if h.trafficMgr != nil {
 		conn = traffic.WrapPacketConn(conn, user, h.trafficMgr)
 	}

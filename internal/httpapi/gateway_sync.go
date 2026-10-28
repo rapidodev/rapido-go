@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/legendary1205/rapido-go/internal/delivery"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -217,14 +219,19 @@ func (h *Handler) dispatchGatewayPush(ctx context.Context, payload gatewayclient
 		if !peer.Enabled {
 			continue
 		}
-		peer := peer
-		go func() {
-			callCtx, cancel := context.WithTimeout(context.Background(), gatewaySyncTimeout)
-			defer cancel()
-			if _, err := gatewayclient.SyncUser(callCtx, peer.BaseUrl, peer.Secret, payload); err != nil {
-				h.logger.Warn("gateway sync: peer rejected or was unreachable",
-					"peer", peer.Name, "user", payload.Username, "deleted", payload.Deleted, "error", err)
-			}
-		}()
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			h.logger.Error("encode gateway delivery", "error", err)
+			return
+		}
+		if err := h.store.EnqueueDelivery(ctx, "gateway", strings.TrimRight(peer.BaseUrl, "/")+"/api/internal/gateway/users/sync", delivery.Payload{Body: raw, OrderingKey: payload.Username, Headers: map[string]string{"Authorization": "Bearer " + peer.Secret}}); err != nil {
+			h.logger.Error("persist gateway delivery", "error", err)
+		}
+	}
+}
+
+func (h *Handler) SyncUserByName(ctx context.Context, name string) {
+	if user, err := h.store.Queries.GetUserByUsername(ctx, name); err == nil {
+		h.dispatchGatewayUserSync(ctx, user)
 	}
 }

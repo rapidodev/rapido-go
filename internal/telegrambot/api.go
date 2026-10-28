@@ -53,6 +53,9 @@ func (c *Console) call(ctx context.Context, who principal, method, path string, 
 		defer cancel()
 	}
 	token, err := c.d.Issuer.Issue(who.Username, who.IsSudo)
+	if who.IsSudo && who.Username == c.d.SudoUsername {
+		token, err = c.d.Issuer.IssueBootstrap(who.Username)
+	}
 	if err != nil {
 		return apiResult{}, err
 	}

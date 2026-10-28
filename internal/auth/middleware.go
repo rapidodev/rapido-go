@@ -111,7 +111,7 @@ func resolve(c *gin.Context, issuer *TokenIssuer, resolver Resolver, sudoUsernam
 	// trying to be.
 	c.Set(ContextAttemptedUsernameKey, claims.Username)
 
-	if claims.IsSudo() && sudoUsername != "" && claims.Username == sudoUsername {
+	if claims.Bootstrap && claims.IsSudo() && sudoUsername != "" && claims.Username == sudoUsername {
 		return &Identity{Username: claims.Username, IsSudo: true, IsOwner: true}, "", nil
 	}
 

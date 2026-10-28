@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"net/http"
@@ -66,7 +67,7 @@ func (h *Handler) requireGatewaySecret(c *gin.Context) {
 	}
 	secret := strings.TrimPrefix(header, prefix)
 	settings, err := h.ensureGatewaySettings(c.Request.Context())
-	if err != nil || secret == "" || secret != settings.Secret {
+	if err != nil || len(secret) != len(settings.Secret) || subtle.ConstantTimeCompare([]byte(secret), []byte(settings.Secret)) != 1 {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"detail": "Invalid gateway secret"})
 		return
 	}
@@ -199,12 +200,17 @@ func (h *Handler) handleCreateGatewayPeer(c *gin.Context) {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": err.Error()})
 		return
 	}
+	baseURL, err := gatewayclient.NormalizeBaseURL(req.BaseURL)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": err.Error()})
+		return
+	}
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
 	created, err := h.store.Queries.CreateGatewayPeer(c.Request.Context(), generated.CreateGatewayPeerParams{
-		Name: req.Name, BaseUrl: strings.TrimRight(req.BaseURL, "/"), Secret: req.Secret, Enabled: enabled,
+		Name: req.Name, BaseUrl: baseURL, Secret: req.Secret, Enabled: enabled,
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
@@ -224,12 +230,17 @@ func (h *Handler) handleUpdateGatewayPeer(c *gin.Context) {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": err.Error()})
 		return
 	}
+	baseURL, err := gatewayclient.NormalizeBaseURL(req.BaseURL)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": err.Error()})
+		return
+	}
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
 	updated, err := h.store.Queries.UpdateGatewayPeer(c.Request.Context(), generated.UpdateGatewayPeerParams{
-		ID: int32(id), Name: req.Name, BaseUrl: strings.TrimRight(req.BaseURL, "/"), Secret: req.Secret, Enabled: enabled,
+		ID: int32(id), Name: req.Name, BaseUrl: baseURL, Secret: req.Secret, Enabled: enabled,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

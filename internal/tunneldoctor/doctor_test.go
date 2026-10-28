@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -148,6 +149,7 @@ func TestParseFacts(t *testing.T) {
 }
 
 type fakeRunner struct {
+	mu      sync.Mutex
 	node    bool
 	closed  bool
 	failRun bool
@@ -155,7 +157,9 @@ type fakeRunner struct {
 }
 
 func (f *fakeRunner) Run(_ context.Context, cmd string) (string, error) {
+	f.mu.Lock()
 	f.cmds = append(f.cmds, cmd)
+	f.mu.Unlock()
 	if f.failRun {
 		return "", errors.New("session failed")
 	}

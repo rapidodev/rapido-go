@@ -237,10 +237,13 @@ func TestCreateInboundAutoGeneratesACertificateForATLSMandatoryProtocol(t *testi
 // (e.g. one for a public domain).
 func TestCreateInboundKeepsACallerSuppliedCertificate(t *testing.T) {
 	router, token := newTestRouter(t)
-	doRequest(t, router, "POST", "/api/inbounds", token, map[string]interface{}{
+	created := doRequest(t, router, "POST", "/api/inbounds", token, map[string]interface{}{
 		"tag": "hysteria2-owncert", "protocol": "hysteria2", "port": 20304,
 		"tls_certificate": testCertPEM, "tls_key": testKeyPEM,
 	})
+	if created.Code != 200 {
+		t.Fatalf("create inbound: %d %s", created.Code, created.Raw)
+	}
 	detail := doRequest(t, router, "GET", "/api/inbounds/detail", token, nil)
 	var rows []map[string]interface{}
 	json.Unmarshal(detail.Raw, &rows)

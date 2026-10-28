@@ -1150,5 +1150,10 @@
   "rapido.theme.importErrors": "The theme was not applied:",
   "rapido.theme.importOk": "Imported into the preview. Save it to keep it.",
   "rapido.theme.sample.card": "Sample card",
-  "rapido.theme.sample.cpu": "CPU"
+  "rapido.theme.sample.cpu": "CPU",
+  "rapido.snapshots.title": "Configuration snapshots",
+  "rapido.snapshots.preview": "Preview snapshot",
+  "rapido.snapshots.warning": "Restoring replaces core routing and outbound settings. Connections may be interrupted. The current configuration is saved first.",
+  "rapido.snapshots.restore": "Confirm restore",
+  "rapido.snapshots.failed": "Could not load or restore the snapshot."
 }

@@ -1,7 +1,13 @@
 package httpapi
 
 import (
+	"context"
+	"errors"
+	"github.com/google/uuid"
+	"github.com/legendary1205/rapido-go/internal/integrationsettings"
+	"math"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -47,8 +53,9 @@ type nodeReportUserUsage struct {
 }
 
 type nodeReportRequest struct {
-	Users []nodeReportUserUsage `json:"users"`
-	Host  hostmetrics.Sample    `json:"host"`
+	ReportID string                `json:"report_id"`
+	Users    []nodeReportUserUsage `json:"users"`
+	Host     hostmetrics.Sample    `json:"host"`
 }
 
 // handleNodeReport implements POST /api/internal/node-report - the
@@ -61,6 +68,7 @@ func (h *Handler) handleNodeReport(c *gin.Context) {
 	nodeID := c.MustGet(nodeIDContextKey).(int32)
 
 	var req nodeReportRequest
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 32<<20)
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": err.Error()})
 		return
@@ -68,103 +76,10 @@ func (h *Handler) handleNodeReport(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
-	if len(req.Users) > 0 {
-		usernames := make([]string, len(req.Users))
-		byUsername := make(map[string]nodeReportUserUsage, len(req.Users))
-		for i, u := range req.Users {
-			usernames[i] = u.Username
-			byUsername[u.Username] = u
-		}
-		rows, err := h.store.Queries.GetUsersByUsernames(ctx, usernames)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not resolve users"})
-			return
-		}
-
-		hourBucket := pgtype.Timestamptz{Time: time.Now().UTC().Truncate(time.Hour), Valid: true}
-		var nodeUplink, nodeDownlink int64
-		adminDeltas := make(map[int32]int64)
-
-		// Collect every user's delta first, then apply the whole batch in a
-		// handful of set-based statements instead of one round trip per user
-		// - a real node's report of a few hundred active users used to cost
-		// a few hundred sequential UPDATE/UPSERT calls each (confirmed via a
-		// 30k-user/10-node load test: ~7s per report, this loop being
-		// virtually the entire cost). See BulkIncrementUserUsage's own doc
-		// comment.
-		userIDs := make([]int32, 0, len(rows))
-		userDeltas := make([]int64, 0, len(rows))
-		for _, row := range rows {
-			usage, ok := byUsername[row.Username]
-			if !ok {
-				continue
-			}
-			delta := usage.Uplink + usage.Downlink
-			if delta <= 0 {
-				continue
-			}
-			userIDs = append(userIDs, row.ID)
-			userDeltas = append(userDeltas, delta)
-			if row.AdminID.Valid {
-				adminDeltas[row.AdminID.Int32] += delta
-			}
-			nodeUplink += usage.Uplink
-			nodeDownlink += usage.Downlink
-		}
-
-		if len(userIDs) > 0 {
-			if err := h.store.Queries.BulkIncrementUserUsage(ctx, generated.BulkIncrementUserUsageParams{
-				Ids: userIDs, Deltas: userDeltas,
-			}); err != nil {
-				h.logger.Error("node report: bulk increment user usage", "error", err)
-			}
-			if err := h.store.Queries.BulkUpsertNodeUserUsage(ctx, generated.BulkUpsertNodeUserUsageParams{
-				CreatedAt: hourBucket, NodeID: nodeID, UserIds: userIDs, Deltas: userDeltas,
-			}); err != nil {
-				h.logger.Error("node report: bulk upsert node_user_usage", "error", err)
-			}
-		}
-
-		if len(adminDeltas) > 0 {
-			adminIDs := make([]int32, 0, len(adminDeltas))
-			adminDeltaValues := make([]int64, 0, len(adminDeltas))
-			for adminID, delta := range adminDeltas {
-				adminIDs = append(adminIDs, adminID)
-				adminDeltaValues = append(adminDeltaValues, delta)
-			}
-			// Queued for the reseller bot's billing only while it is
-			// configured - see internal/resellerusagejob.
-			queueForResellerAPI := false
-			if settings, _, err := h.resolveIntegrationSettings(c); err != nil {
-				h.logger.Error("node report: resolve integration settings, usage not queued for the reseller API", "error", err)
-			} else {
-				queueForResellerAPI = resellerapi.Config{Secret: settings.ResellerApiSecret, URL: settings.ResellerApiUrl}.CanReportUsage()
-			}
-			if err := h.store.Queries.BulkIncrementAdminUsage(ctx, generated.BulkIncrementAdminUsageParams{
-				Ids: adminIDs, Deltas: adminDeltaValues, QueueForResellerApi: queueForResellerAPI,
-			}); err != nil {
-				h.logger.Error("node report: bulk increment admin usage", "error", err)
-			}
-		}
-
-		if nodeUplink > 0 || nodeDownlink > 0 {
-			if err := h.store.Queries.UpsertNodeUsage(ctx, generated.UpsertNodeUsageParams{
-				CreatedAt: hourBucket, NodeID: pgInt4FromInt(int(nodeID)),
-				Uplink: pgInt8FromInt64(nodeUplink), Downlink: pgInt8FromInt64(nodeDownlink),
-			}); err != nil {
-				h.logger.Error("node report: upsert node_usage", "error", err)
-			}
-			if err := h.store.Queries.IncrementNodeCumulative(ctx, generated.IncrementNodeCumulativeParams{
-				ID: nodeID, Uplink: pgInt8FromInt64(nodeUplink), Downlink: pgInt8FromInt64(nodeDownlink),
-			}); err != nil {
-				h.logger.Error("node report: increment node cumulative", "error", err)
-			}
-			if err := h.store.Queries.IncrementSystemCumulative(ctx, generated.IncrementSystemCumulativeParams{
-				Uplink: pgInt8FromInt64(nodeUplink), Downlink: pgInt8FromInt64(nodeDownlink),
-			}); err != nil {
-				h.logger.Error("node report: increment system cumulative", "error", err)
-			}
-		}
+	if err := h.recordNodeTraffic(ctx, nodeID, req); err != nil {
+		h.logger.Error("node report rejected without committing usage", "error", err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"detail": "Traffic was not committed; retry the same report"})
+		return
 	}
 
 	if req.Host.CollectedAt.IsZero() {
@@ -179,9 +94,134 @@ func (h *Handler) handleNodeReport(c *gin.Context) {
 		h.logger.Error("node report: mark node connected", "error", err)
 	}
 
-	c.JSON(http.StatusOK, gin.H{"detail": "recorded"})
+	c.JSON(http.StatusOK, gin.H{"detail": "recorded", "report_id": req.ReportID})
 }
 
 func nodeKey(nodeID int32) string {
 	return "node:" + strconv.Itoa(int(nodeID))
+}
+
+// recordNodeTraffic acknowledges only an atomic, durable commit. A report ID
+// is immutable on retry, so a lost HTTP response never bills traffic twice.
+func (h *Handler) recordNodeTraffic(ctx context.Context, nodeID int32, req nodeReportRequest) error {
+	if len(req.Users) > 100000 {
+		return errors.New("too many usage rows")
+	}
+	if req.ReportID != "" {
+		if _, err := uuid.Parse(req.ReportID); err != nil {
+			return err
+		}
+	}
+	usernames := make([]string, 0, len(req.Users))
+	byName := make(map[string]nodeReportUserUsage, len(req.Users))
+	for _, u := range req.Users {
+		if u.Username == "" || u.Uplink < 0 || u.Downlink < 0 || u.Uplink > math.MaxInt64-u.Downlink {
+			return errors.New("invalid traffic")
+		}
+		if _, exists := byName[u.Username]; exists {
+			return errors.New("duplicate username")
+		}
+		byName[u.Username] = u
+		usernames = append(usernames, u.Username)
+	}
+	settings, err := h.store.CachedGetIntegrationSettings(ctx)
+	if err != nil {
+		return err
+	}
+	values := integrationsettings.Resolve(settings, h.envDefaults)
+	queue := resellerapi.Config{Secret: values.ResellerApiSecret, URL: values.ResellerApiUrl}.CanReportUsage()
+	tx, err := h.store.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.Background())
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock_shared(814720033)"); err != nil {
+		return err
+	}
+	q := h.store.Queries.WithTx(tx)
+	if req.ReportID != "" {
+		result, err := tx.Exec(ctx, "INSERT INTO node_report_receipts(node_id,report_id) VALUES($1,$2) ON CONFLICT DO NOTHING", nodeID, req.ReportID)
+		if err != nil {
+			return err
+		}
+		if result.RowsAffected() == 0 {
+			return tx.Commit(ctx)
+		}
+	}
+	node, err := q.GetNodeByID(ctx, nodeID)
+	if err != nil {
+		return err
+	}
+	factor := node.UsageCoefficient
+	if factor <= 0 || math.IsNaN(factor) || math.IsInf(factor, 0) {
+		return errors.New("invalid node traffic coefficient")
+	}
+	rows, err := q.GetUsersByUsernames(ctx, usernames)
+	if err != nil {
+		return err
+	}
+	ids := make([]int32, 0, len(rows))
+	deltas := make([]int64, 0, len(rows))
+	admins := map[int32]int64{}
+	var up, down int64
+	for _, row := range rows {
+		u := byName[row.Username]
+		raw := u.Uplink + u.Downlink
+		scaled := float64(raw) * factor
+		if scaled >= float64(math.MaxInt64) {
+			return errors.New("traffic overflow")
+		}
+		delta := int64(scaled)
+		if delta <= 0 {
+			continue
+		}
+		if up > math.MaxInt64-u.Uplink || down > math.MaxInt64-u.Downlink {
+			return errors.New("traffic overflow")
+		}
+		ids = append(ids, row.ID)
+		deltas = append(deltas, delta)
+		up += u.Uplink
+		down += u.Downlink
+		if row.AdminID.Valid {
+			if admins[row.AdminID.Int32] > math.MaxInt64-delta {
+				return errors.New("admin traffic overflow")
+			}
+			admins[row.AdminID.Int32] += delta
+		}
+	}
+	bucket := pgtype.Timestamptz{Time: time.Now().UTC().Truncate(time.Hour), Valid: true}
+	if len(ids) > 0 {
+		if err := q.BulkIncrementUserUsage(ctx, generated.BulkIncrementUserUsageParams{Ids: ids, Deltas: deltas}); err != nil {
+			return err
+		}
+		if err := q.BulkUpsertNodeUserUsage(ctx, generated.BulkUpsertNodeUserUsageParams{CreatedAt: bucket, NodeID: nodeID, UserIds: ids, Deltas: deltas}); err != nil {
+			return err
+		}
+	}
+	if len(admins) > 0 {
+		adminIDs := make([]int32, 0, len(admins))
+		for id := range admins {
+			adminIDs = append(adminIDs, id)
+		}
+		slices.Sort(adminIDs)
+		values := make([]int64, len(adminIDs))
+		for i, id := range adminIDs {
+			values[i] = admins[id]
+		}
+		if err := q.BulkIncrementAdminUsage(ctx, generated.BulkIncrementAdminUsageParams{Ids: adminIDs, Deltas: values, QueueForResellerApi: queue}); err != nil {
+			return err
+		}
+	}
+	if up > 0 || down > 0 {
+		if err := q.UpsertNodeUsage(ctx, generated.UpsertNodeUsageParams{CreatedAt: bucket, NodeID: pgInt4FromInt(int(nodeID)), Uplink: pgInt8FromInt64(up), Downlink: pgInt8FromInt64(down)}); err != nil {
+			return err
+		}
+		if err := q.IncrementNodeCumulative(ctx, generated.IncrementNodeCumulativeParams{ID: nodeID, Uplink: pgInt8FromInt64(up), Downlink: pgInt8FromInt64(down)}); err != nil {
+			return err
+		}
+		if err := q.IncrementSystemCumulative(ctx, generated.IncrementSystemCumulativeParams{Uplink: pgInt8FromInt64(up), Downlink: pgInt8FromInt64(down)}); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }

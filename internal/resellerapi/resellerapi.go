@@ -142,6 +142,9 @@ func (c *Client) ReportUsages(ctx context.Context, cfg Config, usages []Usage) e
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if id, _ := ctx.Value(reportIDKey{}).(string); id != "" {
+		req.Header.Set("Idempotency-Key", id)
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -153,4 +156,10 @@ func (c *Client) ReportUsages(ctx context.Context, cfg Config, usages []Usage) e
 		return fmt.Errorf("usage report rejected with HTTP %d", resp.StatusCode)
 	}
 	return nil
+}
+
+type reportIDKey struct{}
+
+func WithReportID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, reportIDKey{}, id)
 }

@@ -12,7 +12,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/netip"
+	"net/url"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -20,7 +25,47 @@ import (
 // never block the caller indefinitely, whether that caller is an admin's
 // "test connection" click or (in a later sub-phase) a periodic background
 // refresh with many peers to get through.
-var httpClient = &http.Client{Timeout: 5 * time.Second}
+const maxGatewayResponseBytes = 16 << 20
+
+var httpClient = &http.Client{
+	Timeout: 5 * time.Second,
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		// Secrets are sent as Bearer credentials. Never replay a peer request
+		// at a redirect target, even if net/http would preserve the header.
+		return http.ErrUseLastResponse
+	},
+}
+
+// NormalizeBaseURL accepts HTTPS peers. Plain HTTP is only allowed for a
+// loopback endpoint used by a local test or development process.
+func NormalizeBaseURL(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || !u.IsAbs() || u.Opaque != "" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return "", fmt.Errorf("peer URL must be an absolute URL without credentials, path, query, or fragment")
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+	case "http":
+		host := strings.ToLower(u.Hostname())
+		loopback := host == "localhost"
+		if ip, parseErr := netip.ParseAddr(host); parseErr == nil && ip.IsLoopback() {
+			loopback = true
+		}
+		if !loopback {
+			return "", fmt.Errorf("peer URL must use HTTPS except for loopback development endpoints")
+		}
+	default:
+		return "", fmt.Errorf("peer URL scheme must be http or https")
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	if u.Port() != "" {
+		port, err := strconv.Atoi(u.Port())
+		if err != nil || port < 1 || port > 65535 {
+			return "", fmt.Errorf("peer URL has an invalid port")
+		}
+	}
+	return strings.TrimRight(u.String(), "/"), nil
+}
 
 // PingResult is what a healthy peer's GET /internal/gateway/ping returns -
 // deliberately minimal (see internal/httpapi/gateway.go's own doc comment
@@ -34,6 +79,11 @@ type PingResult struct {
 // (see the Gateway migration's own doc comment on why this is
 // asymmetric/per-installation rather than a shared pair secret).
 func Ping(ctx context.Context, baseURL, secret string) (PingResult, error) {
+	var err error
+	baseURL, err = NormalizeBaseURL(baseURL)
+	if err != nil {
+		return PingResult{}, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/internal/gateway/ping", nil)
 	if err != nil {
 		return PingResult{}, fmt.Errorf("could not build request: %w", err)
@@ -50,7 +100,7 @@ func Ping(ctx context.Context, baseURL, secret string) (PingResult, error) {
 		return PingResult{}, fmt.Errorf("peer responded with status %d", resp.StatusCode)
 	}
 	var result PingResult
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxGatewayResponseBytes)).Decode(&result); err != nil {
 		return PingResult{}, fmt.Errorf("could not decode peer response: %w", err)
 	}
 	return result, nil
@@ -89,6 +139,10 @@ type SyncUserResult struct {
 // payload.Deleted is false, delete if true. Same secret/timeout/error
 // shape as Ping.
 func SyncUser(ctx context.Context, baseURL, secret string, payload UserSyncPayload) (SyncUserResult, error) {
+	baseURL, err := NormalizeBaseURL(baseURL)
+	if err != nil {
+		return SyncUserResult{}, err
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return SyncUserResult{}, fmt.Errorf("could not encode payload: %w", err)
@@ -107,7 +161,7 @@ func SyncUser(ctx context.Context, baseURL, secret string, payload UserSyncPaylo
 	defer resp.Body.Close()
 
 	var result SyncUserResult
-	_ = json.NewDecoder(resp.Body).Decode(&result)
+	_ = json.NewDecoder(io.LimitReader(resp.Body, maxGatewayResponseBytes)).Decode(&result)
 	if resp.StatusCode != http.StatusOK {
 		if result.Detail == "" {
 			result.Detail = fmt.Sprintf("peer responded with status %d", resp.StatusCode)
@@ -189,6 +243,11 @@ type StatusResult struct {
 // Status calls a peer's GET /internal/gateway/status. Same secret/timeout
 // shape as Ping.
 func Status(ctx context.Context, baseURL, secret string) (StatusResult, error) {
+	var err error
+	baseURL, err = NormalizeBaseURL(baseURL)
+	if err != nil {
+		return StatusResult{}, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/internal/gateway/status", nil)
 	if err != nil {
 		return StatusResult{}, fmt.Errorf("could not build request: %w", err)
@@ -205,7 +264,7 @@ func Status(ctx context.Context, baseURL, secret string) (StatusResult, error) {
 		return StatusResult{}, fmt.Errorf("peer responded with status %d", resp.StatusCode)
 	}
 	var result StatusResult
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxGatewayResponseBytes)).Decode(&result); err != nil {
 		return StatusResult{}, fmt.Errorf("could not decode peer response: %w", err)
 	}
 	return result, nil
