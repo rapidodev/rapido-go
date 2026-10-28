@@ -14,6 +14,11 @@ export SUDO_USERNAME=smoke_admin SUDO_PASSWORD=smoke-test-admin-password
 export POSTGRES_MAX_CONNECTIONS=200 PANEL_API_REPLICAS=1
 compose() { docker compose -p "$project" "${files[@]}" --env-file /dev/null "$@"; }
 cleanup() {
+    local result=$?
+    if [ "$result" != 0 ]; then
+        compose ps -a || true
+        compose logs --tail 40 migrate panel backend || true
+    fi
     compose down -v --remove-orphans >/dev/null 2>&1 || true
     rm -f "$platform_file"
 }

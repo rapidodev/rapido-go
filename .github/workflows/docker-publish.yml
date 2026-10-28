@@ -96,6 +96,9 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      - name: Exercise restricted migration source permissions
+        run: chmod -R go-rwx internal/db/migrations
+
       - uses: docker/build-push-action@v5
         with:
           context: .
