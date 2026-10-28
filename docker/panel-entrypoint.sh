@@ -7,4 +7,8 @@ set -eu
 mkdir -p /app/db_backups /var/lib/rapido-go/ssh
 chown -R rapido:rapido /app/db_backups /var/lib/rapido-go/ssh
 
+if [ "$#" -eq 0 ]; then
+    set -- /app/panel
+fi
+
 exec su-exec rapido:rapido "$@"

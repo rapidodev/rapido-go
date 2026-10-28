@@ -438,7 +438,9 @@ func (h *Handler) WithAfterRestore(fn func(context.Context) error) *Handler {
 }
 func (h *Handler) refreshSigningIdentity() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if h.keyLoader != nil && c.Request.URL.Path != "/health" {
+		path := c.Request.URL.Path
+		needsIdentity := strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/sub/")
+		if h.keyLoader != nil && needsIdentity {
 			secret, err := h.keyLoader(c.Request.Context())
 			if err != nil {
 				c.AbortWithStatusJSON(503, gin.H{"detail": "Signing identity unavailable"})

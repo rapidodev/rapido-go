@@ -138,6 +138,8 @@ It refreshes the installer files, pulls every image in parallel and stops there 
 
 Deployments using the local `rapido-go-panel:private` alias download the published GHCR panel image and assign it to that alias after a successful pull. The previous image is retained as `rapido-go-panel:previous`. To select a verified commit image, pass `RAPIDO_PRIVATE_IMAGE_SOURCE=ghcr.io/rapidodev/rapido-go-panel:<full-commit-sha>` to the update command. Select the matching source branch with `RAPIDO_REPO_BRANCH` when the commit has not reached `master`. An explicitly requested local build also updates the deployment alias.
 
+A private edition is identified by its build-tag label or legacy private version label. Updates refuse to replace it with a public image. Building that edition locally requires its add-on sources and automatically enables the `private` Go build tag. Recovery preserves an existing private backup if the running image is public. Published images are started with disposable PostgreSQL and Redis on both supported architectures before they can be promoted to `latest`.
+
 ### Backup and restore
 
 ```bash

@@ -171,6 +171,9 @@ RUN chmod 0755 /usr/local/bin/panel-entrypoint
 # Last, so a new VERSION only touches this metadata layer. `rapido-go doctor`
 # and `rapido-go version` read it from the running container.
 ARG VERSION=dev
+ARG GO_TAGS=
 LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.rapido-go.build-tags="${GO_TAGS}"
 EXPOSE 8000 8001
 ENTRYPOINT ["/usr/local/bin/panel-entrypoint"]
+CMD ["/app/panel"]

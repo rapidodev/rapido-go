@@ -1148,11 +1148,31 @@ image_list() { compose config --images 2>/dev/null | sort -u || true; }
 
 is_panel_image() { case "$1" in *rapido-go-panel*) return 0 ;; *) return 1 ;; esac; }
 
+image_has_private_features() {
+    local tags version
+    tags="$(docker image inspect --format '{{index .Config.Labels "org.rapido-go.build-tags"}}' "$1" 2>/dev/null | tr ',' ' ' || true)"
+    case " $tags " in *' private '*) return 0 ;; esac
+    version="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$1" 2>/dev/null || true)"
+    case "$version" in *-private|private-*) return 0 ;; esac
+    return 1
+}
+
+private_installation() {
+    image_has_private_features rapido-go-panel:private || image_has_private_features rapido-go-panel:previous
+}
+
 # Keep the previous local alias available for an operator rollback.
 tag_private_panel_image() {
-    local source="$1" target="rapido-go-panel:private"
+    local source="$1" target="rapido-go-panel:private" backup="rapido-go-panel:previous"
+    if private_installation && ! image_has_private_features "$source"; then
+        err "Refusing to replace a private edition with a public image. Select a private image or build with the private add-on sources."
+        return 1
+    fi
     if docker image inspect "$target" >/dev/null 2>&1; then
-        docker tag "$target" rapido-go-panel:previous || return
+        if image_has_private_features "$backup" && ! image_has_private_features "$target"; then
+            backup="rapido-go-panel:previous-public"
+        fi
+        docker tag "$target" "$backup" || return
     fi
     docker tag "$source" "$target"
 }
@@ -1221,11 +1241,24 @@ pull_images() {
 }
 
 build_local_image() {
+    local build_tags="" build_version
     [ -f "$APP_DIR/docker/Dockerfile.panel" ] \
         || die "The source tree is not here, so the image cannot be built. Re-run with RAPIDO_BUILD_LOCALLY=1 to fetch it."
+    build_version="$(source_version)"
+    if private_installation || [ -d "$APP_DIR/web/src/private" ] || [ -d "$APP_DIR/internal/mullvadexits" ] || [ -f "$APP_DIR/internal/httpapi/ext_private_exits.go" ]; then
+        [ -f "$APP_DIR/internal/httpapi/ext_private_exits.go" ] \
+            && [ -f "$APP_DIR/internal/mullvadexits/service.go" ] \
+            && [ -f "$APP_DIR/internal/mullvadexits/decision.go" ] \
+            && [ -f "$APP_DIR/internal/mullvadexits/relays.go" ] \
+            && [ -f "$APP_DIR/internal/mullvadexits/exits.py" ] \
+            && { [ -f "$APP_DIR/web/src/private/index.tsx" ] || [ -f "$APP_DIR/web/src/private/index.ts" ]; } \
+            || die "Private add-on sources are missing. The current private image will be kept."
+        build_tags=private
+        build_version="${build_version}-private"
+    fi
     log "Building the image (this takes a few minutes)..."
     ( cd "$APP_DIR" && DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.panel \
-        --build-arg "VERSION=$(source_version)" -t "${PANEL_IMAGE}:latest" . )
+        --build-arg "VERSION=$build_version" --build-arg "GO_TAGS=$build_tags" -t "${PANEL_IMAGE}:latest" . )
     docker image inspect "${PANEL_IMAGE}:latest" >/dev/null 2>&1 \
         || die "The image was not built - see the output above."
     if image_list | grep -qx 'rapido-go-panel:private'; then

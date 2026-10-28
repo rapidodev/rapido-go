@@ -27,13 +27,13 @@ jobs:
 
       - name: Syntax-check the shell scripts
         run: |
-          for f in rapido-go.sh migrate-from-rapido.sh scripts/installer_test.sh; do
+          for f in rapido-go.sh migrate-from-rapido.sh scripts/installer_test.sh scripts/entrypoint_test.sh scripts/container_smoke.sh; do
             bash -n "$f"
             echo "ok  $f"
           done
 
       - name: Installer tests
-        run: bash scripts/installer_test.sh
+        run: bash scripts/installer_test.sh && bash scripts/entrypoint_test.sh
 
       - name: Render the installer's .env and Caddyfile
         run: |
@@ -78,10 +78,8 @@ jobs:
           {
             echo 'value<<IMAGE_TAGS'
             echo "${image}:${GITHUB_SHA}"
-            if [ "$GITHUB_REF" = 'refs/heads/master' ]; then
-              echo "${image}:latest"
-            fi
             echo 'IMAGE_TAGS'
+            echo "repository=$image"
           } >> "$GITHUB_OUTPUT"
 
       # The final alpine stage of the multi-arch build runs once per target
@@ -110,3 +108,15 @@ jobs:
           tags: ${{ steps.tags.outputs.value }}
           cache-from: type=gha,scope=panel
           cache-to: type=gha,mode=max,scope=panel
+
+      - name: Test default container startup before promotion
+        env:
+          RAPIDO_IMAGE: ${{ steps.tags.outputs.repository }}
+          RAPIDO_TAG: ${{ github.sha }}
+        run: bash scripts/container_smoke.sh
+
+      - name: Promote the verified image to latest
+        if: github.ref == 'refs/heads/master'
+        env:
+          IMAGE: ${{ steps.tags.outputs.repository }}
+        run: docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$GITHUB_SHA"
