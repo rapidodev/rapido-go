@@ -1,10 +1,10 @@
 import { Suspense, lazy } from "react";
 import { Navigate, createHashRouter } from "react-router-dom";
-import { fetchCurrentAdmin } from "hooks/useCurrentAdminQuery";
-import { queryClient, queryKeys } from "utils/queryClient";
+import { loadCurrentAdmin } from "hooks/useCurrentAdminQuery";
 import { SudoOnly } from "rapido-ui/SudoOnly";
 import { extensionRoutes } from "extensions";
 import { Login } from "./Login";
+import { pageImports } from "./pageImports";
 
 // A failed /admin fetch (expired/missing token) throws, which react-router
 // routes to `errorElement: <Login/>` below - the same "inline, not a global
@@ -18,30 +18,28 @@ import { Login } from "./Login";
 // reads the exact same queryKey, so Shell/SudoOnly render with data already
 // in hand instead of a second round trip on every navigation.
 const fetchAdminLoader = async () => {
-  const data = await fetchCurrentAdmin();
-  queryClient.setQueryData(queryKeys.currentAdmin, data);
-  return data;
+  return loadCurrentAdmin();
 };
 
 // Lazy-loaded so each page's dependencies are a separate chunk that Login
 // never has to fetch or evaluate - a page-specific bug can't take down
 // unrelated routes.
-const RapidoHome = lazy(() => import("./RapidoHome"));
-const UsersPage = lazy(() => import("./UsersPage"));
-const TicketsPage = lazy(() => import("./TicketsPage"));
-const HostsPage = lazy(() => import("./HostsPage"));
-const CoreConfigPage = lazy(() => import("./CoreConfigPage"));
-const AdminsPage = lazy(() => import("./AdminsPage"));
-const IntegrationsPage = lazy(() => import("./IntegrationsPage"));
-const UserTemplatesPage = lazy(() => import("./UserTemplatesPage"));
-const NodesPage = lazy(() => import("./NodesPage"));
-const MonitoringPage = lazy(() => import("./MonitoringPage"));
-const TunnelsPage = lazy(() => import("./TunnelsPage"));
-const LogsPage = lazy(() => import("./LogsPage"));
-const BackupsPage = lazy(() => import("./BackupsPage"));
-const GatewayPage = lazy(() => import("./GatewayPage"));
-const AppearancePage = lazy(() => import("./AppearancePage"));
-const ThemePage = lazy(() => import("./ThemePage"));
+const RapidoHome = lazy(pageImports.overview);
+const UsersPage = lazy(pageImports.users);
+const TicketsPage = lazy(pageImports.tickets);
+const HostsPage = lazy(pageImports.hosts);
+const CoreConfigPage = lazy(pageImports.coreConfig);
+const AdminsPage = lazy(pageImports.admins);
+const IntegrationsPage = lazy(pageImports.integrations);
+const UserTemplatesPage = lazy(pageImports.templates);
+const NodesPage = lazy(pageImports.nodes);
+const MonitoringPage = lazy(pageImports.monitoring);
+const TunnelsPage = lazy(pageImports.tunnels);
+const LogsPage = lazy(pageImports.logs);
+const BackupsPage = lazy(pageImports.backups);
+const GatewayPage = lazy(pageImports.gateway);
+const AppearancePage = lazy(pageImports.appearance);
+const ThemePage = lazy(pageImports.theme);
 
 export const router = createHashRouter([
   {

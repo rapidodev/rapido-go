@@ -363,7 +363,7 @@ tag rapido-go-panel:private rapido-go-panel:previous
 tag ghcr.io/rapidodev/rapido-go-panel:release-test rapido-go-panel:private' \
     'WORK_LOG="$(mktemp)"; docker() { echo "$*" >> "$WORK_LOG"; return 0; }
      RAPIDO_PRIVATE_IMAGE_SOURCE=ghcr.io/rapidodev/rapido-go-panel:release-test pull_image rapido-go-panel:private >/dev/null
-     cat "$WORK_LOG"'
+     grep -v "^image inspect --format " "$WORK_LOG"'
 unit "the private alias defaults to the published panel image" \
     'pull -q ghcr.io/rapidodev/rapido-go-panel:latest' \
     'WORK_LOG="$(mktemp)"; docker() { echo "$*" >> "$WORK_LOG"; return 0; }
@@ -382,7 +382,33 @@ unit "a failed image backup prevents replacing the private alias" \
 tag rapido-go-panel:private rapido-go-panel:previous' \
     'WORK_LOG="$(mktemp)"; docker() { echo "$*" >> "$WORK_LOG"; [ "$1" != tag ]; }
      if tag_private_panel_image ghcr.io/rapidodev/rapido-go-panel:release-test; then exit 1; fi
-     cat "$WORK_LOG"'
+     grep -v "^image inspect --format " "$WORK_LOG"'
+
+unit "legacy private edition metadata is recognized" 'private' \
+    'docker() { case "$*" in *org.opencontainers.image.version*) echo gre-frp-private ;; esac; }
+     image_has_private_features rapido-go-panel:private && echo private'
+unit "a public candidate cannot overwrite a private installation" 'kept' \
+    'image_has_private_features() { [ "$1" = rapido-go-panel:private ]; }
+     docker() { case "$1" in tag) echo UNEXPECTED_TAG ;; esac; return 0; }
+     if tag_private_panel_image ghcr.io/rapidodev/rapido-go-panel:public >/dev/null 2>&1; then exit 1; fi
+     echo kept'
+unit "recovery keeps the original private backup when the active image is public" \
+    'tag rapido-go-panel:private rapido-go-panel:previous-public
+tag private-candidate rapido-go-panel:private' \
+    'WORK_LOG="$(mktemp)"; image_has_private_features() { [ "$1" = rapido-go-panel:previous ] || [ "$1" = private-candidate ]; }
+     docker() { echo "$*" >> "$WORK_LOG"; return 0; }
+     tag_private_panel_image private-candidate; grep "^tag " "$WORK_LOG"'
+unit_fails "building a private edition without its sources fails closed" \
+    'APP_DIR="$(mktemp -d)"; mkdir -p "$APP_DIR/docker"; : > "$APP_DIR/docker/Dockerfile.panel"
+     private_installation() { return 0; }; source_version() { echo test; }
+     docker() { echo UNEXPECTED_BUILD; return 0; }; build_local_image'
+unit "available private add-on sources enable the private build tag" 'private-build' \
+    'APP_DIR="$(mktemp -d)"; mkdir -p "$APP_DIR/docker" "$APP_DIR/internal/httpapi" "$APP_DIR/web/src/private"
+     : > "$APP_DIR/docker/Dockerfile.panel"; : > "$APP_DIR/internal/httpapi/ext_private_exits.go"; : > "$APP_DIR/web/src/private/index.tsx"
+     WORK_LOG="$(mktemp)"; docker() { echo "$*" >> "$WORK_LOG"; return 0; }
+     private_installation() { return 1; }; source_version() { echo test; }; image_list() { :; }
+     build_local_image >/dev/null
+     grep -q -- "--build-arg GO_TAGS=private" "$WORK_LOG" && grep -q -- "--build-arg VERSION=test-private" "$WORK_LOG" && echo private-build'
 unit "a local build also updates the private deployment alias" \
     'tag rapido-go-panel:private rapido-go-panel:previous
 tag ghcr.io/rapidodev/rapido-go-panel:latest rapido-go-panel:private' \

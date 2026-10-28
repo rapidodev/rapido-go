@@ -44,7 +44,7 @@ jobs:
       - run: go test -race -p 1 -timeout 15m ./...
       - name: Security and delivery coverage
         run: go test -race -cover -p 1 -timeout 5m ./internal/config ./internal/controlurl ./internal/gatewayclient ./internal/delivery
-      - run: bash -n rapido-go.sh && bash -n migrate-from-rapido.sh && bash scripts/installer_test.sh
+      - run: bash -n rapido-go.sh && bash -n migrate-from-rapido.sh && bash scripts/installer_test.sh && bash scripts/entrypoint_test.sh && bash -n scripts/container_smoke.sh
       - run: go test ./internal/httpapi -run '^$' -bench '^BenchmarkConfigRender50K$' -benchtime=5x
   dashboard:
     runs-on: ubuntu-latest

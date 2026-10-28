@@ -62,9 +62,20 @@ jobs:
             VERSION=${{ github.ref_name }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/rapido-go-panel:${{ github.ref_name }}
-            ghcr.io/${{ github.repository_owner }}/rapido-go-panel:latest
           cache-from: type=gha,scope=panel
           cache-to: type=gha,mode=max,scope=panel
+
+      - name: Test default container startup before promotion
+        env:
+          RAPIDO_IMAGE: ghcr.io/${{ github.repository_owner }}/rapido-go-panel
+          RAPIDO_TAG: ${{ github.ref_name }}
+        run: bash scripts/container_smoke.sh
+
+      - name: Promote the verified release image to latest
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/rapido-go-panel
+          TAG: ${{ github.ref_name }}
+        run: docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$TAG"
 
       - name: Collect the release files
         run: |

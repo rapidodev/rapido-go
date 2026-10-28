@@ -31,6 +31,7 @@ import { removeAuthToken } from "utils/authStorage";
 import { extensionNavItems, mergeNavItems } from "extensions";
 import { LanguageSwitcher } from "rapido-ui/LanguageSwitcher";
 import { AppearanceButton } from "rapido-ui/AppearancePanel";
+import { prefetchPage } from "pages/pageImports";
 import { dirOf } from "utils/language";
 import "rapido-ui/tailwind.css";
 
@@ -48,6 +49,9 @@ const NavLink: FC<{
     to={href}
     title={collapsed ? title : undefined}
     onClick={onNavigate}
+    onMouseEnter={() => void prefetchPage(href)}
+    onFocus={() => void prefetchPage(href)}
+    onTouchStart={() => void prefetchPage(href)}
     className={classNames(
       "relative flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-all duration-200",
       active
