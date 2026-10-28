@@ -18,7 +18,7 @@ beforeEach(() => { state.loading = true; state.error = false; state.refetch.mock
 it("shows a neutral loading message on the hosts page", () => {
   render(<HostsAdmin />);
   expect(screen.getByText("Please wait...")).toBeInTheDocument();
-  expect(screen.queryByText("Loading tickets...")).not.toBeInTheDocument();
+  expect(screen.queryByText(i18n.t("rapido.tickets.loading"))).not.toBeInTheDocument();
 });
 
 it("shows a recovery action when hosts could not be loaded", () => {
