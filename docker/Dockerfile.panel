@@ -47,6 +47,9 @@ RUN npm run build
 # path like golang.org/x/sys by cloning its VCS directly.
 FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS gobase
 ENV GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
+# Keep checksum verification on the official service even when module
+# downloads fall back to another proxy.
+ENV GOSUMDB="sum.golang.org https://sum.golang.org"
 RUN apk add --no-cache git
 
 # --- goose (migration tool) - its own stage, unrelated to this module's
@@ -61,7 +64,8 @@ ARG TARGETARCH
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-        go install github.com/pressly/goose/v3/cmd/goose@v3.28.0 \
+        go install -tags 'no_clickhouse no_libsql no_mssql no_mysql no_sqlite3 no_vertica no_ydb' \
+        github.com/pressly/goose/v3/cmd/goose@v3.28.0 \
     && mkdir -p /out \
     && cp "$(find /go/bin -type f -name goose | head -n 1)" /out/goose
 

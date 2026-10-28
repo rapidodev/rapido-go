@@ -23,7 +23,7 @@ func Normalize(raw string) (string, error) {
 	if err != nil || !u.IsAbs() || u.Opaque != "" || u.Hostname() == "" {
 		return "", fmt.Errorf("panel URL must be an absolute http(s) URL")
 	}
-	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return "", fmt.Errorf("panel URL must not contain credentials, a path, a query, or a fragment")
 	}
 	switch strings.ToLower(u.Scheme) {

@@ -40,7 +40,7 @@ var httpClient = &http.Client{
 // loopback endpoint used by a local test or development process.
 func NormalizeBaseURL(raw string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || !u.IsAbs() || u.Opaque != "" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+	if err != nil || !u.IsAbs() || u.Opaque != "" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return "", fmt.Errorf("peer URL must be an absolute URL without credentials, path, query, or fragment")
 	}
 	switch strings.ToLower(u.Scheme) {
@@ -161,12 +161,18 @@ func SyncUser(ctx context.Context, baseURL, secret string, payload UserSyncPaylo
 	defer resp.Body.Close()
 
 	var result SyncUserResult
-	_ = json.NewDecoder(io.LimitReader(resp.Body, maxGatewayResponseBytes)).Decode(&result)
+	decodeErr := json.NewDecoder(io.LimitReader(resp.Body, maxGatewayResponseBytes)).Decode(&result)
 	if resp.StatusCode != http.StatusOK {
 		if result.Detail == "" {
 			result.Detail = fmt.Sprintf("peer responded with status %d", resp.StatusCode)
 		}
 		return result, fmt.Errorf("peer rejected the sync: %s", result.Detail)
+	}
+	if decodeErr != nil {
+		return result, fmt.Errorf("could not decode peer response: %w", decodeErr)
+	}
+	if !result.OK {
+		return result, fmt.Errorf("peer did not acknowledge the sync")
 	}
 	return result, nil
 }

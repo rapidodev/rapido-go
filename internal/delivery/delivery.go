@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"io"
 	"log/slog"
 	"net/http"
@@ -14,6 +13,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/legendary1205/rapido-go/internal/controlurl"
 )
 
 type Payload struct {
@@ -36,14 +39,83 @@ func (t Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 		return base.RoundTrip(r)
 	}
-	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if r.Body != nil {
+		defer r.Body.Close()
+	}
+	if t.Enqueue == nil {
+		return nil, fmt.Errorf("delivery queue is not configured")
+	}
+	var raw []byte
+	var err error
+	if r.Body != nil {
+		raw, err = io.ReadAll(io.LimitReader(r.Body, (1<<20)+1))
+	}
 	if err != nil {
 		return nil, err
+	}
+	if len(raw) > 1<<20 {
+		return nil, fmt.Errorf("notification body exceeds 1 MiB")
 	}
 	if err := t.Enqueue(r.Context(), "notification", r.URL.String(), Payload{Body: raw, Proxy: r.Header.Get("X-Rapido-Delivery-Proxy")}); err != nil {
 		return nil, err
 	}
 	return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ok":true}`)), Request: r}, nil
+}
+
+func sendDelivery(ctx context.Context, client *http.Client, kind string, id int64, destination string, payload Payload) error {
+	if kind == "gateway" {
+		u, err := url.Parse(destination)
+		if err != nil || u.Path != "/api/internal/gateway/users/sync" {
+			return fmt.Errorf("invalid gateway delivery destination")
+		}
+		origin := *u
+		origin.Path, origin.RawPath = "", ""
+		if _, err := controlurl.Normalize(origin.String()); err != nil {
+			return fmt.Errorf("unsafe gateway delivery destination")
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, destination, bytes.NewReader(payload.Body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", fmt.Sprintf("rapido-delivery-%d", id))
+	for key, value := range payload.Headers {
+		req.Header.Set(key, value)
+	}
+	sendClient := *client
+	sendClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	if payload.Proxy != "" {
+		proxy, err := url.Parse(payload.Proxy)
+		if err != nil || proxy.Hostname() == "" || !proxy.IsAbs() {
+			return fmt.Errorf("invalid delivery proxy URL")
+		}
+		transport := &http.Transport{Proxy: http.ProxyURL(proxy)}
+		defer transport.CloseIdleConnections()
+		sendClient.Transport = transport
+	}
+	resp, err := sendClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	if kind == "gateway" {
+		var result struct {
+			OK bool `json:"ok"`
+		}
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&result); err != nil {
+			return fmt.Errorf("invalid gateway delivery acknowledgement: %w", err)
+		}
+		if !result.OK {
+			return fmt.Errorf("gateway did not acknowledge the delivery")
+		}
+	} else {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	}
+	return nil
 }
 
 // Run claims short leases with SKIP LOCKED. A crash leaves a retryable record.
@@ -87,30 +159,7 @@ func worker(ctx context.Context, pool *pgxpool.Pool, kind string, logger *slog.L
 			var payload Payload
 			err = json.Unmarshal(raw, &payload)
 			if err == nil {
-				var req *http.Request
-				req, err = http.NewRequestWithContext(ctx, http.MethodPost, destination, bytes.NewReader(payload.Body))
-				if err == nil {
-					req.Header.Set("Content-Type", "application/json")
-					req.Header.Set("Idempotency-Key", fmt.Sprintf("rapido-delivery-%d", id))
-					for k, v := range payload.Headers {
-						req.Header.Set(k, v)
-					}
-					var resp *http.Response
-					sendClient := client
-					if payload.Proxy != "" {
-						if proxy, parseErr := url.Parse(payload.Proxy); parseErr == nil {
-							sendClient = &http.Client{Timeout: client.Timeout, Transport: &http.Transport{Proxy: http.ProxyURL(proxy)}}
-						}
-					}
-					resp, err = sendClient.Do(req)
-					if err == nil {
-						_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
-						resp.Body.Close()
-						if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-							err = fmt.Errorf("HTTP %d", resp.StatusCode)
-						}
-					}
-				}
+				err = sendDelivery(ctx, client, kind, id, destination, payload)
 			}
 			if err == nil {
 				_, err = pool.Exec(ctx, "DELETE FROM delivery_outbox WHERE id=$1", id)
