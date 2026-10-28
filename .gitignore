@@ -11,3 +11,7 @@
 
 # local tunnel/dev logs
 .tunnel.log
+
+# Optional private add-ons are supplied locally for private image builds.
+/internal/httpapi/ext_private_*.go
+/web/src/private/
