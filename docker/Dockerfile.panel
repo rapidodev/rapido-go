@@ -168,7 +168,7 @@ COPY --from=node-arm64 /out/nodebin/ ./nodebin/
 COPY --from=panelbuild /out/panel ./panel
 COPY docker/panel-entrypoint.sh /usr/local/bin/panel-entrypoint
 RUN chmod 0755 /usr/local/bin/panel-entrypoint \
-    && chmod -R a+rX /app/internal/db/migrations
+    && chmod -R a+rX /app/internal/db/migrations /app/web/dist /app/nodebin
 # Last, so a new VERSION only touches this metadata layer. `rapido-go doctor`
 # and `rapido-go version` read it from the running container.
 ARG VERSION=dev

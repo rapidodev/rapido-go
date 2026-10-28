@@ -65,6 +65,10 @@ YAML
     fi
     wait_service panel "${platform#linux/}"
     wait_service backend "${platform#linux/}"
+    for asset in statics/fonts/inter-v20-latin.woff2 statics/fonts/vazirmatn-v16-arabic.woff2 statics/locales/fa.json statics/favicon/site.webmanifest; do
+        compose exec -T panel wget -q -O /dev/null "http://127.0.0.1:8000/dashboard/$asset" </dev/null \
+            || { echo "Dashboard asset is not readable: $asset"; exit 1; }
+    done
     headers="$(compose exec -T panel wget -S -O /dev/null http://127.0.0.1:8000/api/tunnels/1/exits </dev/null 2>&1 || true)"
     if [ "${SMOKE_EXPECT_PRIVATE:-0}" = 1 ]; then
         printf '%s\n' "$headers" | grep -q '401 Unauthorized' \
