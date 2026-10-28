@@ -136,6 +136,8 @@ rapido-go update
 
 It refreshes the installer files, pulls every image in parallel and stops there if nothing changed. Otherwise it backs up the database first (the last 5 backups are kept), recreates what changed - migrations run automatically - and checks the stack came back healthy. Installs made by older versions (a git checkout in `/opt/rapido-go`) update the same way.
 
+Deployments using the local `rapido-go-panel:private` alias download the published GHCR panel image and assign it to that alias after a successful pull. The previous image is retained as `rapido-go-panel:previous`. To select a verified commit image, pass `RAPIDO_PRIVATE_IMAGE_SOURCE=ghcr.io/rapidodev/rapido-go-panel:<full-commit-sha>` to the update command. Select the matching source branch with `RAPIDO_REPO_BRANCH` when the commit has not reached `master`. An explicitly requested local build also updates the deployment alias.
+
 ### Backup and restore
 
 ```bash

@@ -1148,6 +1148,30 @@ image_list() { compose config --images 2>/dev/null | sort -u || true; }
 
 is_panel_image() { case "$1" in *rapido-go-panel*) return 0 ;; *) return 1 ;; esac; }
 
+# Keep the previous local alias available for an operator rollback.
+tag_private_panel_image() {
+    local source="$1" target="rapido-go-panel:private"
+    if docker image inspect "$target" >/dev/null 2>&1; then
+        docker tag "$target" rapido-go-panel:previous || return
+    fi
+    docker tag "$source" "$target"
+}
+
+pull_image() {
+    local img="$1" source
+    if [ "$img" != "rapido-go-panel:private" ]; then
+        docker pull -q "$img"
+        return
+    fi
+    # This is a local deployment alias, not a Docker Hub repository. A
+    # commit-tagged source can be selected before promoting it to latest.
+    source="${RAPIDO_PRIVATE_IMAGE_SOURCE:-$(env_get RAPIDO_PRIVATE_IMAGE_SOURCE "${PANEL_IMAGE}:latest")}"
+    [ "$source" != "$img" ] || { err "The private image source must be a registry image, not the local alias."; return 1; }
+    printf 'Downloading %s for %s\n' "$source" "$img"
+    docker pull -q "$source" || return
+    tag_private_panel_image "$source"
+}
+
 # Image IDs, to tell whether a pull changed anything.
 images_fingerprint() {
     local img out=""
@@ -1175,7 +1199,7 @@ pull_images() {
         if [ "${RAPIDO_BUILD_LOCALLY:-}" = "1" ] && is_panel_image "$img"; then continue; fi
         n=$((n + 1))
         printf '%s\n' "$img" > "$tmp/$n.img"
-        ( if docker pull -q "$img" > "$tmp/$n.out" 2>&1; then echo 0; else echo 1; fi > "$tmp/$n.rc" ) &
+        ( if pull_image "$img" > "$tmp/$n.out" 2>&1; then echo 0; else echo 1; fi > "$tmp/$n.rc" ) &
     done
     wait
     i=1
@@ -1204,6 +1228,10 @@ build_local_image() {
         --build-arg "VERSION=$(source_version)" -t "${PANEL_IMAGE}:latest" . )
     docker image inspect "${PANEL_IMAGE}:latest" >/dev/null 2>&1 \
         || die "The image was not built - see the output above."
+    if image_list | grep -qx 'rapido-go-panel:private'; then
+        tag_private_panel_image "${PANEL_IMAGE}:latest" \
+            || die "The image was built but could not be assigned to the private deployment tag."
+    fi
     ok "Image built."
 }
 
@@ -1922,6 +1950,8 @@ usage() {
     _u_row  "RAPIDO_REPO_TOKEN"      "Only for a private fork or images"
     _u_row  "RAPIDO_REPO_BRANCH"     "Branch or tag to install (default: master)"
     _u_row  "RAPIDO_BUILD_LOCALLY=1" "Build here instead of pulling from ghcr.io"
+    _u_wide "RAPIDO_PRIVATE_IMAGE_SOURCE"
+    _u_wide "  Registry image used for the local :private alias"
     _u_join
 
     _u_wide "EXAMPLES"
