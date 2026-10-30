@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import classNames from "classnames";
 import {
   useActivateAdminUsersMutation,
+  useAdminsOverviewQuery,
   useAdminsQuery,
   useCreateAdminMutation,
   useDeleteAdminMutation,
@@ -19,6 +20,8 @@ import { Button } from "rapido-ui/Button";
 import { Input } from "rapido-ui/Input";
 import { Checkbox } from "rapido-ui/Checkbox";
 import { Modal } from "rapido-ui/Modal";
+import { ltrIsolate } from "rapido-ui/bidi";
+import { toLatinDigits } from "utils/digits";
 import { formatBytes } from "utils/formatByte";
 
 // ---------------------------------------------------------------------------
@@ -156,7 +159,7 @@ const AdminForm: FC<{
             dir="ltr"
             inputMode="numeric"
             value={telegramId}
-            onChange={(e) => setTelegramId(e.target.value.replace(/[^0-9-]/g, ""))}
+            onChange={(e) => setTelegramId(toLatinDigits(e.target.value).replace(/[^0-9-]/g, ""))}
           />
         </label>
 
@@ -197,13 +200,18 @@ const AdminCard: FC<{
   onEdit: () => void;
 }> = ({ row, isSelf, onEdit }) => {
   const { t } = useTranslation();
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const [confirmDisable, setConfirmDisable] = useState(false);
+  const [confirm, setConfirm] = useState<"disable" | "activate" | "reset" | "delete" | null>(null);
   const [msg, setMsg] = useState<{ tone: "ok" | "err"; text: string } | null>(null);
   const deleteAdmin = useDeleteAdminMutation();
   const disableUsers = useDisableAdminUsersMutation();
   const activateUsers = useActivateAdminUsersMutation();
   const resetUsage = useResetAdminUsageMutation();
+  // Only asked for while a confirmation wants to name a number; without an
+  // answer the warning simply does not name one.
+  const { data: overview } = useAdminsOverviewQuery(confirm !== null && confirm !== "reset");
+  const owned = overview?.admins.find((a) => a.username === row.username)?.configs;
+  const countLine = (key: string, value: number | undefined) =>
+    value === undefined ? "" : ` ${t(key, { value: ltrIsolate(value) })}`;
 
   const remove = () => {
     setMsg(null);
@@ -211,14 +219,14 @@ const AdminCard: FC<{
       onSuccess: () => setMsg({ tone: "ok", text: t("rapido.admins.deleted") }),
       onError: (e) => {
         setMsg({ tone: "err", text: errorText(e, t("rapido.admins.actionFailed")) });
-        setConfirmDelete(false);
+        setConfirm(null);
       },
     });
   };
 
   const disable = () => {
     setMsg(null);
-    setConfirmDisable(false);
+    setConfirm(null);
     disableUsers.mutate(row.username, {
       onSuccess: () => setMsg({ tone: "ok", text: t("rapido.admins.usersDisabled") }),
       onError: (e) => setMsg({ tone: "err", text: errorText(e, t("rapido.admins.actionFailed")) }),
@@ -227,6 +235,7 @@ const AdminCard: FC<{
 
   const activate = () => {
     setMsg(null);
+    setConfirm(null);
     activateUsers.mutate(row.username, {
       onSuccess: () => setMsg({ tone: "ok", text: t("rapido.admins.usersActivated") }),
       onError: (e) => setMsg({ tone: "err", text: errorText(e, t("rapido.admins.actionFailed")) }),
@@ -235,6 +244,7 @@ const AdminCard: FC<{
 
   const doResetUsage = () => {
     setMsg(null);
+    setConfirm(null);
     resetUsage.mutate(row.username, {
       onSuccess: () => setMsg({ tone: "ok", text: t("rapido.admins.usageReset") }),
       onError: (e) => setMsg({ tone: "err", text: errorText(e, t("rapido.admins.actionFailed")) }),
@@ -301,45 +311,80 @@ const AdminCard: FC<{
             {t("rapido.edit")}
           </Button>
 
-          {confirmDisable ? (
+          {confirm === "disable" ? (
             <>
-              <span className="text-xs text-amber-400">{t("rapido.admins.disableWarning")}</span>
+              <span className="text-xs text-amber-400">
+                {t("rapido.admins.disableWarning")}
+                {countLine("rapido.admins.affectedNow", owned && owned.active + owned.on_hold)}
+              </span>
               <Button variant="chip" tone="red" disabled={disableUsers.isPending} onClick={disable}>
                 {t("rapido.admins.disableUsers")}
               </Button>
-              <Button variant="chip" onClick={() => setConfirmDisable(false)}>
+              <Button variant="chip" onClick={() => setConfirm(null)}>
                 {t("cancel")}
               </Button>
             </>
           ) : (
-            <Button variant="chip" tone="red" onClick={() => setConfirmDisable(true)}>
+            <Button variant="chip" tone="red" onClick={() => setConfirm("disable")}>
               {t("rapido.admins.disableUsers")}
             </Button>
           )}
 
-          <Button variant="chip" tone="sky" disabled={activateUsers.isPending} onClick={activate}>
-            {t("rapido.admins.activateUsers")}
-          </Button>
+          {confirm === "activate" ? (
+            <>
+              <span className="text-xs text-amber-400">
+                {t("rapido.admins.activateWarning")}
+                {countLine("rapido.admins.affectedNow", owned?.disabled)}
+              </span>
+              <Button variant="chip" tone="sky" disabled={activateUsers.isPending} onClick={activate}>
+                {t("rapido.admins.activateUsers")}
+              </Button>
+              <Button variant="chip" onClick={() => setConfirm(null)}>
+                {t("cancel")}
+              </Button>
+            </>
+          ) : (
+            <Button variant="chip" tone="sky" disabled={activateUsers.isPending} onClick={() => setConfirm("activate")}>
+              {t("rapido.admins.activateUsers")}
+            </Button>
+          )}
 
-          <Button variant="chip" tone="amber" disabled={resetUsage.isPending} onClick={doResetUsage}>
-            {t("rapido.admins.resetUsage")}
-          </Button>
+          {confirm === "reset" ? (
+            <>
+              <span className="text-xs text-amber-400">
+                {t("rapido.admins.resetWarning", { usage: ltrIsolate(String(formatBytes(row.users_usage || 0))) })}
+              </span>
+              <Button variant="chip" tone="amber" disabled={resetUsage.isPending} onClick={doResetUsage}>
+                {t("rapido.admins.resetUsage")}
+              </Button>
+              <Button variant="chip" onClick={() => setConfirm(null)}>
+                {t("cancel")}
+              </Button>
+            </>
+          ) : (
+            <Button variant="chip" tone="amber" disabled={resetUsage.isPending} onClick={() => setConfirm("reset")}>
+              {t("rapido.admins.resetUsage")}
+            </Button>
+          )}
 
           {/* Deleting yourself would end the session you are working in, and
-              deleting an admin orphans their customers - both get a guard. */}
+              the panel refuses to delete an admin who still owns users. */}
           {!isSelf &&
-            (confirmDelete ? (
+            (confirm === "delete" ? (
               <>
-                <span className="text-xs text-red-400">{t("rapido.admins.deleteWarning")}</span>
+                <span className="text-xs text-red-400">
+                  {t("rapido.admins.deleteWarning")}
+                  {countLine("rapido.admins.stillOwned", owned?.total)}
+                </span>
                 <Button variant="chip" tone="red" disabled={deleteAdmin.isPending} onClick={remove}>
                   {t("delete")}
                 </Button>
-                <Button variant="chip" onClick={() => setConfirmDelete(false)}>
+                <Button variant="chip" onClick={() => setConfirm(null)}>
                   {t("cancel")}
                 </Button>
               </>
             ) : (
-              <Button variant="chip" tone="red" onClick={() => setConfirmDelete(true)}>
+              <Button variant="chip" tone="red" onClick={() => setConfirm("delete")}>
                 {t("delete")}
               </Button>
             ))}

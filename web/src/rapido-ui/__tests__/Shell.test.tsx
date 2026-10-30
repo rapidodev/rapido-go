@@ -2,11 +2,17 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const identity = vi.hoisted(() => {
+  const proven = { data: { username: "a", is_sudo: true }, isPending: false } as { data?: { username: string; is_sudo: boolean }; isPending: boolean };
+  return { proven, query: proven };
+});
 vi.mock("hooks/useCurrentAdminQuery", () => ({
-  useCurrentAdminQuery: () => ({ data: { username: "a", is_sudo: true }, isSuccess: true, isPending: false }),
+  useCurrentAdminQuery: () => identity.query,
 }));
 
+import { queryClient } from "utils/queryClient";
 import { RapidoShell } from "../Shell";
+import { useUsersUiStore } from "../usersUiStore";
 
 const original = window.matchMedia;
 const setViewport = (desktop: boolean) => {
@@ -32,10 +38,40 @@ const renderShell = () =>
 beforeEach(() => {
   window.localStorage.clear();
   document.body.style.overflow = "";
+  identity.query = identity.proven;
 });
 afterEach(() => {
   window.matchMedia = original;
   document.body.style.overflow = "";
+});
+
+describe("what the shell knows about the admin", () => {
+  beforeEach(() => setViewport(true));
+
+  it("keeps the sudo links through a failed refresh of a role it already knows", () => {
+    // What react-query reports then: the last answer is still there, status is "error".
+    identity.query = { data: { username: "a", is_sudo: true }, isPending: false };
+    renderShell();
+    expect(screen.getByRole("link", { name: "Admins" })).toBeInTheDocument();
+  });
+
+  it("shows no sudo link until the role is known", () => {
+    identity.query = { data: undefined, isPending: true };
+    renderShell();
+    expect(screen.queryByRole("link", { name: "Admins" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Users" })).toBeInTheDocument();
+  });
+
+  it("logging out ends the session in this browser", () => {
+    window.localStorage.setItem("token", "test-only-session");
+    queryClient.setQueryData(["users", {}], { total: 1 });
+    useUsersUiStore.getState().setFilters({ search: "someone" });
+    renderShell();
+    fireEvent.click(screen.getByRole("button", { name: "Log out" }));
+    expect(window.localStorage.getItem("token")).toBeNull();
+    expect(queryClient.getQueryData(["users", {}])).toBeUndefined();
+    expect(useUsersUiStore.getState().filters.search).toBeUndefined();
+  });
 });
 
 describe("phone menu drawer", () => {

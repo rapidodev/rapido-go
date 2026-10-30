@@ -4,6 +4,7 @@ import {
   Admin,
   AdminCreatePayload,
   AdminModifyPayload,
+  AdminsOverview,
   InactiveAdminsDeleted,
   InactiveAdminsResult,
 } from "types/Admin";
@@ -14,6 +15,17 @@ export const useAdminsQuery = (options?: { enabled?: boolean }) =>
     queryKey: queryKeys.admins,
     queryFn: () => fetch<Admin[]>("/admins"),
     enabled: options?.enabled ?? true,
+  });
+
+// How many users a bulk action on an admin would hit. Asked for only while a
+// confirmation is open and never retried: a warning without the number is
+// better than one that waits for it.
+export const useAdminsOverviewQuery = (enabled: boolean) =>
+  useQuery({
+    queryKey: queryKeys.adminsOverview,
+    queryFn: () => fetch<AdminsOverview>("/admins/overview"),
+    enabled,
+    retry: false,
   });
 
 const invalidateAdmins = (queryClient: ReturnType<typeof useQueryClient>) =>

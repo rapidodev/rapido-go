@@ -6,6 +6,7 @@ import {
 } from "hooks/useAdminsQuery";
 import { InactiveAdminsDeleted, InactiveAdminsResult } from "types/Admin";
 import { errorText } from "service/errors";
+import { toLatinDigits } from "utils/digits";
 import { Card } from "rapido-ui/Card";
 import { Button } from "rapido-ui/Button";
 import { Input } from "rapido-ui/Input";
@@ -77,7 +78,7 @@ export const InactiveAdmins: FC = () => {
             dir="ltr"
             inputMode="numeric"
             value={days}
-            onChange={(e) => setDays(e.target.value.replace(/[^0-9]/g, ""))}
+            onChange={(e) => setDays(toLatinDigits(e.target.value).replace(/[^0-9]/g, ""))}
           />
         </label>
         <Button

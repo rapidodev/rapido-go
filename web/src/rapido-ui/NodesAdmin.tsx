@@ -127,6 +127,18 @@ const formValuesFromNode = (n: Node): NodeFormValues => ({
 
 const cap = (s: string) => s[0].toUpperCase() + s.slice(1);
 
+// What disabling or deleting a node does, plus how many clients it hits right
+// now when the panel knows.
+const NodeImpact: FC<{ warningKey: string; openConns: number | null | undefined }> = ({ warningKey, openConns }) => {
+  const { t } = useTranslation();
+  return (
+    <>
+      {t(warningKey)}
+      {openConns != null && <> {t("rapido.nodes.openConnsNow", { value: ltrIsolate(openConns) })}</>}
+    </>
+  );
+};
+
 // The server's own validation messages for these fields are English and
 // technical, so they are shown as they come, left-to-right, under the field.
 const ServerFieldError: FC<{ message: string }> = ({ message }) => (
@@ -144,9 +156,11 @@ const NodeFormModal: FC<{
   /** The panel-wide capacity a node without its own uses, when known: shown as
    * the capacity field's placeholder. */
   defaultCapacity?: number;
+  /** Client connections open on this node right now, when known. */
+  openConns?: number;
   onClose: () => void;
   onCreated: (result: NodeCreateResult) => void;
-}> = ({ initial, defaultCapacity, onClose, onCreated }) => {
+}> = ({ initial, defaultCapacity, openConns, onClose, onCreated }) => {
   const { t } = useTranslation();
   const isEdit = !!initial;
   const [values, setValues] = useState<NodeFormValues>(
@@ -261,8 +275,11 @@ const NodeFormModal: FC<{
     capacityResult.ok;
   const choices = tagChoices(knownTags, values.profile.tags);
 
+  // Not while the request is in flight: the one-time secrets arrive in the answer
+  // to a create, and mutate's onSuccess never fires once this form has unmounted,
+  // so a stray click outside would lose them for good.
   return (
-    <Modal onClose={onClose} className="max-w-lg">
+    <Modal onClose={saving ? () => undefined : onClose} className="max-w-lg">
       <h2 className="mb-4 text-lg font-semibold">
         {isEdit ? t("nodes.editNode") : t("nodes.addNode")}
       </h2>
@@ -334,6 +351,11 @@ const NodeFormModal: FC<{
             onChange={(e) => set({ disabled: e.target.checked })}
             label={t("rapido.nodes.disableField")}
           />
+        )}
+        {isEdit && values.disabled && initial?.status !== "disabled" && (
+          <p className="-mt-1 text-xs text-amber-400">
+            <NodeImpact warningKey="rapido.nodes.confirmDisable" openConns={openConns} />
+          </p>
         )}
 
         {/* Closed unless the node already has a custom profile (or the panel
@@ -528,17 +550,17 @@ const NodeCreatedPanel: FC<{ result: NodeCreateResult; onClose: () => void }> = 
       <div className="flex flex-col gap-4">
         {/* The way most admins will actually bring the node up, so it comes
             first and looks like it: one command, built from where the panel is
-            reached from right now plus the one-time blob. */}
+            reached from right now, and the one-time blob it asks for. */}
         <div className="flex flex-col gap-2 rounded-lg border border-rapido-accent/50 bg-rapido-accent/[0.06] p-3">
           <div className="text-sm font-semibold text-rapido-text">{t("rapido.nodes.installTitle")}</div>
           <p className="text-xs text-rapido-muted">{t("rapido.nodes.installHelp")}</p>
           <CopyField
             label={t("rapido.nodes.installCommand")}
-            value={buildNodeInstallCommand(window.location.origin, result.setup_blob)}
+            value={buildNodeInstallCommand(window.location.origin)}
           />
+          <CopyField label={t("rapido.nodes.setupBlob")} value={result.setup_blob} />
         </div>
 
-        <CopyField label={t("rapido.nodes.setupBlob")} value={result.setup_blob} />
         <p className="text-xs text-rapido-muted">{t("rapido.nodes.setupBlobHint")}</p>
 
         {/* Native <details> - no extra state needed, and it's closed by
@@ -579,6 +601,7 @@ const NodeCard: FC<{
 }> = ({ node, load, defaultCapacity, onEdit }) => {
   const { t } = useTranslation();
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmDisable, setConfirmDisable] = useState(false);
   const [msg, setMsg] = useState<{ tone: "ok" | "err"; text: string } | null>(null);
   const deleteNode = useDeleteNodeMutation();
   const updateNode = useUpdateNodeMutation();
@@ -610,6 +633,7 @@ const NodeCard: FC<{
   // node's other current values (see nodeUpdateRequest's own doc comment).
   const toggleDisabled = () => {
     setMsg(null);
+    setConfirmDisable(false);
     updateNode.mutate(
       {
         id: node.id,
@@ -635,6 +659,7 @@ const NodeCard: FC<{
   const nodeTunnels = (tunnels ?? []).filter((tn) => tn.node_id === node.id);
   const hostState = host ? hostDisplayState(host) : "no-data";
   const chip = "rounded-md bg-rapido-raised px-1.5 py-0.5 text-[11px] tabular-nums text-rapido-text ring-1 ring-inset ring-white/10";
+  const openConns = load?.conns ?? host?.connections;
 
   return (
     <Card tilt tiltMax={1.5} className={classNames("p-4 sm:p-5", cardToneClasses[tone])}>
@@ -657,7 +682,12 @@ const NodeCard: FC<{
               <span className={chip} dir="ltr" title={String(t("nodes.nodeAddress"))}>
                 {node.address}
               </span>
-              {host?.xray_version && (
+              {node.xray_version && (
+                <span className="text-[11px]" dir="ltr" title={String(t("rapido.nodes.agentVersion"))}>
+                  {node.xray_version}
+                </span>
+              )}
+              {host?.xray_version && host.xray_version !== node.xray_version && (
                 <span className={chip} dir="ltr">
                   {host.xray_version}
                 </span>
@@ -673,18 +703,33 @@ const NodeCard: FC<{
             <Button variant="chip" tone="accent" onClick={onEdit}>
               {t("rapido.edit")}
             </Button>
-            <Button
-              variant="chip"
-              tone={isDisabled ? "sky" : "amber"}
-              disabled={updateNode.isPending}
-              onClick={toggleDisabled}
-            >
-              {isDisabled ? t("rapido.hosts.enable") : t("rapido.hosts.disable")}
-            </Button>
+            {isDisabled ? (
+              <Button variant="chip" tone="sky" disabled={updateNode.isPending} onClick={toggleDisabled}>
+                {t("rapido.hosts.enable")}
+              </Button>
+            ) : confirmDisable ? (
+              <>
+                <span className="max-w-[20rem] text-xs text-amber-400">
+                  <NodeImpact warningKey="rapido.nodes.confirmDisable" openConns={openConns} />
+                </span>
+                <Button variant="chip" tone="amber" disabled={updateNode.isPending} onClick={toggleDisabled}>
+                  {t("rapido.hosts.disable")}
+                </Button>
+                <Button variant="chip" onClick={() => setConfirmDisable(false)}>
+                  {t("cancel")}
+                </Button>
+              </>
+            ) : (
+              <Button variant="chip" tone="amber" disabled={updateNode.isPending} onClick={() => setConfirmDisable(true)}>
+                {t("rapido.hosts.disable")}
+              </Button>
+            )}
             <RestartNodeButton node={{ id: node.id, name: node.name, ssh_known: node.ssh_known }} />
             {confirmDelete ? (
               <>
-                <span className="text-xs text-red-400">{t("rapido.nodes.confirmDelete")}</span>
+                <span className="max-w-[20rem] text-xs text-red-400">
+                  <NodeImpact warningKey="rapido.nodes.confirmDelete" openConns={openConns} />
+                </span>
                 <Button variant="chip" tone="red" disabled={deleteNode.isPending} onClick={remove}>
                   {t("delete")}
                 </Button>
@@ -710,6 +755,15 @@ const NodeCard: FC<{
             )}
           >
             {msg.text}
+          </div>
+        )}
+
+        {node.message && (
+          <div role="alert" className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+            <div className="font-medium">{t("rapido.nodes.configProblem")}</div>
+            <div dir="ltr" className="mt-0.5 whitespace-pre-wrap break-words">
+              {node.message}
+            </div>
           </div>
         )}
 
@@ -952,6 +1006,7 @@ export const NodesAdmin: FC = () => {
         <NodeFormModal
           initial={editing}
           defaultCapacity={defaultCapacity}
+          openConns={editing ? loadByNodeId.get(editing.id)?.conns : undefined}
           onClose={() => setEditing(undefined)}
           onCreated={(result) => {
             setEditing(undefined);

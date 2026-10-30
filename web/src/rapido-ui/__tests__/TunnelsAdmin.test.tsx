@@ -199,6 +199,95 @@ describe("tunnel card", () => {
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
     expect(screen.getByText(/Both ends \(node and relay\) will be torn down/)).toBeInTheDocument();
   });
+
+  // Interpolated numbers carry bidi isolates; what is read has none.
+  const plain = (el: HTMLElement) => (el.textContent ?? "").replace(/[⁦⁩]/g, "");
+
+  it.each([
+    ["Stop", /stay offline until you start it again/, "/tunnels/1/stop"],
+    ["Restart", /lose service for a short while/, "/tunnels/1/restart"],
+  ])("asks before %s, says what happens and how many connections it cuts, and only acts on the second click", async (button, wording, endpoint) => {
+    tunnels = [tunnel()];
+    renderPage();
+    await screen.findByText("de-tunnel");
+
+    fireEvent.click(screen.getByRole("button", { name: button }));
+    expect(calls("POST")).toHaveLength(0);
+    const warning = screen.getByText(wording);
+    expect(warning).toHaveTextContent("Nothing is deleted");
+    expect(plain(warning)).toContain("Connections through it right now: 120.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByText(wording)).not.toBeInTheDocument();
+    expect(calls("POST")).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: button }));
+    fireEvent.click(screen.getByRole("button", { name: button }));
+    await waitFor(() => expect(calls("POST")).toHaveLength(1));
+    expect(calls("POST")[0][0]).toBe(endpoint);
+    expect(screen.queryByText(wording)).not.toBeInTheDocument();
+  });
+
+  it("says a delete cuts connections and cannot be undone, with the count once it has been measured", async () => {
+    tunnels = [tunnel()];
+    renderPage();
+    await screen.findByText("de-tunnel");
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    const warning = screen.getByText(/Both ends \(node and relay\) will be torn down/);
+    expect(warning).toHaveTextContent("This cannot be undone");
+    expect(plain(warning)).toContain("Connections through it right now: 120.");
+  });
+
+  it("leaves the count out before the first measurement", async () => {
+    tunnels = [tunnel({ metrics: null })];
+    renderPage();
+    await screen.findByText("de-tunnel");
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    expect(screen.getByText(/Both ends \(node and relay\) will be torn down/)).not.toHaveTextContent("right now");
+  });
+
+  it("shows the teardown warning on the page after the deleted tunnel's card has gone, until dismissed", async () => {
+    tunnels = [tunnel()];
+    fetchMock.mockImplementation((url: string, opts?: { method?: string }) => {
+      if (url === "/tunnels/1" && opts?.method === "DELETE") {
+        tunnels = [];
+        return Promise.resolve({ detail: "Tunnel deleted", teardown_warning: "relay unreachable: connection refused" });
+      }
+      if (url === "/tunnels" && !opts?.method) return Promise.resolve(tunnels);
+      if (url === "/nodes") return Promise.resolve([]);
+      return Promise.resolve({});
+    });
+    renderPage();
+    await screen.findByText("de-tunnel");
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(screen.queryByText("de-tunnel", { selector: "span.truncate" })).not.toBeInTheDocument();
+    expect(alert).toHaveTextContent('Tunnel "de-tunnel" was removed from the panel');
+    expect(alert).toHaveTextContent("relay unreachable: connection refused");
+
+    fireEvent.click(within(alert).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("says nothing extra after a clean delete, and shows why a failed one failed on the card", async () => {
+    tunnels = [tunnel()];
+    fetchMock.mockImplementation((url: string, opts?: { method?: string }) => {
+      if (url === "/tunnels/1" && opts?.method === "DELETE") return Promise.reject({ response: { _data: { detail: "Could not delete the tunnel" } } });
+      if (url === "/tunnels" && !opts?.method) return Promise.resolve(tunnels);
+      if (url === "/nodes") return Promise.resolve([]);
+      return Promise.resolve({});
+    });
+    renderPage();
+    await screen.findByText("de-tunnel");
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    expect(await screen.findByText("Could not delete the tunnel")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete" })).toBeEnabled();
+  });
 });
 
 describe("HAProxy failover panel", () => {

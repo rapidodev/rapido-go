@@ -1,6 +1,7 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { Profiler, createRef, useState } from "react";
 import { describe, expect, it } from "vitest";
-import { JsonEditor } from "../JsonEditor";
+import { JsonEditor, JsonEditorHandle } from "../JsonEditor";
 import { MAX_COLOURED_LINE, tokenizeJson, tokenizeJsonLine } from "../jsonHighlight";
 
 const kinds = (line: string) => tokenizeJsonLine(line).filter((t) => t.type !== "plain").map((t) => `${t.type}:${t.text}`);
@@ -82,5 +83,143 @@ describe("JsonEditor", () => {
     render(<JsonEditor readOnly gutter={false} value="{}" ariaLabel="Out" />);
     expect(screen.queryByTestId("json-gutter")).toBeNull();
     expect(screen.getByLabelText("Out")).toHaveAttribute("readonly");
+  });
+
+  // The coloured copy is placed by arithmetic on a pixel line height, so the textarea has to use
+  // exactly that one: on the Persian UI `[dir="rtl"] .text-xs` outranks any leading-* class, which
+  // left the visible text 35 lines away from the caret on an 855-line document.
+  it("gives the textarea and both layers the same line height, inline where no class can beat it", () => {
+    render(<JsonEditor value={"{\n}"} ariaLabel="Config" />);
+    const box = screen.getByLabelText("Config");
+    const layer = screen.getByTestId("json-layer");
+    const gutter = screen.getByTestId("json-gutter");
+    for (const el of [box, layer, gutter]) {
+      expect(el.style.lineHeight).toBe("20px");
+      expect(el.className).not.toMatch(/\bleading-/);
+    }
+  });
+
+  // Measuring runs after every commit. Under a forwardRef, an update that changes nothing can
+  // still re-render, which came straight back to measuring until React gave up: the page died
+  // the moment the code tab was opened.
+  it("doesn't re-render itself when measuring finds nothing new", () => {
+    let commits = 0;
+    const tree = (value: string) => (
+      <Profiler id="editor" onRender={() => commits++}>
+        <JsonEditor value={value} ariaLabel="Config" />
+      </Profiler>
+    );
+    const { rerender } = render(tree("{}"));
+    const settled = commits;
+    rerender(tree("{}"));
+    expect(commits).toBe(settled + 1);
+    rerender(tree("{ }"));
+    expect(commits).toBe(settled + 2);
+  });
+
+  it("re-draws when it goes from hidden to shown, then settles", () => {
+    let commits = 0;
+    const tree = (
+      <Profiler id="editor" onRender={() => commits++}>
+        <JsonEditor value={"{}"} rows={10} ariaLabel="Config" />
+      </Profiler>
+    );
+    const { rerender } = render(tree);
+    const box = screen.getByLabelText("Config");
+    Object.defineProperty(box, "clientHeight", { configurable: true, value: 216 });
+    const before = commits;
+    rerender(
+      <Profiler id="editor" onRender={() => commits++}>
+        <JsonEditor value={"{}"} rows={10} ariaLabel="Config" />
+      </Profiler>
+    );
+    // The render that noticed, and the one with the new height.
+    expect(commits - before).toBeLessThanOrEqual(2);
+  });
+
+  it("reveals a line: caret at its start, scrolled into view, and reported", () => {
+    const value = Array.from({ length: 200 }, (_, i) => `line${i + 1}`).join("\n");
+    const ref = createRef<JsonEditorHandle>();
+    const carets: { line: number; column: number }[] = [];
+    render(<JsonEditor ref={ref} value={value} rows={10} ariaLabel="Config" onCaretChange={(c) => carets.push(c)} />);
+    const box = screen.getByLabelText("Config") as HTMLTextAreaElement;
+    Object.defineProperty(box, "clientHeight", { configurable: true, value: 216 });
+
+    act(() => ref.current?.revealLine(100));
+
+    expect(value.slice(box.selectionStart, box.selectionStart + 7)).toBe("line100");
+    expect(box.scrollTop).toBe(99 * 20 - 72);
+    expect(document.activeElement).toBe(box);
+    expect(carets.at(-1)).toEqual({ line: 100, column: 1 });
+  });
+
+  describe("code keys", () => {
+    const Harness = ({ initial, readOnly = false }: { initial: string; readOnly?: boolean }) => {
+      const [value, setValue] = useState(initial);
+      return <JsonEditor codeKeys readOnly={readOnly} value={value} ariaLabel="Config" onChange={setValue} />;
+    };
+    const box = () => screen.getByLabelText("Config") as HTMLTextAreaElement;
+    const caret = (at: number) => box().setSelectionRange(at, at);
+
+    it("Tab indents and stays in the box", () => {
+      render(<Harness initial={"a"} />);
+      caret(0);
+      const notPrevented = fireEvent.keyDown(box(), { key: "Tab" });
+      expect(notPrevented).toBe(false);
+      expect(box().value).toBe("  a");
+      expect(box().selectionStart).toBe(2);
+    });
+
+    it("Shift+Tab outdents", () => {
+      render(<Harness initial={"    a"} />);
+      caret(4);
+      fireEvent.keyDown(box(), { key: "Tab", shiftKey: true });
+      expect(box().value).toBe("  a");
+    });
+
+    it("Enter keeps the indent", () => {
+      render(<Harness initial={'  "a": {'} />);
+      caret(8);
+      fireEvent.keyDown(box(), { key: "Enter" });
+      expect(box().value).toBe('  "a": {\n    ');
+      expect(box().selectionStart).toBe(13);
+    });
+
+    it("Escape then Tab leaves the box, including Shift+Tab with the Shift key pressed first", () => {
+      render(<Harness initial={"a"} />);
+      caret(0);
+      fireEvent.keyDown(box(), { key: "Escape" });
+      expect(fireEvent.keyDown(box(), { key: "Tab" })).toBe(true);
+      expect(box().value).toBe("a");
+
+      fireEvent.keyDown(box(), { key: "Escape" });
+      fireEvent.keyDown(box(), { key: "Shift", shiftKey: true });
+      expect(fireEvent.keyDown(box(), { key: "Tab", shiftKey: true })).toBe(true);
+      expect(box().value).toBe("a");
+
+      // Only the very next key: after that, Tab indents again.
+      fireEvent.keyDown(box(), { key: "Escape" });
+      fireEvent.keyDown(box(), { key: "ArrowLeft" });
+      expect(fireEvent.keyDown(box(), { key: "Tab" })).toBe(false);
+    });
+
+    it("leaves browser shortcuts and read-only documents alone", () => {
+      render(<Harness initial={"a"} />);
+      expect(fireEvent.keyDown(box(), { key: "Tab", ctrlKey: true })).toBe(true);
+      expect(fireEvent.keyDown(box(), { key: "Enter", ctrlKey: true })).toBe(true);
+      expect(box().value).toBe("a");
+    });
+
+    it("does nothing when read-only", () => {
+      render(<Harness initial={"a"} readOnly />);
+      expect(fireEvent.keyDown(box(), { key: "Tab" })).toBe(true);
+      expect(fireEvent.keyDown(box(), { key: "Enter" })).toBe(true);
+      expect(box().value).toBe("a");
+    });
+
+    it("is off by default, so a pasted-into box keeps normal Tab order", () => {
+      render(<JsonEditor value="a" ariaLabel="Plain" onChange={() => {}} />);
+      expect(fireEvent.keyDown(screen.getByLabelText("Plain"), { key: "Tab" })).toBe(true);
+    });
   });
 });

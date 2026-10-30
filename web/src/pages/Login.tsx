@@ -1,4 +1,3 @@
-import { queryClient } from "utils/queryClient";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { FC, useEffect, useState } from "react";
 import { FieldValues, useForm } from "react-hook-form";
@@ -7,7 +6,9 @@ import { useTranslation } from "react-i18next";
 import { z } from "zod";
 import { fetch } from "service/http";
 import { errorText } from "service/errors";
-import { removeAuthToken, setAuthToken } from "utils/authStorage";
+import { adoptNewSession } from "hooks/useCurrentAdminQuery";
+import { setAuthToken } from "utils/authStorage";
+import { clearSession } from "utils/session";
 import { LoginResponse } from "types/Login";
 import Logo from "assets/logo.svg?react";
 import { LanguageSwitcher } from "rapido-ui/LanguageSwitcher";
@@ -28,7 +29,7 @@ export const Login: FC = () => {
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
   const { t, i18n } = useTranslation();
-  let location = useLocation();
+  const sessionExpired = !!(useLocation().state as { sessionExpired?: boolean } | null)?.sessionExpired;
   const {
     register,
     formState: { errors },
@@ -36,14 +37,8 @@ export const Login: FC = () => {
   } = useForm({
     resolver: zodResolver(schema),
   });
-  useEffect(() => {
-    removeAuthToken();
- queryClient.clear();
-    if (location.pathname !== "/login") {
-      navigate("/login", { replace: true });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // Only this route renders the form, and reaching it is how an admin logs out.
+  useEffect(clearSession, []);
   const login = (values: FieldValues) => {
     setError("");
     const formData = new FormData();
@@ -54,6 +49,7 @@ export const Login: FC = () => {
     fetch<LoginResponse>("/admin/token", { method: "post", body: formData })
       .then(({ access_token: token }) => {
         setAuthToken(token);
+        adoptNewSession();
         navigate("/");
       })
       .catch((err) => {
@@ -113,11 +109,15 @@ export const Login: FC = () => {
                 )}
               </div>
 
-              {error && (
+              {error ? (
                 <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">
                   {error}
                 </div>
-              )}
+              ) : sessionExpired ? (
+                <div role="status" className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-400">
+                  {t("rapido.sessionExpired")}
+                </div>
+              ) : null}
 
               <Button
                 variant="primary"

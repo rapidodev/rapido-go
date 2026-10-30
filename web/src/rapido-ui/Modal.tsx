@@ -26,15 +26,16 @@ export const Modal: FC<ModalProps> = ({ onClose, title, className, children }) =
       if (e.target === e.currentTarget) onClose();
     }}
   >
-    <Card
-      elevation={3}
-      className={classNames(
-        "max-h-[90vh] w-full max-w-sm animate-rp-rise overflow-y-auto border-rapido-accent/20 bg-rapido-surface",
-        className
-      )}
-    >
-      {title !== undefined && <CardTitle className="mb-3 text-base">{title}</CardTitle>}
-      {children}
-    </Card>
+    {/* The width sits on a wrapper: Tailwind orders same-property utilities by name, not size, so
+        on the card a caller's max-w-2xl would lose to both max-w-sm and the card's own max-w-full. */}
+    <div className={classNames("w-full", className ?? "max-w-sm")}>
+      <Card
+        elevation={3}
+        className="max-h-[90vh] animate-rp-rise overflow-y-auto border-rapido-accent/20 bg-rapido-surface"
+      >
+        {title !== undefined && <CardTitle className="mb-3 text-base">{title}</CardTitle>}
+        {children}
+      </Card>
+    </div>
   </div>
 );

@@ -27,6 +27,11 @@ export type Node = {
   // credentials; false = it does not and the restart asks for them once. Absent
   // from a panel older than node restart.
   ssh_known?: boolean;
+  // What the node agent last reported about itself; an older agent leaves both
+  // empty. xray_version is the agent's own build version, despite the name, and
+  // message says why this node cannot run the current config (null when fine).
+  xray_version?: string | null;
+  message?: string | null;
 };
 
 // POST /api/node and PUT /api/node/:id both take the full field set -

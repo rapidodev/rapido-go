@@ -1,4 +1,4 @@
-import { Key, ReactNode, useEffect, useRef } from "react";
+import { HTMLAttributes, Key, ReactNode, useEffect, useRef } from "react";
 import classNames from "classnames";
 import { useTranslation } from "react-i18next";
 import { Button } from "./Button";
@@ -27,6 +27,8 @@ export type DataTableProps<Row> = {
   loading?: boolean;
   empty?: ReactNode;
   onRowClick?: (row: Row) => void;
+  /** Extra attributes for a row's <tr>, such as drag handlers. */
+  rowProps?: (row: Row) => HTMLAttributes<HTMLTableRowElement>;
   /** The scroll box height; the header stays pinned inside it. */
   maxHeight?: string;
   "aria-label"?: string;
@@ -52,6 +54,7 @@ export function DataTable<Row>({
   loading = false,
   empty,
   onRowClick,
+  rowProps,
   maxHeight = "70vh",
   "aria-label": ariaLabel,
   className,
@@ -145,15 +148,18 @@ export function DataTable<Row>({
               rows.map((row) => {
                 const k = rowKey(row);
                 const on = sel.has(k);
+                const extra = rowProps?.(row);
                 return (
                   <tr
                     key={k}
                     aria-selected={selectable ? on : undefined}
                     onClick={onRowClick ? () => onRowClick(row) : undefined}
+                    {...extra}
                     className={classNames(
                       "transition-colors",
                       on ? "bg-rapido-accent/10" : "hover:bg-rapido-raised/60",
-                      onRowClick && "cursor-pointer"
+                      onRowClick && "cursor-pointer",
+                      extra?.className
                     )}
                   >
                     {selectable && (

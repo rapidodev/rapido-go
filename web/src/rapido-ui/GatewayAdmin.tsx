@@ -223,8 +223,19 @@ const PeerRow: FC<{ peer: GatewayPeer; onEdit: () => void }> = ({ peer, onEdit }
   const { t } = useTranslation();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const [deleteError, setDeleteError] = useState("");
   const deletePeer = useDeleteGatewayPeerMutation();
   const testPeer = useTestGatewayPeerMutation();
+
+  const remove = () => {
+    setDeleteError("");
+    deletePeer.mutate(peer.id, {
+      onError: (e) => {
+        setDeleteError(errorText(e, t("rapido.gateway.deleteFailed")));
+        setConfirmDelete(false);
+      },
+    });
+  };
 
   const runTest = () => {
     setTestResult(null);
@@ -272,6 +283,12 @@ const PeerRow: FC<{ peer: GatewayPeer; onEdit: () => void }> = ({ peer, onEdit }
         </div>
       )}
 
+      {deleteError && (
+        <div className="mt-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-400">
+          {deleteError}
+        </div>
+      )}
+
       <div className="mt-3 flex flex-wrap items-center gap-1.5">
         <Button variant="chip" disabled={testPeer.isPending} onClick={runTest}>
           {testPeer.isPending ? t("rapido.pleaseWait") : t("rapido.gateway.testConnection")}
@@ -282,7 +299,7 @@ const PeerRow: FC<{ peer: GatewayPeer; onEdit: () => void }> = ({ peer, onEdit }
         {confirmDelete ? (
           <>
             <span className="text-xs text-red-400">{t("rapido.gateway.deleteWarning")}</span>
-            <Button variant="chip" tone="red" disabled={deletePeer.isPending} onClick={() => deletePeer.mutate(peer.id)}>
+            <Button variant="chip" tone="red" disabled={deletePeer.isPending} onClick={remove}>
               {t("delete")}
             </Button>
             <Button variant="chip" onClick={() => setConfirmDelete(false)}>
@@ -323,8 +340,15 @@ export const GatewayAdmin: FC = () => {
         </div>
       )}
 
+      {/* The key: the form copies its target into state once, so moving from
+          one peer's Edit to another's must start a fresh form, or saving would
+          write the first peer's values onto the second. */}
       {formTarget !== false && (
-        <PeerForm initial={formTarget === "new" ? undefined : formTarget} onClose={() => setFormTarget(false)} />
+        <PeerForm
+          key={formTarget === "new" ? "new" : formTarget.id}
+          initial={formTarget === "new" ? undefined : formTarget}
+          onClose={() => setFormTarget(false)}
+        />
       )}
 
       {isLoading ? (

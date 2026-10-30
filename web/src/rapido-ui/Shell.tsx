@@ -1,4 +1,3 @@
-import { queryClient } from "utils/queryClient";
 import { FC, PropsWithChildren, ReactNode, TouchEvent, useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -27,7 +26,7 @@ import {
 } from "@heroicons/react/24/outline";
 import Logo from "assets/logo.svg?react";
 import { useCurrentAdminQuery } from "hooks/useCurrentAdminQuery";
-import { removeAuthToken } from "utils/authStorage";
+import { clearSession } from "utils/session";
 import { extensionNavItems, mergeNavItems } from "extensions";
 import { LanguageSwitcher } from "rapido-ui/LanguageSwitcher";
 import { AppearanceButton } from "rapido-ui/AppearancePanel";
@@ -203,7 +202,7 @@ const FOCUSABLE = 'a[href], button:not([disabled]), input, select, textarea, [ta
 export const RapidoShell: FC<PropsWithChildren<{ active: RapidoNavKey | (string & {}) }>> = ({ active, children }) => {
   const navigate = useNavigate();
   const { t, i18n } = useTranslation();
-  const { data, isSuccess, isPending } = useCurrentAdminQuery();
+  const { data, isPending } = useCurrentAdminQuery();
   const dir = dirOf(i18n.language);
   const desktop = useIsDesktop();
   const [open, setOpen] = useState(false);
@@ -213,13 +212,13 @@ export const RapidoShell: FC<PropsWithChildren<{ active: RapidoNavKey | (string 
   const touchStart = useRef<{ x: number; y: number } | null>(null);
 
   // Fail closed: while /admin is still in flight the admin is treated as
-  // non-sudo, so a link the backend would answer with 403 is never shown.
-  const isSudo = !isPending && isSuccess && !!data?.is_sudo;
+  // non-sudo, so a link the backend would answer with 403 is never shown. A
+  // failed refresh keeps the links: a 401 has already ended the session.
+  const isSudo = !isPending && !!data?.is_sudo;
   const navItems = ALL_NAV_ITEMS.filter((item) => !item.sudoOnly || isSudo);
 
   const logout = () => {
-    removeAuthToken();
- queryClient.clear();
+    clearSession();
     navigate("/login");
   };
 

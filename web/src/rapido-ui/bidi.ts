@@ -26,3 +26,13 @@ const PDI = "⁩";
  */
 export const ltrIsolate = (value: string | number): string =>
   `${LRI}${value}${PDI}`;
+
+/** U+2068 FIRST STRONG ISOLATE */
+const FSI = "⁨";
+
+/**
+ * The same isolation for a value that is itself translated, and so may run
+ * either way: it takes the direction of its own first letter.
+ */
+export const autoIsolate = (value: string | number): string =>
+  `${FSI}${value}${PDI}`;

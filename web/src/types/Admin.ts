@@ -36,6 +36,25 @@ export type AdminModifyPayload = {
   discord_webhook?: string | null;
 };
 
+// GET /api/admins/overview, just the part the Admins page reads: how many
+// configs each admin owns, by status. A reseller gets only their own row.
+export type AdminOverviewRow = {
+  username: string;
+  configs: {
+    total: number;
+    active: number;
+    disabled: number;
+    limited: number;
+    expired: number;
+    on_hold: number;
+  };
+  online: number;
+};
+
+export type AdminsOverview = {
+  admins: AdminOverviewRow[];
+};
+
 export type InactiveAdminRow = {
   username: string;
   last_activity: string;

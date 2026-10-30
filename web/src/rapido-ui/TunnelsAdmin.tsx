@@ -4,6 +4,7 @@ import { SignalIcon } from "@heroicons/react/24/outline";
 import { useTunnelsQuery } from "hooks/useTunnelsQuery";
 import { useNodesQuery } from "hooks/useNodesQuery";
 import { Tunnel } from "types/Tunnel";
+import { ltrIsolate } from "rapido-ui/bidi";
 import { Button } from "rapido-ui/Button";
 import { EmptyState } from "rapido-ui/EmptyState";
 import { Skeleton } from "rapido-ui/Skeleton";
@@ -31,6 +32,7 @@ export const TunnelsAdmin: FC = () => {
   const [adding, setAdding] = useState(false);
   const [detecting, setDetecting] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [teardownWarnings, setTeardownWarnings] = useState<{ name: string; detail: string }[]>([]);
 
   const rows = tunnels ?? [];
   const active = rows.filter((r) => r.status === "active").length;
@@ -62,6 +64,22 @@ export const TunnelsAdmin: FC = () => {
         </div>
       )}
 
+      {/* Stays until it is dismissed: something may still be running on a server. */}
+      {teardownWarnings.map((w, index) => (
+        <div
+          key={index}
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-rapido-warn/30 bg-rapido-warn/10 px-3 py-2 text-xs text-rapido-warn"
+        >
+          <span className="min-w-0 break-words">
+            {t("rapido.tunnels.teardownWarning", { name: w.name, detail: ltrIsolate(w.detail) })}
+          </span>
+          <Button variant="chip" onClick={() => setTeardownWarnings((all) => all.filter((_, i) => i !== index))}>
+            {t("rapido.close")}
+          </Button>
+        </div>
+      ))}
+
       {isLoading ? (
         <div className="grid gap-4" aria-busy="true">
           <Skeleton className="h-64" />
@@ -91,6 +109,7 @@ export const TunnelsAdmin: FC = () => {
               tunnel={tunnel}
               nodeName={nodeNameById.get(tunnel.node_id)}
               onEdit={(tn) => setEditingId(tn.id)}
+              onTeardownWarning={(name, detail) => setTeardownWarnings((all) => [...all, { name, detail }])}
             />
           ))}
         </div>

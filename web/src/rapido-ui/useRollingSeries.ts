@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { onSessionClear } from "utils/session";
 
 // A client-side rolling buffer of the last N samples of a metric, so a card can
 // draw a trend from nothing but the numbers the panel already polls. It lives
@@ -26,6 +27,8 @@ export const pushSample = (
 };
 
 export const clearSeries = (): void => store.clear();
+
+onSessionClear(clearSeries);
 
 /**
  * The rolling series for `key`. A new sample is recorded each time `stamp`

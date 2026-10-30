@@ -1,6 +1,6 @@
-import { FC, useEffect, useState } from "react";
+import { FC, useEffect, useSyncExternalStore } from "react";
 import { useThemeQuery } from "hooks/useThemeQuery";
-import { getAuthToken } from "utils/authStorage";
+import { getAuthToken, subscribeAuthToken } from "utils/authStorage";
 import { applyServerTheme } from "./panelTheme";
 
 /**
@@ -10,16 +10,9 @@ import { applyServerTheme } from "./panelTheme";
  * first paint of the next visit already has it; a failed request leaves whatever is in force.
  */
 export const ThemeSync: FC = () => {
-  const [signedIn, setSignedIn] = useState(() => !!getAuthToken());
-  useEffect(() => {
-    const check = () => setSignedIn(!!getAuthToken());
-    window.addEventListener("hashchange", check);
-    window.addEventListener("storage", check);
-    return () => {
-      window.removeEventListener("hashchange", check);
-      window.removeEventListener("storage", check);
-    };
-  }, []);
+  // Signing in changes the page through the router's pushState, which fires no hashchange, so
+  // this listens to the token itself.
+  const signedIn = useSyncExternalStore(subscribeAuthToken, () => !!getAuthToken());
   const { data } = useThemeQuery(signedIn);
   useEffect(() => {
     if (data) applyServerTheme(data.theme);

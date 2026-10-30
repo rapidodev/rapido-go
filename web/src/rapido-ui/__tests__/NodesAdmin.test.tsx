@@ -277,9 +277,9 @@ describe("Advanced section of the node form", () => {
 });
 
 describe("the reveal panel of a newly created node", () => {
-  const command = () => `curl -fsSL ${window.location.origin}/install/node.sh | sudo bash -s -- 'QUJDREVGRw=='`;
+  const command = () => `curl -fsSL ${window.location.origin}/install/node.sh | sudo bash`;
 
-  it("leads with the install command, built from this panel's origin and the setup blob", () => {
+  it("leads with the install command, built from this panel's origin, and the setup blob it asks for", () => {
     createMutate.mockImplementation((_body, opts) => opts.onSuccess(created()));
     render(<NodesAdmin />);
     openCreateForm();
@@ -289,7 +289,8 @@ describe("the reveal panel of a newly created node", () => {
     const box = screen.getByLabelText("Install command") as HTMLTextAreaElement;
     expect(box.value).toBe(command());
     expect(box).toHaveAttribute("dir", "ltr");
-    // The blob itself is still offered below it.
+    // Not in the command, where it would land in shell history.
+    expect(box.value).not.toContain("QUJDREVGRw==");
     expect(screen.getByLabelText("Setup blob")).toHaveValue("QUJDREVGRw==");
   });
 
@@ -521,7 +522,95 @@ describe("capacity in the node's row", () => {
     state.nodes = [node({ capacity: 15000 })];
     render(<NodesAdmin />);
     click(screen.getByRole("button", { name: "Disable" }));
+    click(screen.getByRole("button", { name: "Disable" })); // the confirmation's
     expect(updateMutate.mock.calls[0][0].body).not.toHaveProperty("capacity");
+  });
+});
+
+describe("taking a node out of service", () => {
+  it("asks before disabling it, says what happens and how many clients are on it", () => {
+    state.nodes = [node()];
+    state.load = loadOf();
+    render(<NodesAdmin />);
+
+    click(screen.getByRole("button", { name: "Disable" }));
+    expect(updateMutate).not.toHaveBeenCalled();
+    const warning = screen.getByText(/every client connected through it is disconnected/);
+    expect(warning).toHaveTextContent("enabling it undoes this");
+    expect(plain(warning)).toContain("Open client connections right now: 3960.");
+
+    click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByText(/every client connected through it is disconnected/)).not.toBeInTheDocument();
+    expect(updateMutate).not.toHaveBeenCalled();
+
+    click(screen.getByRole("button", { name: "Disable" }));
+    click(screen.getByRole("button", { name: "Disable" }));
+    expect(updateMutate).toHaveBeenCalledTimes(1);
+    expect(updateMutate.mock.calls[0][0].body).toMatchObject({ disabled: true });
+  });
+
+  it("leaves the number out when the panel does not know it", () => {
+    state.nodes = [node()];
+    render(<NodesAdmin />);
+    click(screen.getByRole("button", { name: "Disable" }));
+    expect(screen.getByText(/every client connected through it is disconnected/)).not.toHaveTextContent("right now");
+  });
+
+  it("enables a disabled node straight away: nobody loses anything", () => {
+    state.nodes = [node({ status: "disabled" })];
+    render(<NodesAdmin />);
+    click(screen.getByRole("button", { name: "Enable" }));
+    expect(updateMutate.mock.calls[0][0].body).toMatchObject({ disabled: false });
+  });
+
+  it("warns in the edit form as soon as the box is ticked, not for a node already disabled", () => {
+    state.nodes = [node()];
+    state.load = loadOf();
+    const { unmount } = render(<NodesAdmin />);
+    click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.queryByText(/every client connected through it is disconnected/)).not.toBeInTheDocument();
+    click(screen.getByLabelText("Disable this node"));
+    expect(plain(screen.getByText(/every client connected through it is disconnected/))).toContain("3960");
+    unmount();
+
+    state.nodes = [node({ status: "disabled" })];
+    render(<NodesAdmin />);
+    click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.getByLabelText("Disable this node")).toBeChecked();
+    expect(screen.queryByText(/every client connected through it is disconnected/)).not.toBeInTheDocument();
+  });
+
+  it("says deleting disconnects its clients, drops its tunnels and history, and cannot be undone", () => {
+    state.nodes = [node()];
+    state.load = loadOf();
+    render(<NodesAdmin />);
+    click(screen.getByRole("button", { name: "Delete" }));
+    const warning = screen.getByText(/every client connected through it is disconnected/);
+    expect(warning).toHaveTextContent("usage history is erased");
+    expect(warning).toHaveTextContent("its tunnels are removed from the panel");
+    expect(warning).toHaveTextContent("This cannot be undone");
+    expect(plain(warning)).toContain("3960");
+  });
+});
+
+describe("what the node agent reports", () => {
+  it("shows its version as small muted text and why it cannot run the config as a warning", () => {
+    state.nodes = [node({ xray_version: "1.8.2", message: "inbound vless: unknown transport" })];
+    render(<NodesAdmin />);
+    const version = screen.getByText("1.8.2");
+    expect(version).toHaveAttribute("title", "Node agent version");
+    expect(version.className).toContain("text-[11px]");
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("This node cannot run the current config:");
+    expect(alert).toHaveTextContent("inbound vless: unknown transport");
+    expect(screen.getByText("inbound vless: unknown transport")).toHaveAttribute("dir", "ltr");
+  });
+
+  it.each([[undefined], [null], [""]])("shows nothing for an older agent that reports %s", (empty) => {
+    state.nodes = [node({ xray_version: empty, message: empty })];
+    render(<NodesAdmin />);
+    expect(screen.queryByTitle("Node agent version")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
 

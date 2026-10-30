@@ -17,16 +17,16 @@ import {
   DataLimitResetStrategy,
   ProtocolType,
   ProxySettingsWriteMap,
-  Status,
   UserCreatePayload,
   UserInbounds,
 } from "types/User";
+import { daysToExpire, gbToDataLimit } from "utils/userConversions";
 import {
-  daysToExpire,
-  dataLimitToGb,
-  expireToDays,
-  gbToDataLimit,
-} from "utils/userConversions";
+  buildUserEdit,
+  onHoldDaysMissing,
+  userEditValues,
+  userStatusOptions,
+} from "utils/userEditPayload";
 import { CardSubtitle, CardTitle } from "rapido-ui/Card";
 import { Modal } from "rapido-ui/Modal";
 import { Input } from "rapido-ui/Input";
@@ -50,8 +50,6 @@ const PROTOCOL_ORDER: ProtocolType[] = [
   "shadowtls",
 ];
 
-const STATUSES: Status[] = ["active", "on_hold", "limited", "expired", "disabled"];
-
 const RESET_STRATEGIES: { value: DataLimitResetStrategy; labelKey: string }[] = [
   { value: "no_reset", labelKey: "userDialog.resetStrategyNo" },
   { value: "day", labelKey: "userDialog.resetStrategyDaily" },
@@ -69,6 +67,7 @@ const formSchema = z.object({
   data_limit_gb: z.string(),
   data_limit_reset_strategy: z.string(),
   expire_days: z.string(),
+  on_hold_days: z.string(),
   note: z.string(),
 });
 
@@ -80,6 +79,7 @@ const emptyFormValues: FormValues = {
   data_limit_gb: "",
   data_limit_reset_strategy: "no_reset",
   expire_days: "",
+  on_hold_days: "",
   note: "",
 };
 
@@ -142,6 +142,7 @@ export const UserFormModal: FC = () => {
     register,
     handleSubmit,
     reset,
+    watch,
     formState: { errors },
   } = useForm<FormValues>({
     resolver: zodResolver(formSchema),
@@ -152,14 +153,7 @@ export const UserFormModal: FC = () => {
     if (!isOpen) return;
     setError("");
     if (editingUser) {
-      reset({
-        username: editingUser.username,
-        status: editingUser.status,
-        data_limit_gb: dataLimitToGb(editingUser.data_limit)?.toString() ?? "",
-        data_limit_reset_strategy: editingUser.data_limit_reset_strategy,
-        expire_days: expireToDays(editingUser.expire)?.toString() ?? "",
-        note: editingUser.note ?? "",
-      });
+      reset({ username: editingUser.username, ...userEditValues(editingUser) });
       setSelectedProtocols(new Set(Object.keys(editingUser.proxies)));
       const inboundState: Record<string, Set<string>> = {};
       const touched = new Set<string>();
@@ -200,6 +194,7 @@ export const UserFormModal: FC = () => {
   }, [isOpen, isEdit, availableProtocols, inbounds]);
 
   const usernameError = errors.username?.message ? t(errors.username.message as string) : "";
+  const status = watch("status");
 
   if (!isOpen) return null;
 
@@ -238,8 +233,42 @@ export const UserFormModal: FC = () => {
     });
   };
 
+  const finish = () => {
+    if (isEdit) setEditingUser(null);
+    else setCreatingNewUser(false);
+  };
+
+  const onEdit = (values: FormValues) => {
+    if (!editingUser) return;
+    if (onHoldDaysMissing(values)) {
+      setError(t("rapido.onHoldDaysRequired"));
+      return;
+    }
+    const body = buildUserEdit(
+      editingUser,
+      values,
+      selectedProtocols,
+      selectedInbounds,
+      touchedInboundProtocols
+    );
+    if (Object.keys(body).length === 0) {
+      finish();
+      return;
+    }
+    updateUser
+      .mutateAsync({ username: editingUser.username, body })
+      .then(finish)
+      .catch((err: unknown) => {
+        setError(errorText(err, t("rapido.failedToSaveUser")));
+      });
+  };
+
   const onSubmit = (values: FormValues) => {
     setError("");
+    if (isEdit) {
+      onEdit(values);
+      return;
+    }
 
     const days = values.expire_days ? Number(values.expire_days) : 0;
     const gb = values.data_limit_gb ? Number(values.data_limit_gb) : 0;
@@ -249,18 +278,6 @@ export const UserFormModal: FC = () => {
     selectedProtocols.forEach((protocol) => {
       proxies[protocol] = {};
     });
-    // The backend only touches a protocol this map mentions - unchecking one
-    // the user already had needs an explicit null to actually remove it,
-    // not just leaving its key out (see ProxySettingsWriteMap's own doc
-    // comment). A protocol never owned and never checked stays out of the
-    // payload entirely, same as before.
-    if (isEdit) {
-      ownedProtocols.forEach((protocol) => {
-        if (!selectedProtocols.has(protocol)) {
-          proxies[protocol] = null;
-        }
-      });
-    }
 
     const userInbounds: UserInbounds = {};
     selectedProtocols.forEach((protocol) => {
@@ -271,7 +288,7 @@ export const UserFormModal: FC = () => {
 
     const payload: UserCreatePayload = {
       username: values.username,
-      status: isEdit ? (values.status as Status) : "active",
+      status: "active",
       data_limit,
       // No point scheduling a reset for a limit that doesn't exist.
       data_limit_reset_strategy: data_limit
@@ -284,15 +301,9 @@ export const UserFormModal: FC = () => {
       inbounds: userInbounds,
     };
 
-    const request = isEdit
-      ? updateUser.mutateAsync({ username: payload.username, body: payload })
-      : createUser.mutateAsync(payload);
-
-    request
-      .then(() => {
-        if (isEdit) setEditingUser(null);
-        else setCreatingNewUser(false);
-      })
+    createUser
+      .mutateAsync(payload)
+      .then(finish)
       .catch((err: unknown) => {
         setError(errorText(err, t("rapido.failedToSaveUser")));
       });
@@ -345,15 +356,15 @@ export const UserFormModal: FC = () => {
             )}
           </div>
 
-          {isEdit && (
+          {editingUser && (
             <div>
               <label className="mb-1 block text-xs font-medium text-rapido-muted">
                 {t("rapido.statusLabel")}
               </label>
               <Select {...register("status")}>
-                {STATUSES.map((status) => (
-                  <option key={status} value={status}>
-                    {t(`status.${status}`)}
+                {userStatusOptions(editingUser.status).map((option) => (
+                  <option key={option} value={option}>
+                    {t(`status.${option}`)}
                   </option>
                 ))}
               </Select>
@@ -381,13 +392,30 @@ export const UserFormModal: FC = () => {
             </Select>
           </div>
 
-          <div>
-            <label className="mb-1 block text-xs font-medium text-rapido-muted">
-              {t("rapido.expireDaysFromNow")}
-            </label>
-            <Input type="number" min={0} step="1" {...register("expire_days")} />
-            <p className="mt-1 text-xs text-rapido-muted">{t("rapido.emptyNeverHint")}</p>
-          </div>
+          {status === "on_hold" ? (
+            <div>
+              <label className="mb-1 block text-xs font-medium text-rapido-muted">
+                {t("rapido.onHoldDays")}
+              </label>
+              <Input type="number" min={0} step="any" {...register("on_hold_days")} />
+              <p className="mt-1 text-xs text-rapido-muted">{t("rapido.onHoldDaysHint")}</p>
+            </div>
+          ) : (
+            <div>
+              <label className="mb-1 block text-xs font-medium text-rapido-muted">
+                {t("rapido.expireDaysFromNow")}
+              </label>
+              {/* An expired user shows how long ago as a negative number; a
+                  minimum would make the browser refuse to submit the form. */}
+              <Input
+                type="number"
+                min={Number(watch("expire_days")) < 0 ? undefined : 0}
+                step="1"
+                {...register("expire_days")}
+              />
+              <p className="mt-1 text-xs text-rapido-muted">{t("rapido.emptyNeverHint")}</p>
+            </div>
+          )}
         </div>
 
         <InboundsPicker

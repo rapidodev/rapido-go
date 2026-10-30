@@ -12,6 +12,7 @@ import { activeServerOf, formatDuration, ipFamily } from "utils/tunnelMetrics";
 import { agoText } from "utils/ago";
 import { errorText } from "service/errors";
 import { Badge, BadgeTone } from "./Badge";
+import { ltrIsolate } from "./bidi";
 import { Button } from "./Button";
 import { Card } from "./Card";
 import { PathDiagram } from "./PathDiagram";
@@ -79,11 +80,14 @@ export const TunnelCard: FC<{
   tunnel: Tunnel;
   nodeName: string | undefined;
   onEdit: (tunnel: Tunnel) => void;
+  /** The tunnel was deleted but a server could not be cleaned up. It goes to the page:
+   * this card is gone by the time the answer is in. */
+  onTeardownWarning: (name: string, warning: string) => void;
   /** Room for an events / outage timeline strip under the path. */
   events?: ReactNode;
-}> = ({ tunnel, nodeName, onEdit, events }) => {
+}> = ({ tunnel, nodeName, onEdit, onTeardownWarning, events }) => {
   const { t } = useTranslation();
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirm, setConfirm] = useState<"delete" | "restart" | "stop" | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const deleteTunnel = useDeleteTunnelMutation();
   const stopTunnel = useStopTunnelMutation();
@@ -114,17 +118,37 @@ export const TunnelCard: FC<{
     mutate(tunnel.id, { onError: (e) => setMsg(errorText(e, String(t(failKey)))) });
   };
 
+  // The list is refetched before the delete settles, so this card is on its way out
+  // when the answer arrives: a warning kept here would never be seen. mutateAsync
+  // because, unlike mutate's callbacks, it still answers after an unmount.
   const remove = () => {
     setMsg(null);
-    deleteTunnel.mutate(tunnel.id, {
-      onSuccess: (result) => {
-        if (result.teardown_warning) setMsg(result.teardown_warning);
+    deleteTunnel.mutateAsync(tunnel.id).then(
+      (result) => {
+        if (result.teardown_warning) onTeardownWarning(tunnel.name, result.teardown_warning);
       },
-      onError: (e) => {
+      (e) => {
         setMsg(errorText(e, String(t("rapido.tunnels.deleteFailed"))));
-        setConfirmDelete(false);
-      },
-    });
+        setConfirm(null);
+      }
+    );
+  };
+
+  const runConfirmed = () => {
+    if (confirm === "delete") {
+      remove();
+      return;
+    }
+    setConfirm(null);
+    if (confirm === "restart") runAction((id, o) => restartTunnel.mutate(id, o), "rapido.tunnels.restartFailed");
+    else runAction((id, o) => stopTunnel.mutate(id, o), "rapido.tunnels.stopFailed");
+  };
+
+  const confirmText = () => {
+    if (confirm === "delete" && !managed) return t("rapido.tunnels.confirmDeleteDetected");
+    const text = t(confirm === "delete" ? "rapido.tunnels.confirmDelete" : confirm === "restart" ? "rapido.tunnels.confirmRestart" : "rapido.tunnels.confirmStop");
+    // Live count of established connections through this tunnel, once it has been measured.
+    return m ? `${text} ${t("rapido.tunnels.openConnsNow", { value: ltrIsolate(m.connections) })}` : text;
   };
 
   return (
@@ -188,15 +212,19 @@ export const TunnelCard: FC<{
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5">
-            {confirmDelete ? (
+            {confirm ? (
               <>
-                <span className="max-w-[20rem] text-xs text-rapido-bad">
-                  {managed ? t("rapido.tunnels.confirmDelete") : t("rapido.tunnels.confirmDeleteDetected")}
-                </span>
-                <Button variant="chip" tone="red" disabled={deleteTunnel.isPending} onClick={remove}>
-                  {managed ? t("delete") : t("rapido.tunnels.removeFromPanel")}
+                <span className="max-w-[20rem] text-xs text-rapido-bad">{confirmText()}</span>
+                <Button variant="chip" tone="red" disabled={deleteTunnel.isPending} onClick={runConfirmed}>
+                  {confirm === "restart"
+                    ? t("rapido.tunnels.restart")
+                    : confirm === "stop"
+                      ? t("rapido.tunnels.stop")
+                      : managed
+                        ? t("delete")
+                        : t("rapido.tunnels.removeFromPanel")}
                 </Button>
-                <Button variant="chip" onClick={() => setConfirmDelete(false)}>
+                <Button variant="chip" onClick={() => setConfirm(null)}>
                   {t("cancel")}
                 </Button>
               </>
@@ -207,10 +235,10 @@ export const TunnelCard: FC<{
                 </Button>
                 {managed && !busy && tunnel.status === "active" && (
                   <>
-                    <Button variant="chip" tone="sky" onClick={() => runAction((id, o) => restartTunnel.mutate(id, o), "rapido.tunnels.restartFailed")}>
+                    <Button variant="chip" tone="sky" onClick={() => setConfirm("restart")}>
                       {t("rapido.tunnels.restart")}
                     </Button>
-                    <Button variant="chip" tone="amber" onClick={() => runAction((id, o) => stopTunnel.mutate(id, o), "rapido.tunnels.stopFailed")}>
+                    <Button variant="chip" tone="amber" onClick={() => setConfirm("stop")}>
                       {t("rapido.tunnels.stop")}
                     </Button>
                   </>
@@ -220,7 +248,7 @@ export const TunnelCard: FC<{
                     {t("rapido.tunnels.start")}
                   </Button>
                 )}
-                <Button variant="chip" tone="red" disabled={busy} onClick={() => setConfirmDelete(true)}>
+                <Button variant="chip" tone="red" disabled={busy} onClick={() => setConfirm("delete")}>
                   {managed ? t("delete") : t("rapido.tunnels.removeFromPanel")}
                 </Button>
               </>

@@ -17,7 +17,7 @@ export const CoreConfigPage: FC = () => {
         <h1 className="mb-1 text-2xl font-bold">{t("rapido.xrayConfig.title")}</h1>
         <p className="mb-6 text-sm text-rapido-muted">{t("rapido.xrayConfig.subtitle")}</p>
         <XrayConfigAdmin />
- <CoreSnapshots />
+        <CoreSnapshots />
       </div>
     </RapidoShell>
   );

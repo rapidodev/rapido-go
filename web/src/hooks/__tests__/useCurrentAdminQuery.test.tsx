@@ -4,13 +4,22 @@ import { PropsWithChildren } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { fetch } from "service/http";
 import { queryClient } from "utils/queryClient";
-import { loadCurrentAdmin, loadCurrentAdminForNavigation, useCurrentAdminQuery } from "../useCurrentAdminQuery";
+import {
+  adoptNewSession,
+  loadCurrentAdmin,
+  loadCurrentAdminForNavigation,
+  useCurrentAdminQuery,
+  useIsOwner,
+  useIsSudo,
+} from "../useCurrentAdminQuery";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { SudoOnly } from "rapido-ui/SudoOnly";
+import { useUsersUiStore } from "rapido-ui/usersUiStore";
 
 vi.mock("service/http", () => ({ fetch: vi.fn() }));
 const mockedFetch = vi.mocked(fetch);
 const wrapper = ({ children }: PropsWithChildren) => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+const refused = () => Object.assign(new Error("unauthorized"), { status: 401 });
 
 beforeEach(() => { queryClient.clear(); mockedFetch.mockReset(); localStorage.setItem("token", "test-only-session-a"); });
 afterEach(() => { queryClient.clear(); localStorage.clear(); vi.restoreAllMocks(); });
@@ -61,22 +70,60 @@ it("opens a cached session immediately while a stale identity refresh is pending
   await waitFor(() => expect(queryClient.getQueryData<{ is_sudo: boolean }>(["current-admin"])?.is_sudo).toBe(false));
 });
 
-it("hides sudo content when a background identity refresh fails", async () => {
-  const now = Date.now();
-  const clock = vi.spyOn(Date, "now").mockReturnValue(now);
-  mockedFetch.mockResolvedValueOnce({ username: "alice", is_sudo: true });
-  await loadCurrentAdmin();
+const renderRestricted = () =>
   render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={["/restricted"]}><Routes>
     <Route path="/restricted" element={<SudoOnly><div>Private page</div></SudoOnly>} />
     <Route path="/" element={<div>Public page</div>} />
   </Routes></MemoryRouter></QueryClientProvider>);
+
+it("hides sudo content when a background identity refresh is refused", async () => {
+  const now = Date.now();
+  const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+  mockedFetch.mockResolvedValueOnce({ username: "alice", is_sudo: true });
+  await loadCurrentAdmin();
+  renderRestricted();
   expect(screen.getByText("Private page")).toBeInTheDocument();
   clock.mockReturnValue(now + 16_000);
-  mockedFetch.mockRejectedValue(new Error("unauthorized"));
+  mockedFetch.mockRejectedValue(refused());
   await act(async () => { await loadCurrentAdminForNavigation(); });
   await waitFor(() => expect(screen.getByText("Public page")).toBeInTheDocument());
   expect(screen.queryByText("Private page")).not.toBeInTheDocument();
   await expect(loadCurrentAdminForNavigation()).rejects.toThrow("unauthorized");
+});
+
+it("keeps the page and the role when a background refresh fails for any other reason", async () => {
+  const now = Date.now();
+  const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+  mockedFetch.mockResolvedValueOnce({ username: "alice", is_sudo: true, is_owner: true });
+  await loadCurrentAdmin();
+  renderRestricted();
+  const role = renderHook(() => [useIsSudo(), useIsOwner()], { wrapper });
+  clock.mockReturnValue(now + 16_000);
+  mockedFetch.mockRejectedValue(new TypeError("Failed to fetch"));
+  await act(async () => { await loadCurrentAdminForNavigation(); });
+  await waitFor(() => expect(queryClient.getQueryState(["current-admin"])?.status).toBe("error"));
+  expect(screen.getByText("Private page")).toBeInTheDocument();
+  expect(screen.queryByText("Public page")).not.toBeInTheDocument();
+  expect(role.result.current).toEqual([true, true]);
+  // The next navigation does not wait on the network either, and finds the same admin.
+  expect((await loadCurrentAdminForNavigation()).username).toBe("alice");
+});
+
+it("still fails closed on a first lookup that never succeeded", async () => {
+  mockedFetch.mockRejectedValue(new TypeError("Failed to fetch"));
+  const role = renderHook(() => [useIsSudo(), useIsOwner()], { wrapper });
+  await waitFor(() => expect(queryClient.getQueryState(["current-admin"])?.status).toBe("error"));
+  expect(role.result.current).toEqual([false, false]);
+  await expect(loadCurrentAdminForNavigation()).rejects.toThrow("Failed to fetch");
+});
+
+it("does not cancel what the session the login page just started has begun", async () => {
+  localStorage.setItem("token", "test-only-session-b");
+  adoptNewSession();
+  queryClient.setQueryData(["panelTheme"], { theme: {} });
+  mockedFetch.mockResolvedValueOnce({ username: "bob", is_sudo: false });
+  expect((await loadCurrentAdminForNavigation()).username).toBe("bob");
+  expect(queryClient.getQueryData(["panelTheme"])).toEqual({ theme: {} });
 });
 
 it("clears the previous account's cached data when the session changes", async () => {
@@ -87,6 +134,16 @@ it("clears the previous account's cached data when the session changes", async (
   mockedFetch.mockResolvedValueOnce({ username: "bob", is_sudo: false });
   expect((await loadCurrentAdminForNavigation()).username).toBe("bob");
   expect(queryClient.getQueryData(["users", {}])).toBeUndefined();
+});
+
+it("clears the previous account's filters too when another tab changed the session", async () => {
+  mockedFetch.mockResolvedValueOnce({ username: "alice", is_sudo: true });
+  await loadCurrentAdmin();
+  useUsersUiStore.getState().setFilters({ search: "customer-of-alice" });
+  localStorage.setItem("token", "test-only-session-b");
+  mockedFetch.mockResolvedValueOnce({ username: "bob", is_sudo: false });
+  await loadCurrentAdminForNavigation();
+  expect(useUsersUiStore.getState().filters.search).toBeUndefined();
 });
 
 it("does not reuse an identity after the token has been removed", async () => {

@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { User } from "types/User";
 import { UsersFilters } from "hooks/useUsersQuery";
 import { getUsersPerPageLimitSize } from "utils/userPreferenceStorage";
+import { onSessionClear } from "utils/session";
 
 // Ephemeral UI-only state for the Users page - which modal is open, and the
 // list's current filters. All server data (the list itself, mutations) moved
@@ -38,26 +39,27 @@ type UsersUiState = {
   setSubscriptionLinkUser: (user: User | null) => void;
 };
 
-export const useUsersUiStore = create<UsersUiState>((set) => ({
+const initialUi = () => ({
   filters: { sort: "-created_at", limit: getUsersPerPageLimitSize() },
+  isCreatingNewUser: false,
+  editingUser: null,
+  deletingUser: null,
+  resetUsageUser: null,
+  revokeSubscriptionUser: null,
+  subscriptionLinkUser: null,
+});
+
+export const useUsersUiStore = create<UsersUiState>((set) => ({
+  ...initialUi(),
+
   setFilters: (patch) =>
     set((state) => ({ filters: { ...state.filters, ...patch } })),
-
-  isCreatingNewUser: false,
   setCreatingNewUser: (open) => set({ isCreatingNewUser: open }),
-
-  editingUser: null,
   setEditingUser: (user) => set({ editingUser: user }),
-
-  deletingUser: null,
   setDeletingUser: (user) => set({ deletingUser: user }),
-
-  resetUsageUser: null,
   setResetUsageUser: (user) => set({ resetUsageUser: user }),
-
-  revokeSubscriptionUser: null,
   setRevokeSubscriptionUser: (user) => set({ revokeSubscriptionUser: user }),
-
-  subscriptionLinkUser: null,
   setSubscriptionLinkUser: (user) => set({ subscriptionLinkUser: user }),
 }));
+
+onSessionClear(() => useUsersUiStore.setState(initialUi()));

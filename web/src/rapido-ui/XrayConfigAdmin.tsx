@@ -1,20 +1,25 @@
-import { FC, useEffect, useMemo, useState } from "react";
+import { FC, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useXrayConfigQuery, useSaveXrayConfigMutation } from "hooks/useXrayConfigQuery";
+import {
+  DroppedCredentials,
+  droppedCredentials,
+  useSaveXrayConfigMutation,
+  useXrayConfigQuery,
+} from "hooks/useXrayConfigQuery";
 import { useImportXrayConfigMutation, useInboundPortsQuery } from "hooks/useInboundsQuery";
 import { XrayConfig, XrayConfigWritePayload } from "types/XrayConfig";
 import { XrayImportResult } from "types/XrayImport";
 import { errorText } from "service/errors";
 import { locateJSONSyntaxError } from "utils/jsonSyntaxLocator";
-import { validateCoreConfigDoc } from "utils/coreConfigRules";
-import { parseInboundPortInput } from "utils/inboundPorts";
+import { Item, asList, parseDocObject, topLevelKeyLines, validateCoreConfigDoc } from "utils/coreConfigRules";
 import { Card } from "rapido-ui/Card";
 import { Badge } from "rapido-ui/Badge";
 import { Button } from "rapido-ui/Button";
+import { CoreConfigPanels, CoreTab } from "rapido-ui/CoreConfigPanels";
 import { Modal } from "rapido-ui/Modal";
-import { JsonEditor } from "rapido-ui/JsonEditor";
+import { JsonEditor, JsonEditorHandle } from "rapido-ui/JsonEditor";
+import { Segmented } from "rapido-ui/Segmented";
 import { ltrIsolate } from "rapido-ui/bidi";
-import { XrayConfigStructure, parseDocObject } from "rapido-ui/XrayConfigStructure";
 import { AddAllProtocolsButton, QuickAddInboundModal } from "rapido-ui/QuickAddInbound";
 
 // parseXrayConfigJSON is deliberately lenient about the core-config fields
@@ -62,28 +67,113 @@ const describeJSONError = (
   if (error instanceof SyntaxError) {
     const loc = locateJSONSyntaxError(text);
     if (loc) {
-      return { message: t("rapido.xrayConfig.jsonLineError", { line: loc.line, message: loc.message }), line: loc.line };
+      return { message: t("rapido.xrayConfig.jsonLineError", { line: loc.line, message: ltrIsolate(loc.message) }), line: loc.line };
     }
     return { message: error.message, line: null };
   }
   return { message: error instanceof Error ? t(error.message) : String(error), line: null };
 };
 
-const XrayConfigJSONEditor: FC<{ config: XrayConfig }> = ({ config }) => {
+type CodeSection = "outbounds" | "routing_rules" | "dns_servers" | "inbounds";
+type CodeScope = "full" | CodeSection;
+
+const JUMP_KEYS = ["log_level", "sniff_enabled", "outbounds", "routing_rules", "dns_servers", "inbounds"];
+
+const errorBox = "rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400";
+
+// One section of the document as code of its own. It writes back as soon as what
+// is typed parses; until then it keeps the text to itself and holds Apply back, so
+// a half-typed list can never replace the section it came from.
+const SectionCode: FC<{
+  value: unknown;
+  ariaLabel: string;
+  onCommit: (list: unknown[]) => void;
+  onBlocked: (blocked: boolean) => void;
+}> = ({ value, ariaLabel, onCommit, onBlocked }) => {
+  const { t } = useTranslation();
+  const canonical = useMemo(() => JSON.stringify(asList(value), null, 2), [value]);
+  const [draft, setDraft] = useState(canonical);
+  const [problem, setProblem] = useState<{ message: string; line: number | null } | null>(null);
+  const editor = useRef<JsonEditorHandle>(null);
+  // A change from elsewhere (a form, an applied document) replaces the text; the
+  // echo of what was just typed here must not reformat it under the caret.
+  const lastCommitted = useRef(canonical);
+  useEffect(() => {
+    if (canonical === lastCommitted.current) return;
+    lastCommitted.current = canonical;
+    setDraft(canonical);
+    setProblem(null);
+    onBlocked(false);
+  }, [canonical, onBlocked]);
+  useEffect(() => () => onBlocked(false), [onBlocked]);
+
+  const change = (next: string) => {
+    setDraft(next);
+    try {
+      const parsed = JSON.parse(next);
+      if (!Array.isArray(parsed)) throw new Error("rapido.xrayConfig.sectionMustBeList");
+      setProblem(null);
+      onBlocked(false);
+      lastCommitted.current = JSON.stringify(parsed, null, 2);
+      onCommit(parsed);
+    } catch (e) {
+      setProblem(describeJSONError(next, e, t));
+      onBlocked(true);
+    }
+  };
+
+  return (
+    <>
+      <JsonEditor ref={editor} codeKeys rows={22} value={draft} errorLine={problem?.line ?? null} ariaLabel={ariaLabel} onChange={change} />
+      {problem && (
+        <div role="alert" className={`mt-2 flex flex-wrap items-center justify-between gap-2 ${errorBox}`}>
+          <span>{problem.message}</span>
+          {problem.line !== null && (
+            <Button variant="chip" tone="red" onClick={() => editor.current?.revealLine(problem.line as number)}>
+              {t("rapido.xrayConfig.goToLine", { line: problem.line })}
+            </Button>
+          )}
+        </div>
+      )}
+    </>
+  );
+};
+
+const XrayConfigEditor: FC<{ config: XrayConfig }> = ({ config }) => {
   const { t } = useTranslation();
   const [text, setText] = useState(() => JSON.stringify(config, null, 2));
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState("");
-  const [errorLine, setErrorLine] = useState<number | null>(null);
+  const [justApplied, setJustApplied] = useState(false);
+  const [caret, setCaret] = useState({ line: 1, column: 1 });
+  const editor = useRef<JsonEditorHandle>(null);
   const [previousText, setPreviousText] = useState<string | null>(null);
-  // What a rule's ports field currently holds while it's mid-typing (see
-  // XrayConfigStructure) - kept here so an unparseable draft, which never
-  // reaches the JSON, can still hold Apply back.
-  const [portDrafts, setPortDrafts] = useState<Record<number, string>>({});
+  const [tab, setTab] = useState<CoreTab>("general");
+  const [scope, setScope] = useState<CodeScope>("full");
+  const [sectionBlocked, setSectionBlocked] = useState(false);
+  // Remounts a section's code editor when the document is replaced wholesale,
+  // so nothing half-typed outlives Discard or Apply.
+  const [generation, setGeneration] = useState(0);
+  const [pendingLine, setPendingLine] = useState<number | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [quickAdding, setQuickAdding] = useState(false);
   const { data: inboundPorts } = useInboundPortsQuery();
-  const issues = useMemo(() => validateCoreConfigDoc(parseDocObject(text)), [text]);
-  const hasBadPortDraft = Object.values(portDrafts).some((draft) => !parseInboundPortInput(draft).ok);
-  const blocked = issues.length > 0 || hasBadPortDraft;
+  const doc = useMemo(() => parseDocObject(text), [text]);
+  const issues = useMemo(() => validateCoreConfigDoc(doc), [doc]);
+  // Checked as the text changes rather than on Apply, so a typo is pointed at
+  // while the admin is still on that line.
+  const syntax = useMemo(() => {
+    try {
+      parseXrayConfigJSON(text);
+      return null;
+    } catch (e) {
+      return describeJSONError(text, e, t);
+    }
+  }, [text, t]);
+  const lineCount = useMemo(() => text.split("\n").length, [text]);
+  const keyLines = useMemo(() => topLevelKeyLines(text), [text]);
+  const serverInboundTags = useMemo(() => new Set(config.inbounds.map((i) => i.tag)), [config]);
+  const blocked = issues.length > 0 || sectionBlocked || syntax !== null;
   // Set only while a parsed pending payload is genuinely about to delete one
   // or more inbounds (omitted from the JSON - see xrayconfig.go's own doc
   // comment on why that's real deletion here, not a no-op like the old
@@ -93,168 +183,222 @@ const XrayConfigJSONEditor: FC<{ config: XrayConfig }> = ({ config }) => {
   const [pendingRemoval, setPendingRemoval] = useState<{ tags: string[]; payload: XrayConfigWritePayload } | null>(
     null
   );
+  // Set when the server refused an apply because it would delete credentials,
+  // and holds what it said would go.
+  const [pendingDrop, setPendingDrop] = useState<{ dropped: DroppedCredentials[]; payload: XrayConfigWritePayload } | null>(
+    null
+  );
   const save = useSaveXrayConfigMutation();
 
   // Re-seed from the server's own copy whenever it changes AND there's no
-  // unapplied edit sitting in the textarea - a background refetch (e.g. the
-  // embedded HostsAdmin creating a new inbound's default host elsewhere)
-  // must never clobber something the admin is mid-way through typing here.
+  // unapplied edit sitting in the document - a background refetch (e.g. the
+  // quick-add buttons creating a new inbound) must never clobber something
+  // the admin is mid-way through changing here.
   useEffect(() => {
-    if (!dirty) {
-      setText(JSON.stringify(config, null, 2));
-      setPortDrafts({});
-    }
+    if (!dirty) setText(JSON.stringify(config, null, 2));
   }, [config, dirty]);
 
-  const doApply = (payload: XrayConfigWritePayload) => {
+  // Once the code tab is showing, the line asked for can take focus.
+  useEffect(() => {
+    if (tab !== "advanced" || scope !== "full" || pendingLine === null) return;
+    editor.current?.revealLine(pendingLine);
+    setPendingLine(null);
+  }, [tab, scope, pendingLine]);
+
+  const doApply = (payload: XrayConfigWritePayload, confirmDropCredentials = false) => {
     const before = JSON.stringify(config, null, 2);
-    save.mutate(payload, {
-      onSuccess: () => {
-        setPreviousText(before);
-        setDirty(false);
-        setPendingRemoval(null);
-        setPortDrafts({});
-      },
-      onError: (e) => setError(errorText(e, t("rapido.xrayConfig.applyFailed"))),
-    });
+    save.mutate(
+      { body: payload, confirmDropCredentials },
+      {
+        onSuccess: () => {
+          setPreviousText(before);
+          setDirty(false);
+          setJustApplied(true);
+          setPendingRemoval(null);
+          setPendingDrop(null);
+          setGeneration((n) => n + 1);
+        },
+        onError: (e) => {
+          const dropped = droppedCredentials(e);
+          if (dropped) {
+            setPendingRemoval(null);
+            setPendingDrop({ dropped, payload });
+            return;
+          }
+          setError(errorText(e, t("rapido.xrayConfig.applyFailed")));
+        },
+      }
+    );
   };
 
-  // Every edit to the text - typed into the textarea or made through the
-  // guided view above it - lands here.
+  // Every edit to the document - typed as code or made through a form - lands here.
   const changeText = (next: string) => {
     setText(next);
     setDirty(true);
+    setJustApplied(false);
     setError("");
-    setErrorLine(null);
     setPendingRemoval(null);
+    setPendingDrop(null);
   };
-
-  const setPortDraft = (ruleIndex: number, draft: string | null) =>
-    setPortDrafts((prev) => {
-      const { [ruleIndex]: _dropped, ...rest } = prev;
-      return draft === null ? rest : { ...rest, [ruleIndex]: draft };
-    });
+  const changeDoc = (next: Item) => changeText(JSON.stringify(next, null, 2));
 
   const apply = () => {
     if (blocked) return;
     setError("");
-    setErrorLine(null);
     setPendingRemoval(null);
-    try {
-      const payload = parseXrayConfigJSON(text);
-      const currentTags = new Set(config.inbounds.map((i) => i.tag));
-      const nextTags = new Set(payload.inbounds.map((i) => i.tag));
-      const removed = [...currentTags].filter((tag) => !nextTags.has(tag));
-      if (removed.length > 0) {
-        setPendingRemoval({ tags: removed, payload });
-        return;
-      }
-      doApply(payload);
-    } catch (e) {
-      const described = describeJSONError(text, e, t);
-      setError(described.message);
-      setErrorLine(described.line);
+    setPendingDrop(null);
+    const payload = parseXrayConfigJSON(text);
+    const currentTags = new Set(config.inbounds.map((i) => i.tag));
+    const nextTags = new Set(payload.inbounds.map((i) => i.tag));
+    const removed = [...currentTags].filter((tag) => !nextTags.has(tag));
+    if (removed.length > 0) {
+      setPendingRemoval({ tags: removed, payload });
+      return;
     }
+    doApply(payload);
   };
 
   const discard = () => {
     setDirty(false);
     setError("");
-    setErrorLine(null);
     setPendingRemoval(null);
-    setPortDrafts({});
+    setPendingDrop(null);
+    setGeneration((n) => n + 1);
     setText(JSON.stringify(config, null, 2));
   };
 
   const revert = () => {
     if (!previousText) return;
     setError("");
-    setErrorLine(null);
     try {
       const payload = parseXrayConfigJSON(previousText);
-      save.mutate(payload, {
-        onSuccess: () => {
-          setPreviousText(null);
-          setDirty(false);
-          setPortDrafts({});
-        },
-        onError: (e) => setError(errorText(e, t("rapido.xrayConfig.revertFailed"))),
-      });
+      save.mutate(
+        { body: payload },
+        {
+          onSuccess: () => {
+            setPreviousText(null);
+            setDirty(false);
+            setJustApplied(true);
+            setGeneration((n) => n + 1);
+          },
+          onError: (e) => {
+            const dropped = droppedCredentials(e);
+            if (dropped) {
+              setPendingDrop({ dropped, payload });
+              return;
+            }
+            setError(errorText(e, t("rapido.xrayConfig.revertFailed")));
+          },
+        }
+      );
     } catch (e) {
-      const described = describeJSONError(previousText, e, t);
-      setError(described.message);
-      setErrorLine(described.line);
+      setError(describeJSONError(previousText, e, t).message);
     }
   };
 
+  const showCodeLine = (line: number | null) => {
+    setScope("full");
+    setTab("advanced");
+    setPendingLine(line);
+  };
+
+  const sectionLabel: Record<CodeSection, string> = {
+    outbounds: t("rapido.xrayConfig.tabOutbounds"),
+    routing_rules: t("rapido.xrayConfig.tabRules"),
+    dns_servers: t("rapido.xrayConfig.tabDns"),
+    inbounds: t("rapido.xrayConfig.tabInbounds"),
+  };
+
+  const advanced = (
+    <div className="flex flex-col gap-2">
+      <p className="text-xs text-rapido-muted">{t("rapido.xrayConfig.advancedDesc")}</p>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Segmented
+          label={t("rapido.xrayConfig.tabAdvanced")}
+          value={scope}
+          options={[
+            { value: "full", label: t("rapido.xrayConfig.scopeFull") },
+            ...(Object.keys(sectionLabel) as CodeSection[]).map((value) => ({ value: value as CodeScope, label: sectionLabel[value] })),
+          ]}
+          onChange={setScope}
+        />
+        <Button
+          variant="chip"
+          disabled={dirty}
+          title={dirty ? t("rapido.coreForm.applyFirst") : undefined}
+          onClick={() => setImporting(true)}
+        >
+          {t("rapido.inbounds.xrayImportTitle")}
+        </Button>
+      </div>
+      {scope === "full" ? (
+        <>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-xs text-rapido-muted">{t("rapido.xrayConfig.jumpTo")}</span>
+            {JUMP_KEYS.map((key) => (
+              <Button key={key} variant="chip" disabled={!keyLines[key]} onClick={() => editor.current?.revealLine(keyLines[key])}>
+                <span dir="ltr">{key}</span>
+              </Button>
+            ))}
+          </div>
+          <JsonEditor
+            ref={editor}
+            value={text}
+            rows={22}
+            codeKeys
+            errorLine={syntax?.line ?? null}
+            ariaLabel={String(t("rapido.xrayConfig.jsonTitle"))}
+            onCaretChange={setCaret}
+            onChange={changeText}
+          />
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-xs text-rapido-muted">
+            <span>{t("rapido.xrayConfig.caretStatus", { line: caret.line, total: lineCount, column: caret.column })}</span>
+            <span>{t("rapido.xrayConfig.editorKeysHint")}</span>
+          </div>
+        </>
+      ) : doc ? (
+        <SectionCode
+          key={`${scope}-${generation}`}
+          value={doc[scope]}
+          ariaLabel={sectionLabel[scope]}
+          onCommit={(list) => changeDoc({ ...doc, [scope]: list })}
+          onBlocked={setSectionBlocked}
+        />
+      ) : (
+        <p className="text-xs text-amber-300">{t("rapido.xrayConfig.structureInvalidJson")}</p>
+      )}
+      <p className="text-xs text-rapido-muted">{t("rapido.xrayConfig.guideNote")}</p>
+    </div>
+  );
+
   return (
     <Card className="p-4">
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <h3 className="text-sm font-semibold">{t("rapido.xrayConfig.jsonTitle")}</h3>
-          <p className="text-xs text-rapido-muted">{t("rapido.xrayConfig.jsonDesc")}</p>
-        </div>
-        {dirty && <Badge tone="yellow">{t("rapido.xrayConfig.unapplied")}</Badge>}
-      </div>
+      <p className="text-xs text-rapido-muted">{t("rapido.xrayConfig.jsonDesc")}</p>
+      <p className="mb-3 mt-1 text-xs text-rapido-muted">{t("rapido.xrayConfig.applyEffect")}</p>
 
-      <XrayConfigStructure
-        text={text}
-        onEdit={changeText}
-        inboundPorts={inboundPorts}
-        portDrafts={portDrafts}
-        onPortDraft={setPortDraft}
-      />
-
-      <JsonEditor
-        value={text}
-        rows={22}
-        errorLine={errorLine}
-        ariaLabel={String(t("rapido.xrayConfig.jsonTitle"))}
-        onChange={(v) => {
-          changeText(v);
-          setPortDrafts({});
-        }}
-      />
-      {issues.length > 0 && (
-        <div role="alert" className="mt-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">
-          <p className="mb-1 font-medium">{t("rapido.xrayConfig.issuesTitle")}</p>
-          <ul className="list-inside list-disc space-y-0.5 text-xs">
-            {issues.map((issue) => (
-              <li key={`${issue.scope}-${issue.index}-${issue.kind}`}>
-                {t(`rapido.xrayConfig.issue${issue.kind[0].toUpperCase()}${issue.kind.slice(1)}`, {
-                  n: issue.index + 1,
-                  ref: ltrIsolate(issue.ref),
-                  value: ltrIsolate(issue.value ?? ""),
-                })}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {hasBadPortDraft && (
-        <div className="mt-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-400">
-          {t("rapido.xrayConfig.draftBlockedHint")}
-        </div>
-      )}
-      {error && (
-        <div className="mt-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">
-          {error}
-        </div>
-      )}
-      {pendingRemoval && (
-        <div className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
-          {t("rapido.xrayConfig.removalWarning", { tags: pendingRemoval.tags.join(", ") })}
-        </div>
-      )}
-      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-        <span className="text-xs text-rapido-muted">
-          {dirty ? t("rapido.xrayConfig.unappliedHint") : t("rapido.xrayConfig.inSync")}
+      <div className="sticky top-2 z-20 mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-rapido-border bg-rapido-surface/95 px-3 py-2 backdrop-blur">
+        <span className="flex flex-wrap items-center gap-2 text-xs text-rapido-muted">
+          {dirty && <Badge tone="yellow">{t("rapido.xrayConfig.unapplied")}</Badge>}
+          {dirty
+            ? t("rapido.xrayConfig.unappliedHint")
+            : justApplied
+            ? t("rapido.xrayConfig.appliedNote")
+            : t("rapido.xrayConfig.inSync")}
         </span>
         <div className="flex gap-2">
           <Button variant="chip" disabled={!dirty} onClick={discard}>
             {t("rapido.xrayConfig.discard")}
           </Button>
-          {pendingRemoval ? (
+          {pendingDrop ? (
+            <Button
+              variant="chip"
+              tone="red"
+              disabled={save.isPending || blocked}
+              onClick={() => doApply(pendingDrop.payload, true)}
+            >
+              {save.isPending ? t("rapido.pleaseWait") : t("rapido.xrayConfig.applyConfirmDrop")}
+            </Button>
+          ) : pendingRemoval ? (
             <Button
               variant="chip"
               tone="amber"
@@ -271,6 +415,65 @@ const XrayConfigJSONEditor: FC<{ config: XrayConfig }> = ({ config }) => {
         </div>
       </div>
 
+      {syntax && (
+        <div role="alert" className={`mb-3 flex flex-wrap items-center justify-between gap-2 ${errorBox}`}>
+          <span>{syntax.message}</span>
+          {syntax.line !== null && (
+            <Button variant="chip" tone="red" onClick={() => showCodeLine(syntax.line)}>
+              {t("rapido.xrayConfig.goToLine", { line: syntax.line })}
+            </Button>
+          )}
+        </div>
+      )}
+      {sectionBlocked && tab !== "advanced" && (
+        <div role="alert" className={`mb-3 ${errorBox}`}>
+          {t("rapido.xrayConfig.sectionCodeBlocked")}
+        </div>
+      )}
+      {error && <div className={`mb-3 ${errorBox}`}>{error}</div>}
+      {pendingRemoval && (
+        <div className="mb-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
+          {t("rapido.xrayConfig.removalWarning", { tags: pendingRemoval.tags.join(", ") })}
+        </div>
+      )}
+      {pendingDrop && (
+        <div role="alert" className={`mb-3 ${errorBox}`}>
+          <p>{t("rapido.xrayConfig.dropCredentialsWarning")}</p>
+          <ul className="mt-1 list-inside list-disc">
+            {pendingDrop.dropped.map((item) => (
+              <li key={item.protocol}>
+                {t("rapido.xrayConfig.dropCredentialsItem", { protocol: item.protocol, users: item.users })}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <CoreConfigPanels
+        doc={doc}
+        issues={issues}
+        tab={tab}
+        onTab={setTab}
+        onChange={changeDoc}
+        inboundPorts={inboundPorts}
+        serverInboundTags={serverInboundTags}
+        inboundActions={
+          <>
+            <Button
+              variant="chip"
+              disabled={dirty}
+              title={dirty ? t("rapido.coreForm.applyFirst") : t("rapido.coreForm.quickAddHint")}
+              onClick={() => setQuickAdding(true)}
+            >
+              + {t("rapido.coreForm.quickAdd")}
+            </Button>
+            <AddAllProtocolsButton disabled={dirty} onDone={() => {}} />
+          </>
+        }
+        advanced={advanced}
+        invalidNotice={<p className="text-xs text-amber-300">{t("rapido.xrayConfig.structureInvalidJson")}</p>}
+      />
+
       {!dirty && previousText && (
         <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-rapido-border p-2">
           <div>
@@ -281,6 +484,11 @@ const XrayConfigJSONEditor: FC<{ config: XrayConfig }> = ({ config }) => {
             {t("rapido.xrayConfig.revert")}
           </Button>
         </div>
+      )}
+
+      {importing && <XrayImportModal onClose={() => setImporting(false)} onApplied={() => {}} />}
+      {quickAdding && (
+        <QuickAddInboundModal onClose={() => setQuickAdding(false)} onCreated={() => setQuickAdding(false)} />
       )}
     </Card>
   );
@@ -401,19 +609,16 @@ const XrayImportModal: FC<{ onClose: () => void; onApplied: () => void }> = ({ o
 
 // ---------------------------------------------------------------------------
 
-// The Xray/sing-box config as one JSON document (log level, sniffing,
-// outbounds, routing rules, DNS servers, AND inbounds - all one document,
-// one Apply, replacing what used to be the separate Core Config and
-// Inbounds pages). Hosts deliberately stays its own standalone page
-// (rapido-ui/HostsAdmin.tsx via the "hosts" nav item) rather than being
-// embedded here too - an earlier version of this page embedded HostsAdmin
-// directly below the JSON editor, but the user asked for that removed:
-// one place for hosts, not two.
+// The sing-box config as one document (log level, sniffing, outbounds, routing
+// rules, DNS servers, AND inbounds), edited through forms or as code with one
+// Apply, replacing what used to be the separate Core Config and Inbounds pages.
+// Hosts deliberately stays its own standalone page (rapido-ui/HostsAdmin.tsx via
+// the "hosts" nav item) rather than being embedded here too - an earlier version
+// of this page embedded HostsAdmin directly below the JSON editor, but the user
+// asked for that removed: one place for hosts, not two.
 export const XrayConfigAdmin: FC = () => {
   const { t } = useTranslation();
   const { data, isLoading, isError } = useXrayConfigQuery();
-  const [importing, setImporting] = useState(false);
-  const [quickAdding, setQuickAdding] = useState(false);
 
   if (isError) {
     return (
@@ -426,26 +631,7 @@ export const XrayConfigAdmin: FC = () => {
     return <p className="text-sm text-rapido-muted">{t("rapido.pleaseWait")}</p>;
   }
 
-  return (
-    <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-start justify-end gap-2">
-        <Button variant="chip" tone="accent" onClick={() => setQuickAdding(true)}>
-          + {t("rapido.inbounds.quickAdd.addTitle")}
-        </Button>
-        <AddAllProtocolsButton onDone={() => {}} />
-        <Button variant="chip" onClick={() => setImporting(true)}>
-          {t("rapido.inbounds.xrayImportTitle")}
-        </Button>
-      </div>
-
-      <XrayConfigJSONEditor config={data} />
-
-      {importing && <XrayImportModal onClose={() => setImporting(false)} onApplied={() => {}} />}
-      {quickAdding && (
-        <QuickAddInboundModal onClose={() => setQuickAdding(false)} onCreated={() => setQuickAdding(false)} />
-      )}
-    </div>
-  );
+  return <XrayConfigEditor config={data} />;
 };
 
 export default XrayConfigAdmin;

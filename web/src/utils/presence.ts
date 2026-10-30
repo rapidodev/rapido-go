@@ -21,7 +21,8 @@ export const ONLINE_WINDOW_SECONDS = 180;
 export const lastSeenOf = (
   onlineAt: string | null,
   online?: boolean,
-  nowMs: number = Date.now()
+  nowMs: number = Date.now(),
+  locale?: string
 ): LastSeen => {
   if (online === true) return { kind: "online" };
   if (!onlineAt) return { kind: "never" };
@@ -30,5 +31,5 @@ export const lastSeenOf = (
   const diffSeconds = Math.floor(nowMs / 1000) - unix;
   if (online === undefined && diffSeconds <= ONLINE_WINDOW_SECONDS) return { kind: "online" };
   // Under a minute (or a clock a little ahead of ours) has no unit to print.
-  return { kind: "seen", time: diffSeconds < 60 ? "" : relativeExpiryDate(unix).time };
+  return { kind: "seen", time: diffSeconds < 60 ? "" : relativeExpiryDate(unix, locale).time };
 };

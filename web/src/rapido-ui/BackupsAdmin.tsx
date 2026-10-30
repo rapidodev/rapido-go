@@ -9,6 +9,7 @@ import {
   useRestoreUploadMutation,
 } from "hooks/useBackupsQuery";
 import { Backup, LegacyImportResult, RestoreResult, isLegacyImportResult } from "types/Backup";
+import { useIsOwner } from "hooks/useCurrentAdminQuery";
 import { errorText } from "service/errors";
 import { formatBytes } from "utils/formatByte";
 import { absoluteTime } from "utils/ticketHelpers";
@@ -23,11 +24,30 @@ import { Button } from "rapido-ui/Button";
 // rewrite rather than being bundled together.
 type AnyRestoreResult = RestoreResult | LegacyImportResult;
 
+// The server sends nothing until a restore has finished, which can take minutes,
+// so all there is to show is that it is running and not to walk away from it.
+const RestoreProgress: FC = () => {
+  const { t } = useTranslation();
+  return (
+    <div
+      role="status"
+      className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400"
+    >
+      <span
+        aria-hidden="true"
+        className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-amber-400/30 border-t-amber-400"
+      />
+      {t("rapido.backups.restoringHint")}
+    </div>
+  );
+};
+
 const BackupRow: FC<{
   backup: Backup;
   onRestored: (result: AnyRestoreResult | null, error: string | null) => void;
 }> = ({ backup, onRestored }) => {
   const { t, i18n } = useTranslation();
+  const isOwner = useIsOwner();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmRestore, setConfirmRestore] = useState(false);
   const [downloadFailed, setDownloadFailed] = useState(false);
@@ -72,19 +92,23 @@ const BackupRow: FC<{
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5">
+          {isOwner && (
+          <>
           <Button variant="chip" tone="accent" onClick={download}>
             {t("rapido.backups.download")}
           </Button>
-          {confirmRestore ? (
+          {/* restore() closes the confirmation as it starts, so a run in progress
+              needs its own state: the bare Restore button would look as if nothing
+              had happened and invite a second click. */}
+          {restoreBackup.isPending ? (
+            <Button variant="chip" tone="amber" disabled>
+              {t("rapido.backups.restoring")}
+            </Button>
+          ) : confirmRestore ? (
             <>
               <span className="text-xs text-red-400">{t("rapido.backups.restoreConfirm")}</span>
-              <Button
-                variant="chip"
-                tone="red"
-                disabled={restoreBackup.isPending}
-                onClick={restore}
-              >
-                {restoreBackup.isPending ? t("rapido.pleaseWait") : t("rapido.backups.restoreConfirmButton")}
+              <Button variant="chip" tone="red" onClick={restore}>
+                {t("rapido.backups.restoreConfirmButton")}
               </Button>
               <Button variant="chip" onClick={() => setConfirmRestore(false)}>
                 {t("cancel")}
@@ -106,13 +130,16 @@ const BackupRow: FC<{
               </Button>
             </>
           ) : (
-            <Button variant="chip" tone="red" onClick={() => setConfirmDelete(true)}>
+            <Button variant="chip" tone="red" disabled={restoreBackup.isPending} onClick={() => setConfirmDelete(true)}>
               {t("delete")}
             </Button>
+          )}
+          </>
           )}
         </div>
       </div>
 
+      {restoreBackup.isPending && <RestoreProgress />}
       {downloadFailed && (
         <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-400">
           {t("rapido.backups.downloadFailed")}
@@ -178,14 +205,19 @@ const UploadRestoreCard: FC<{
             ref={fileInputRef}
             type="file"
             accept=".gz,.sql"
+            disabled={restoreUpload.isPending}
             onChange={onFileChange}
             className="text-xs text-rapido-muted file:mr-2 file:rounded-md file:border file:border-rapido-border file:bg-rapido-bg file:px-2.5 file:py-1 file:text-xs file:text-rapido-text"
           />
-          {confirming ? (
+          {restoreUpload.isPending ? (
+            <Button variant="chip" tone="amber" disabled>
+              {t("rapido.backups.restoring")}
+            </Button>
+          ) : confirming ? (
             <>
               <span className="text-xs text-red-400">{t("rapido.backups.restoreConfirm")}</span>
-              <Button variant="chip" tone="red" disabled={restoreUpload.isPending} onClick={restore}>
-                {restoreUpload.isPending ? t("rapido.pleaseWait") : t("rapido.backups.restoreConfirmButton")}
+              <Button variant="chip" tone="red" onClick={restore}>
+                {t("rapido.backups.restoreConfirmButton")}
               </Button>
               <Button variant="chip" onClick={() => setConfirming(false)}>
                 {t("cancel")}
@@ -203,12 +235,18 @@ const UploadRestoreCard: FC<{
           )}
         </div>
       )}
+      {restoreUpload.isPending && (
+        <div className="mt-3">
+          <RestoreProgress />
+        </div>
+      )}
     </Card>
   );
 };
 
 export const BackupsAdmin: FC = () => {
   const { t } = useTranslation();
+  const isOwner = useIsOwner();
   const { data: backups, isLoading, isError } = useBackupsQuery();
   const createBackup = useCreateBackupMutation();
   const [createError, setCreateError] = useState("");
@@ -297,7 +335,11 @@ export const BackupsAdmin: FC = () => {
         </div>
       )}
 
-      <UploadRestoreCard onRestored={handleRestored} />
+      {isOwner ? (
+        <UploadRestoreCard onRestored={handleRestored} />
+      ) : (
+        <p className="text-xs text-rapido-muted">{t("rapido.backups.ownerOnlyNote")}</p>
+      )}
 
       {isLoading ? (
         <p className="text-sm text-rapido-muted">{t("rapido.pleaseWait")}</p>

@@ -33,3 +33,18 @@ export const errorText = (cause: unknown, fallback: string): string => {
     | undefined;
   return detailToText(e?.response?._data?.detail) || e?.message || fallback;
 };
+
+export const isUnauthorized = (cause: unknown): boolean =>
+  (cause as { status?: number } | null | undefined)?.status === 401;
+
+// A lazy page whose file is gone: a deploy replaced the hashed chunk this tab
+// still asks for (or the connection dropped while fetching it). Each browser
+// words it differently and none gives it a type, so the message is all there
+// is; a rejected lazy() also stays rejected, so only a reload can recover.
+const CHUNK_LOAD_FAILURE =
+  /dynamically imported module|importing a module script failed|unable to preload css|not a valid javascript mime type/i;
+
+export const isChunkLoadError = (cause: unknown): boolean => {
+  const message = (cause as { message?: unknown } | null | undefined)?.message;
+  return typeof message === "string" && CHUNK_LOAD_FAILURE.test(message);
+};

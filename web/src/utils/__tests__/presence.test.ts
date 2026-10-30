@@ -43,7 +43,12 @@ describe("lastSeenOf", () => {
   it("falls back to the 180 s window only when the backend sends no flag", () => {
     expect(lastSeenOf(ago(100), undefined, NOW)).toEqual({ kind: "online" });
     expect(lastSeenOf(ago(180), undefined, NOW)).toEqual({ kind: "online" });
-    expect(lastSeenOf(ago(181), undefined, NOW)).toEqual({ kind: "seen", time: "3 mins" });
+    expect(lastSeenOf(ago(181), undefined, NOW)).toEqual({ kind: "seen", time: "3 min" });
     expect(lastSeenOf(ago(7200), undefined, NOW)).toMatchObject({ kind: "seen" });
+  });
+
+  it("says when in the admin's language", () => {
+    expect(lastSeenOf(ago(7200), false, NOW, "ru")).toEqual({ kind: "seen", time: "2 часа" });
+    expect(lastSeenOf(ago(7200), false, NOW, "zh")).toEqual({ kind: "seen", time: "2小时" });
   });
 });

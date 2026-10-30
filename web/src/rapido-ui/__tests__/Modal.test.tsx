@@ -49,13 +49,26 @@ describe("Modal", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it("applies a caller className to size the card", () => {
+  // On the card itself a caller's max-w-2xl never took effect: Tailwind sorts same-property
+  // utilities by name, so it lost to the default max-w-sm and to the card's own max-w-full.
+  it("sizes a wrapper from the caller's className, with no competing width beside it", () => {
     render(
       <Modal onClose={() => {}} className="max-w-2xl">
         <p>content</p>
       </Modal>
     );
-    const card = screen.getByText("content").closest(".max-h-\\[90vh\\]");
-    expect(card).toHaveClass("max-w-2xl");
+    const wrapper = screen.getByText("content").closest(".max-w-2xl");
+    expect(wrapper).not.toBeNull();
+    expect(wrapper).not.toHaveClass("max-w-sm");
+    expect(wrapper).not.toHaveClass("max-w-full");
+  });
+
+  it("falls back to the default width without a className", () => {
+    render(
+      <Modal onClose={() => {}}>
+        <p>content</p>
+      </Modal>
+    );
+    expect(screen.getByText("content").closest(".max-w-sm")).not.toBeNull();
   });
 });

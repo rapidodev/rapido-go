@@ -301,7 +301,7 @@ export const QuickAddInboundModal: FC<{ onClose: () => void; onCreated: () => vo
 // never collides with an existing host on a panel that already has them.
 const BULK_BASE_PORT = 20300;
 
-export const AddAllProtocolsButton: FC<{ onDone: () => void }> = ({ onDone }) => {
+export const AddAllProtocolsButton: FC<{ onDone: () => void; disabled?: boolean }> = ({ onDone, disabled }) => {
   const { t } = useTranslation();
   const createInbound = useCreateInboundMutation();
   const [running, setRunning] = useState(false);
@@ -341,7 +341,7 @@ export const AddAllProtocolsButton: FC<{ onDone: () => void }> = ({ onDone }) =>
 
   return (
     <div className="flex flex-col items-end gap-2">
-      <Button variant="chip" tone="accent" disabled={running} onClick={run}>
+      <Button variant="chip" disabled={running || disabled} onClick={run}>
         {running ? t("rapido.pleaseWait") : `+ ${t("rapido.inbounds.quickAdd.addAll")}`}
       </Button>
       {result && (

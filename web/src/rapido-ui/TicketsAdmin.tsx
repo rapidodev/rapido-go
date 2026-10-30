@@ -429,7 +429,9 @@ export const TicketsAdmin: FC = () => {
 
         {awaitingCount > 0 && (
           <Badge tone="orange" className="tabular-nums">
-            {t("rapido.tickets.awaitingCount", { value: awaitingCount })}
+            {/* Counted from the rows on screen: the list answer has no total for
+                it, so with more pages this is not every ticket waiting. */}
+            {t(pageCount > 1 ? "rapido.tickets.awaitingCountPage" : "rapido.tickets.awaitingCount", { value: awaitingCount })}
           </Badge>
         )}
 

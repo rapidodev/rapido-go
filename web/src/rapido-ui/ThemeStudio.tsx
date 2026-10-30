@@ -3,7 +3,7 @@ import classNames from "classnames";
 import { useTranslation } from "react-i18next";
 import { useResetThemeMutation, useSaveThemeMutation, useThemeQuery } from "hooks/useThemeQuery";
 import { errorText } from "service/errors";
-import { Appearance, THEME_IDS, ThemeId, currentAppearance, useAppearance } from "./appearance";
+import { Appearance, THEME_IDS, ThemeId, currentAppearance, hasPersonalOverride, useAppearance } from "./appearance";
 import { AppearanceControls } from "./AppearancePanel";
 import { Badge } from "./Badge";
 import { Button } from "./Button";
@@ -119,7 +119,6 @@ export const ThemeStudio: FC = () => {
 
   // What was in force when the page opened; "revert" and leaving without saving return to it.
   const baseline = useRef<Appearance>(currentAppearance());
-  const saved = useRef(false);
   const [notice, setNotice] = useState<{ tone: "ok" | "err"; text: string } | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
@@ -136,9 +135,10 @@ export const ThemeStudio: FC = () => {
   const json = useMemo(() => JSON.stringify(appearanceToPanelTheme(look), null, 2), [look]);
 
   // Leaving with unsaved changes drops them: the live preview was only ever a preview.
+  // Saving moves the baseline, so this also covers what was changed after a save.
   useEffect(
     () => () => {
-      if (!saved.current) useAppearance.getState().preview(baseline.current);
+      useAppearance.getState().preview(baseline.current);
     },
     []
   );
@@ -153,8 +153,13 @@ export const ThemeStudio: FC = () => {
   const saveForMe = () => {
     useAppearance.getState().set(look);
     baseline.current = currentAppearance();
-    saved.current = true;
     setNotice({ tone: "ok", text: L("rapido.theme.saved") });
+  };
+
+  // The panel default is what this browser now follows too, unless it holds its
+  // own choice: then the draft on screen is still only a preview over that choice.
+  const followPanelDefault = () => {
+    if (!hasPersonalOverride()) baseline.current = currentAppearance();
   };
 
   const applyToPanel = () => {
@@ -162,9 +167,7 @@ export const ThemeStudio: FC = () => {
     save.mutate(appearanceToPanelTheme(look), {
       onSuccess: (res) => {
         applyServerTheme(res.theme);
-        // The panel default is what this browser now follows too, unless it holds its own choice.
-        baseline.current = currentAppearance();
-        saved.current = true;
+        followPanelDefault();
         setNotice({ tone: "ok", text: L("rapido.theme.appliedPanel") });
       },
       onError: (e) => setNotice({ tone: "err", text: errorText(e, L("rapido.theme.failed")) }),
@@ -176,6 +179,7 @@ export const ThemeStudio: FC = () => {
     resetPanel.mutate(undefined, {
       onSuccess: (res) => {
         applyServerTheme(res.theme);
+        followPanelDefault();
         setConfirmReset(false);
         setNotice({ tone: "ok", text: L("rapido.theme.resetDone") });
       },

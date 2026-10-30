@@ -27,18 +27,26 @@ export const OUTBOUND_TYPES = [
   "vless",
   "hysteria2",
   "tuic",
+  "anytls",
+  "hysteria",
+  "shadowtls",
+  "snell",
+  "ssh",
+  "tor",
   "selector",
   "urltest",
 ] as const;
 export type OutboundType = (typeof OUTBOUND_TYPES)[number];
 
-// The realistically-used sing-box outbound protocols (confirmed with the
-// user rather than assumed) - not sing-box's full catalog. WireGuard is
-// deliberately excluded: sing-box models it as an "Endpoint", a
-// structurally different top-level config section this rewrite doesn't
-// support yet, not just another outbound type (see coreconfig.go's own
-// doc comment). Exotic/legacy protocols (Hysteria v1, ShadowsocksR, Naive,
-// Tor, SSH, ShadowTLS, AnyTLS) aren't exposed here either.
+// Every outbound type validateCoreConfig accepts - not sing-box's full
+// catalog. WireGuard is deliberately excluded: sing-box models it as an
+// "Endpoint", a structurally different top-level config section this rewrite
+// doesn't support yet, not just another outbound type (see coreconfig.go's
+// own doc comment).
+
+/** Group types: they pick among other outbounds and dial nothing themselves.
+ * The Core Config page calls these balancers. */
+export const OUTBOUND_GROUP_TYPES = ["selector", "urltest"] as const;
 
 export const SHADOWSOCKS_METHODS = [
   "none",
@@ -58,6 +66,10 @@ export type VmessSecurity = (typeof VMESS_SECURITY_TYPES)[number];
 
 export const CONGESTION_CONTROL_TYPES = ["cubic", "new_reno", "bbr"] as const;
 export type CongestionControl = (typeof CONGESTION_CONTROL_TYPES)[number];
+
+export const SNELL_OBFS_MODES = ["none", "http", "tls"] as const;
+export const SHADOWTLS_VERSIONS = [1, 2, 3] as const;
+export const VLESS_FLOWS = ["xtls-rprx-vision"] as const;
 
 // The two tags a node always has even with zero custom outbounds configured
 // (cmd/node/main.go's buildOptions always emits both) - reserved, so an
@@ -86,6 +98,26 @@ export type Outbound = {
   security?: VmessSecurity;
   /** tuic */
   congestion_control?: CongestionControl;
+  /** shadowtls */
+  version?: number;
+  /** snell */
+  psk?: string;
+  obfs_mode?: string;
+  obfs_host?: string;
+  /** hysteria (v1) */
+  obfs?: string;
+  up_mbps?: number;
+  down_mbps?: number;
+  /** tor */
+  executable_path?: string;
+  data_directory?: string;
+  /** urltest: the address its members are measured against, how often, and the
+   * lead in milliseconds a member needs before the group switches to it. */
+  url?: string;
+  interval?: string;
+  tolerance?: number;
+  /** selector: the member it uses. The first one when unset. */
+  default?: string;
 
   /** Shared TLS subset for vmess/trojan/vless (genuinely optional there)
    * and hysteria2/tuic (mandatory at the transport level for those two -
@@ -145,6 +177,14 @@ export type RoutingRule = {
   port_range?: string[];
   network?: NetworkType[];
   protocol?: ProtocolType[];
+  /** The matchers an older node agent doesn't know: the panel only sends a rule
+   * using one of these to agents that say they understand them. */
+  domain_regex?: string[];
+  source_ip_cidr?: string[];
+  source_ip_is_private?: boolean;
+  source_port?: number[];
+  source_port_range?: string[];
+  auth_user?: string[];
   /** Must resolve to "direct", "block", or a tag in this config's own
    * outbounds - enforced server-side by validateCoreConfig. */
   outbound_tag: string;

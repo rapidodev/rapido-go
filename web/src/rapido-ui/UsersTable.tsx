@@ -8,6 +8,7 @@ import { useAdminsQuery } from "hooks/useAdminsQuery";
 import { useIsSudo } from "hooks/useCurrentAdminQuery";
 import { useUsersUiStore } from "rapido-ui/usersUiStore";
 import { User, Status } from "types/User";
+import { errorText } from "service/errors";
 import { formatBytes } from "utils/formatByte";
 import { relativeExpiryDate } from "utils/dateFormatter";
 import { LastSeen, lastSeenOf } from "utils/presence";
@@ -25,7 +26,7 @@ import { useAppearance } from "rapido-ui/appearance";
 import { Button } from "rapido-ui/Button";
 import { Input } from "rapido-ui/Input";
 import { Select } from "rapido-ui/Select";
-import { ltrIsolate } from "rapido-ui/bidi";
+import { autoIsolate, ltrIsolate } from "rapido-ui/bidi";
 
 import type { BadgeTone } from "rapido-ui/Badge";
 
@@ -226,12 +227,15 @@ const UserActions: FC<{ user: User }> = ({ user }) => {
 const DAY = 86400;
 
 const UserRow: FC<{ user: User; showAdmin: boolean }> = ({ user, showAdmin }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const protocols = Object.keys(user.proxies);
   const hasLimit = !!user.data_limit;
   const usedPercent = hasLimit ? Math.min((user.used_traffic / (user.data_limit as number)) * 100, 100) : 0;
-  const expiryInfo = relativeExpiryDate(user.expire);
-  const lastSeen = lastSeenOf(user.online_at, user.online);
+  const expiryInfo = relativeExpiryDate(user.expire, i18n.language);
+  const lastSeen = lastSeenOf(user.online_at, user.online, undefined, i18n.language);
+  // In the admin's language, so neither direction is imposed on these: "2 روز" drawn
+  // left-to-right would read backwards in a Persian sentence.
+  const expiryTime = autoIsolate(expiryInfo.time || t("rapido.underAMinute"));
 
   // Days left, against the length of the period the user was given (creation to expiry),
   // capped to a sensible bar when the period is long or unknown.
@@ -278,7 +282,7 @@ const UserRow: FC<{ user: User; showAdmin: boolean }> = ({ user, showAdmin }) =>
               {lastSeen.kind === "never" && t("rapido.neverConnected")}
               {lastSeen.kind === "seen" &&
                 t("rapido.lastSeen", {
-                  time: ltrIsolate(lastSeen.time || t("rapido.underAMinute")),
+                  time: autoIsolate(lastSeen.time || t("rapido.underAMinute")),
                 })}
             </CardSubtitle>
           </span>
@@ -326,8 +330,8 @@ const UserRow: FC<{ user: User; showAdmin: boolean }> = ({ user, showAdmin }) =>
         <ClusterZone title={t("rapido.users.expiry")} className="p-3">
           <div className="flex flex-col gap-1.5">
             <span className={classNames("text-sm font-medium", expiryInfo.status === "expired" ? "text-red-400" : expiringSoon ? "text-amber-400" : "text-rapido-text")}>
-              {expiryInfo.status === "expires" && t("expires", { time: ltrIsolate(expiryInfo.time) })}
-              {expiryInfo.status === "expired" && t("expired", { time: ltrIsolate(expiryInfo.time) })}
+              {expiryInfo.status === "expires" && t("expires", { time: expiryTime })}
+              {expiryInfo.status === "expired" && t("expired", { time: expiryTime })}
               {!expiryInfo.status && t("rapido.users.noExpiry")}
             </span>
             {daysLeft !== null && (
@@ -406,7 +410,7 @@ export const UsersTable: FC = () => {
   const setFilters = useUsersUiStore((s) => s.setFilters);
   const setCreatingNewUser = useUsersUiStore((s) => s.setCreatingNewUser);
 
-  const { data, isLoading } = useUsersQuery(filters);
+  const { data, isLoading, isError, error, isPlaceholderData, refetch } = useUsersQuery(filters);
   const isSudo = useIsSudo();
   // /admins is sudo-only, so a reseller's session never asks for it.
   const { data: admins } = useAdminsQuery({ enabled: isSudo });
@@ -414,6 +418,12 @@ export const UsersTable: FC = () => {
   const total = data?.total ?? 0;
 
   const [searchInput, setSearchInput] = useState(filters.search ?? "");
+  const [exportFailed, setExportFailed] = useState(false);
+
+  const exportCsv = () => {
+    setExportFailed(false);
+    void downloadUsersCsv(filters).catch(() => setExportFailed(true));
+  };
 
   const debouncedSearch = useMemo(
     () =>
@@ -437,6 +447,15 @@ export const UsersTable: FC = () => {
     () => buildPageItems(currentPage, pageCount),
     [currentPage, pageCount]
   );
+
+  // Deleting the only rows of the last page leaves the offset past the end of
+  // the list: an empty page saying no user matched, with users on the page
+  // before it. Only on a real answer: a placeholder's total is the previous
+  // filter's.
+  useEffect(() => {
+    if (!data || isPlaceholderData || offset === 0 || offset < total) return;
+    setFilters({ offset: total > 0 ? Math.floor((total - 1) / limit) * limit : 0 });
+  }, [data, isPlaceholderData, offset, total, limit, setFilters]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -502,7 +521,7 @@ export const UsersTable: FC = () => {
         {/* ms-auto, not ml-auto: pushing an item to the end of a flex row means
             an auto margin on its *start* side. In RTL the free space is already
             on the left, so margin-left:auto absorbed nothing. */}
-        <Button variant="secondary" className="ms-auto shrink-0" onClick={() => void downloadUsersCsv(filters).catch(() => undefined)}>
+        <Button variant="secondary" className="ms-auto shrink-0" onClick={exportCsv}>
           {t("rapido.users.exportCsv")}
         </Button>
         <Button
@@ -515,13 +534,28 @@ export const UsersTable: FC = () => {
         </Button>
       </div>
 
+      {exportFailed && (
+        <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+          {t("rapido.users.exportFailed")}
+        </div>
+      )}
+
+      {isError && (
+        <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+          <p>{errorText(error, t("rapido.users.loadFailed"))}</p>
+          <Button variant="chip" className="mt-2" onClick={() => void refetch()}>
+            {t("rapido.retry")}
+          </Button>
+        </div>
+      )}
+
       {isLoading && (
         <div className="py-12 text-center text-sm text-rapido-muted">
           {t("rapido.loadingUsers")}
         </div>
       )}
 
-      {!isLoading && users.length === 0 && (
+      {!isLoading && !isError && !isPlaceholderData && users.length === 0 && (
         <div className="py-12 text-center text-sm text-rapido-muted">
           {t("usersTable.noUserMatched")}
         </div>

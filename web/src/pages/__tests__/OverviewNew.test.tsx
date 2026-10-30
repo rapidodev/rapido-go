@@ -9,7 +9,7 @@ const fetchMock = vi.hoisted(() => vi.fn());
 
 vi.mock("service/http", () => ({ fetch: fetchMock, fetcher: fetchMock }));
 
-import { OverviewNew } from "../OverviewNew";
+import { OverviewNew, usageDayLabel } from "../OverviewNew";
 
 beforeAll(async () => {
   await i18n.changeLanguage("en");
@@ -124,6 +124,41 @@ describe("Overview page and sudo-only endpoints", () => {
     expect(requested()).not.toContain("/monitoring");
   });
 
+  it("hides panel-wide traffic from a reseller: no history request, no usage chart, no traffic panel", async () => {
+    // What the server now sends a reseller: zero bandwidth and, were it asked, an all-zero history.
+    fetchMock.mockImplementation(answer(false));
+    const queryClient = renderOverview();
+
+    await waitFor(() => expect(queryClient.getQueryState(queryKeys.currentAdmin)?.status).toBe("success"));
+    expect(await screen.findByText("Total Users")).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(requested().filter((u) => u.startsWith("/system/usage-history"))).toEqual([]);
+    expect(screen.queryByText(i18n.t("rapido.usageOverTimeTitle"))).not.toBeInTheDocument();
+    expect(screen.queryByText(i18n.t("rapido.users.trafficUsed"))).not.toBeInTheDocument();
+  });
+
+  it("still does not show a reseller a traffic figure if the server ever sends one", async () => {
+    currentStats = { ...stats, incoming_bandwidth: 5_000_000_000, outgoing_bandwidth: 1_000_000_000 };
+    fetchMock.mockImplementation(answer(false));
+    renderOverview();
+    expect(await screen.findByText("Total Users")).toBeInTheDocument();
+    await waitFor(() => expect(requested()).toContain("/admin"));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(screen.queryByText(i18n.t("rapido.users.trafficUsed"))).not.toBeInTheDocument();
+  });
+
+  it("shows a sudo admin the usage chart and the traffic panel", async () => {
+    fetchMock.mockImplementation((url: string) =>
+      url === "/system/usage-history?days=14"
+        ? Promise.resolve([{ date: "2026-09-24", usage: 1024 }, { date: "2026-09-25", usage: 2048 }])
+        : answer(true)(url)
+    );
+    renderOverview();
+    expect(await screen.findByText(i18n.t("rapido.usageOverTimeTitle"))).toBeInTheDocument();
+    expect(await screen.findByText(i18n.t("rapido.users.trafficUsed"))).toBeInTheDocument();
+  });
+
   it("requests /monitoring and shows the fleet sections for a sudo admin", async () => {
     fetchMock.mockImplementation(answer(true));
     renderOverview();
@@ -132,6 +167,17 @@ describe("Overview page and sudo-only endpoints", () => {
     // The fleet power view: one panel with the board of every node and tunnel.
     expect(await screen.findByText("Fleet overview")).toBeInTheDocument();
     expect((await screen.findAllByText("de-node")).length).toBeGreaterThan(0);
+  });
+});
+
+describe("Overview usage chart dates", () => {
+  it("labels a calendar day as that day, whatever the browser's time zone", () => {
+    const spy = vi.spyOn(Date.prototype, "toLocaleDateString");
+    const midnightUtc = Date.parse("2026-09-25T00:00:00Z");
+    expect(usageDayLabel(midnightUtc, "en")).toBe("09/25");
+    // Without the zone a browser west of Greenwich would print 09/24.
+    expect(spy).toHaveBeenCalledWith("en", expect.objectContaining({ timeZone: "UTC" }));
+    spy.mockRestore();
   });
 });
 

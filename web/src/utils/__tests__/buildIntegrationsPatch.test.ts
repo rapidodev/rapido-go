@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildIntegrationsPatch, IntegrationFieldSpec } from "../buildIntegrationsPatch";
+import { buildIntegrationsPatch, IntegrationFieldSpec, invalidIntegrationFields } from "../buildIntegrationsPatch";
 
 const fields: IntegrationFieldSpec[] = [
   { key: "telegram_api_token", kind: "password" },
@@ -76,5 +76,45 @@ describe("buildIntegrationsPatch", () => {
       telegram_api_token: null,
     });
     expect(Object.keys(body).sort()).toEqual(["discord_webhook_url", "telegram_api_token"]);
+  });
+
+  it("reads a Persian keyboard's digits in number fields", () => {
+    const body = buildIntegrationsPatch(
+      fields,
+      { telegram_logger_channel_id: "-۱۰۰۱۲۳", telegram_admin_ids: "۱۱۱, ٢٢٢" },
+      new Set()
+    );
+    expect(body).toEqual({ telegram_logger_channel_id: -100123, telegram_admin_ids: [111, 222] });
+  });
+
+  // NaN goes out as JSON null, and a null here means "clear the setting back to .env".
+  it("never lets a number field that holds no number clear the setting", () => {
+    const body = buildIntegrationsPatch(
+      fields,
+      { telegram_logger_channel_id: "abc", telegram_admin_ids: "111, abc" },
+      new Set()
+    );
+    expect(body).toEqual({});
+    expect(JSON.stringify(body)).not.toContain("null");
+  });
+});
+
+describe("invalidIntegrationFields", () => {
+  it("names the number fields that hold no number", () => {
+    const invalid = invalidIntegrationFields(
+      fields,
+      { telegram_logger_channel_id: "12a", telegram_admin_ids: "1, 2", discord_webhook_url: "anything" },
+      new Set()
+    );
+    expect(invalid.map((f) => f.key)).toEqual(["telegram_logger_channel_id"]);
+  });
+
+  it("accepts empty drafts and every digit a keyboard types", () => {
+    expect(invalidIntegrationFields(fields, {}, new Set())).toEqual([]);
+    expect(invalidIntegrationFields(fields, { telegram_admin_ids: "۱۱۱,, -2 " }, new Set())).toEqual([]);
+  });
+
+  it("does not hold a cleared field's stray draft against it", () => {
+    expect(invalidIntegrationFields(fields, { telegram_logger_channel_id: "abc" }, ["telegram_logger_channel_id"])).toEqual([]);
   });
 });

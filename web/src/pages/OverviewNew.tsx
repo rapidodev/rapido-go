@@ -28,6 +28,11 @@ import "rapido-ui/tailwind.css";
 
 type StatusRow = { status: string; label: string; value: number };
 
+// The history's points are calendar days, placed at midnight UTC. Read in the
+// browser's own zone they would land on the day before anywhere west of Greenwich.
+export const usageDayLabel = (ms: number, locale: string): string =>
+  new Date(ms).toLocaleDateString(locale, { month: "2-digit", day: "2-digit", timeZone: "UTC" });
+
 // The legend names each status next to its ring, with its share as a segmented
 // bar. Every status is listed - a zero row is dimmed rather than dropped - so
 // the list keeps its shape as the counts change on each poll.
@@ -60,7 +65,9 @@ const OverviewContent: FC = () => {
 
   const isSudo = useIsSudo();
   const { data: stats, isLoading: statsLoading, dataUpdatedAt } = useSystemStatsQuery();
-  const { data: history, isLoading: historyLoading } = useSystemUsageHistoryQuery(14);
+  // Panel-wide traffic, which is not a reseller's business: the server answers
+  // them with zeros, so they do not ask, and the panels below stay hidden.
+  const { data: history, isLoading: historyLoading } = useSystemUsageHistoryQuery(14, isSudo);
   const onlineTrend = useRollingSeries("overview:online", stats?.online_users, dataUpdatedAt);
   const activeTrend = useRollingSeries("overview:active", stats?.users_active, dataUpdatedAt);
 
@@ -90,7 +97,7 @@ const OverviewContent: FC = () => {
   const lifetime = stats ? stats.incoming_bandwidth + stats.outgoing_bandwidth : 0;
   const days = history ?? [];
   const periodTotal = days.reduce((a, p) => a + (p.usage || 0), 0);
-  const hasUsage = lifetime > 0 || periodTotal > 0;
+  const hasUsage = isSudo && (lifetime > 0 || periodTotal > 0);
 
   const usageSeries = useMemo(
     () =>
@@ -197,20 +204,22 @@ const OverviewContent: FC = () => {
         {isSudo && <FleetOverview users={stats ? { online: stats.online_users, total: stats.total_user } : undefined} />}
 
         {/* The usage over time, with a hover / keyboard readout */}
-        <Card className="flex min-w-0 flex-col gap-3">
-          <div>
-            <CardTitle>{t("rapido.usageOverTimeTitle")}</CardTitle>
-            <CardSubtitle>{t("rapido.usageOverTimeDesc")}</CardSubtitle>
-          </div>
-          <TimeSeriesChart
-            series={historyLoading ? [] : usageSeries}
-            format={(v) => String(formatBytes(v, 1))}
-            formatTime={(ms) => new Date(ms).toLocaleDateString(i18n.language, { month: "2-digit", day: "2-digit" })}
-            ariaLabel={String(t("rapido.usageOverTimeTitle"))}
-            height={230}
-            empty={String(t("rapido.monitoring.noHistory"))}
-          />
-        </Card>
+        {isSudo && (
+          <Card className="flex min-w-0 flex-col gap-3">
+            <div>
+              <CardTitle>{t("rapido.usageOverTimeTitle")}</CardTitle>
+              <CardSubtitle>{t("rapido.usageOverTimeDesc")}</CardSubtitle>
+            </div>
+            <TimeSeriesChart
+              series={historyLoading ? [] : usageSeries}
+              format={(v) => String(formatBytes(v, 1))}
+              formatTime={(ms) => usageDayLabel(ms, i18n.language)}
+              ariaLabel={String(t("rapido.usageOverTimeTitle"))}
+              height={230}
+              empty={String(t("rapido.monitoring.noHistory"))}
+            />
+          </Card>
+        )}
       </div>
     </div>
   );

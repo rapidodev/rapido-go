@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import dayjs from "dayjs";
 import Duration from "dayjs/plugin/duration";
 import utc from "dayjs/plugin/utc";
@@ -8,12 +8,25 @@ import { User } from "types/User";
 
 const state = vi.hoisted(() => ({
   users: [] as unknown[],
+  total: null as number | null,
   sudo: false,
   admins: [] as { username: string }[],
+  failed: null as unknown,
+  placeholder: false,
+  refetch: vi.fn(),
+  download: vi.fn(),
 }));
 
 vi.mock("hooks/useUsersQuery", () => ({
-  useUsersQuery: () => ({ data: { users: state.users, total: state.users.length }, isLoading: false }),
+  useUsersQuery: () => ({
+    data: state.failed ? undefined : { users: state.users, total: state.total ?? state.users.length },
+    isLoading: false,
+    isError: !!state.failed,
+    error: state.failed,
+    isPlaceholderData: state.placeholder,
+    refetch: state.refetch,
+  }),
+  downloadUsersCsv: state.download,
 }));
 
 // The reseller filter needs the role and the admin list; neither is under test
@@ -72,6 +85,91 @@ const renderUser = (o: Partial<User>) => {
 
 const presenceDotPings = (container: HTMLElement) => container.querySelector(".animate-ping") !== null;
 
+describe("Users list failures", () => {
+  afterEach(() => {
+    state.failed = null;
+    state.refetch.mockReset();
+    state.download.mockReset();
+    state.users = [];
+  });
+
+  it("says the list could not be loaded, offers a retry, and does not claim no user matched", () => {
+    state.failed = new Error("boom");
+    state.users = [];
+    render(<UsersTable />);
+    expect(screen.getByRole("alert")).toHaveTextContent("boom");
+    expect(screen.queryByText(/no user matched/i)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(state.refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to its own words when the failure has none", () => {
+    state.failed = {};
+    render(<UsersTable />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not load the users.");
+  });
+
+  it("says an export failed, and clears that on the next try", async () => {
+    state.download.mockRejectedValueOnce(new Error("boom")).mockResolvedValueOnce(undefined);
+    render(<UsersTable />);
+    fireEvent.click(screen.getByRole("button", { name: "Export CSV" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not export the users.");
+    fireEvent.click(screen.getByRole("button", { name: "Export CSV" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+  });
+});
+
+describe("Users list paging", () => {
+  afterEach(() => {
+    state.total = null;
+    state.placeholder = false;
+    state.users = [];
+    act(() => useUsersUiStore.getState().setFilters({ offset: 0, limit: 10 }));
+  });
+
+  const openAt = (offset: number, total: number) => {
+    state.users = [];
+    state.total = total;
+    act(() => useUsersUiStore.getState().setFilters({ offset, limit: 10 }));
+    render(<UsersTable />);
+    return () => useUsersUiStore.getState().filters.offset;
+  };
+
+  it("steps back to the last real page after its only rows were deleted", () => {
+    expect(openAt(20, 15)()).toBe(10);
+  });
+
+  it("lands on the last page exactly when the total is a whole number of pages", () => {
+    expect(openAt(30, 30)()).toBe(20);
+  });
+
+  it("goes to the first page when nothing is left", () => {
+    expect(openAt(10, 0)()).toBe(0);
+  });
+
+  it("stays put on a page that exists", () => {
+    expect(openAt(10, 15)()).toBe(10);
+  });
+
+  it("does not act on the previous page's numbers while the next one loads", () => {
+    state.placeholder = true;
+    expect(openAt(20, 15)()).toBe(20);
+  });
+});
+
+describe("Users table in Persian", () => {
+  afterEach(async () => {
+    await i18n.changeLanguage("en");
+  });
+
+  it("writes the expiry and the last-seen time in Persian, not English inside a Persian sentence", async () => {
+    await i18n.changeLanguage("fa");
+    renderUser({ online: false, online_at: ago(7200), expire: Math.floor(NOW / 1000) + 3 * 86400 });
+    expect(screen.getByText(/پایان در .*۳ روز/)).toBeInTheDocument();
+    expect(screen.getByText(/۲ ساعت.* پیش آنلاین بوده/)).toBeInTheDocument();
+  });
+});
+
 describe("Users table presence", () => {
   it("shows a connected user as online from the live flag even when online_at is old", () => {
     const { container } = renderUser({ online: true, online_at: ago(3600) });
@@ -98,7 +196,7 @@ describe("Users table presence", () => {
 
     renderUser({ online_at: ago(600) });
     expect(screen.queryByText("Online now")).not.toBeInTheDocument();
-    expect(screen.getByText(/last seen .*10 mins.* ago/)).toBeInTheDocument();
+    expect(screen.getByText(/last seen .*10 min.* ago/)).toBeInTheDocument();
   });
 
   it("says never connected when there is no activity and the user is not online", () => {

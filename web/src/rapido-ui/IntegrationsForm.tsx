@@ -7,6 +7,7 @@ import { IntegrationSettingsStatus } from "types/Integrations";
 import {
   buildIntegrationsPatch,
   IntegrationFieldSpec,
+  invalidIntegrationFields,
 } from "utils/buildIntegrationsPatch";
 import { Card } from "rapido-ui/Card";
 import { Badge } from "rapido-ui/Badge";
@@ -202,9 +203,18 @@ export const IntegrationsForm: FC = () => {
     clearedKeys.size > 0 || allFields.some((f) => (drafts[f.key] ?? "").trim() !== "");
 
   const save = () => {
-    setSaving(true);
     setSaveError("");
     setSaveOk(false);
+    const invalid = invalidIntegrationFields(allFields, drafts, clearedKeys);
+    if (invalid.length > 0) {
+      setSaveError(
+        t("rapido.integrations.notANumber", {
+          fields: invalid.map((f) => t(f.labelKey)).join(" · "),
+        })
+      );
+      return;
+    }
+    setSaving(true);
     const body = buildIntegrationsPatch(allFields, drafts, clearedKeys);
 
     fetch<IntegrationSettingsStatus>("/settings/integrations", { method: "PUT", body })

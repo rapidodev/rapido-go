@@ -23,8 +23,34 @@ export type InboundListEntry = {
   ports: number[];
 };
 
-export type InboundNetwork = "tcp" | "ws" | "grpc" | "kcp" | "quic" | "splithttp" | "xhttp";
-export type InboundSecurity = "none" | "tls" | "reality";
+export const INBOUND_NETWORKS = ["tcp", "ws", "grpc", "kcp", "quic", "splithttp", "xhttp"] as const;
+export type InboundNetwork = (typeof INBOUND_NETWORKS)[number];
+export const INBOUND_SECURITIES = ["none", "tls", "reality"] as const;
+export type InboundSecurity = (typeof INBOUND_SECURITIES)[number];
+
+// Mirrors internal/httpapi/inbounds.go: proxyTypeValid, the protocols
+// syncInboundEntries refuses without TLS, validSnellV6Modes and
+// shadowTLSInnerKeyLength.
+export const INBOUND_PROTOCOLS = [
+  "vless",
+  "vmess",
+  "trojan",
+  "shadowsocks",
+  "hysteria2",
+  "tuic",
+  "anytls",
+  "hysteria",
+  "naive",
+  "snell",
+  "shadowtls",
+] as const;
+export const TLS_REQUIRED_PROTOCOLS = ["hysteria2", "tuic", "anytls", "hysteria"] as const;
+export const SNELL_V6_MODES = ["default", "unshaped", "unsafe-raw"] as const;
+export const SHADOWTLS_INNER_KEY_BYTES: Record<string, number> = {
+  "2022-blake3-aes-128-gcm": 16,
+  "2022-blake3-aes-256-gcm": 32,
+  "2022-blake3-chacha20-poly1305": 32,
+};
 
 // Mirrors internal/httpapi/inbounds.go's inboundDetailDTO - the full-fidelity
 // shape the merged xray-config document carries its inbounds in, as opposed
@@ -47,6 +73,16 @@ export type Inbound = {
   tls_certificate?: string;
   tls_key?: string;
   tls_server_name?: string;
+  hysteria2_obfs_password?: string;
+  up_mbps?: number;
+  down_mbps?: number;
+  congestion_control?: string;
+  zero_rtt_handshake?: boolean;
+  snell_psk?: string;
+  snell_v6_mode?: string;
+  hysteria_obfs_password?: string;
+  shadowtls_inner_method?: string;
+  shadowtls_inner_password?: string;
 };
 
 // POST /api/inbounds/sync's per-entry shape (internal/httpapi/inbounds.go's
@@ -65,6 +101,9 @@ export type InboundSyncEntry = {
   tls_certificate?: string;
   tls_key?: string;
   tls_server_name?: string;
+  hysteria2_obfs_password?: string;
+  congestion_control?: string;
+  zero_rtt_handshake?: boolean;
   snell_psk?: string;
   snell_v6_mode?: string;
   up_mbps?: number;

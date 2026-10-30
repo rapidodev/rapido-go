@@ -1,16 +1,18 @@
 import { Suspense, lazy } from "react";
-import { Navigate, createHashRouter } from "react-router-dom";
+import { Navigate, createHashRouter, redirect } from "react-router-dom";
 import { loadCurrentAdminForNavigation } from "hooks/useCurrentAdminQuery";
 import { SudoOnly } from "rapido-ui/SudoOnly";
 import { extensionRoutes } from "extensions";
+import { getAuthToken } from "utils/authStorage";
+import { setLoginRedirect } from "utils/session";
 import { Login } from "./Login";
 import { pageImports } from "./pageImports";
+import { RouteError } from "./RouteError";
 
-// A failed /admin fetch (expired/missing token) throws, which react-router
-// routes to `errorElement: <Login/>` below - the same "inline, not a global
-// interceptor" 401 handling the old dashboard used, so an admin mid-edit on
-// some other tab is never yanked out from under themselves by a background
-// 401 on an unrelated request.
+// With no token there is nothing to look up, and an outage must not hide the
+// login form behind an error page. A failed /admin fetch throws: a 401 has
+// already sent the admin to the login page (service/http.ts), and anything else
+// lands on `errorElement: <RouteError/>` below with the session untouched.
 //
 // Seeds the query cache with the result too (a small improvement over the
 // old dashboard's loader, which just returned the fetch and let
@@ -18,6 +20,7 @@ import { pageImports } from "./pageImports";
 // reads the exact same queryKey, so Shell/SudoOnly render with data already
 // in hand instead of a second round trip on every navigation.
 const fetchAdminLoader = async () => {
+  if (!getAuthToken()) return redirect("/login");
   return loadCurrentAdminForNavigation();
 };
 
@@ -49,7 +52,7 @@ export const router = createHashRouter([
         <RapidoHome />
       </Suspense>
     ),
-    errorElement: <Login />,
+    errorElement: <RouteError />,
     loader: fetchAdminLoader,
   },
   {
@@ -59,7 +62,7 @@ export const router = createHashRouter([
         <UsersPage />
       </Suspense>
     ),
-    errorElement: <Login />,
+    errorElement: <RouteError />,
     loader: fetchAdminLoader,
   },
   {
@@ -73,7 +76,7 @@ export const router = createHashRouter([
         <UserTemplatesPage />
       </Suspense>
     ),
-    errorElement: <Login />,
+    errorElement: <RouteError />,
     loader: fetchAdminLoader,
   },
   {
@@ -87,7 +90,7 @@ export const router = createHashRouter([
         <TicketsPage />
       </Suspense>
     ),
-    errorElement: <Login />,
+    errorElement: <RouteError />,
     loader: fetchAdminLoader,
   },
   {
@@ -99,7 +102,7 @@ export const router = createHashRouter([
         </Suspense>
       </SudoOnly>
     ),
-    errorElement: <Login />,
+    errorElement: <RouteError />,
     loader: fetchAdminLoader,
   },
   {
@@ -111,7 +114,7 @@ export const router = createHashRouter([
         </Suspense>
       </SudoOnly>
     ),
-    errorElement: <Login />,
+    errorElement: <RouteError />,
     loader: fetchAdminLoader,
   },
   {
@@ -123,7 +126,7 @@ export const router = createHashRouter([
         </Suspense>
       </SudoOnly>
     ),
-    errorElement: <Login />,
+    errorElement: <RouteError />,
     loader: fetchAdminLoader,
   },
   {
@@ -135,7 +138,7 @@ export const router = createHashRouter([
         </Suspense>
       </SudoOnly>
     ),
-    errorElement: <Login />,
+    errorElement: <RouteError />,
     loader: fetchAdminLoader,
   },
   {
@@ -147,7 +150,7 @@ export const router = createHashRouter([
         </Suspense>
       </SudoOnly>
     ),
-    errorElement: <Login />,
+    errorElement: <RouteError />,
     loader: fetchAdminLoader,
   },
   {
@@ -158,7 +161,7 @@ export const router = createHashRouter([
         <AppearancePage />
       </Suspense>
     ),
-    errorElement: <Login />,
+    errorElement: <RouteError />,
     loader: fetchAdminLoader,
   },
   {
@@ -172,7 +175,7 @@ export const router = createHashRouter([
         </Suspense>
       </SudoOnly>
     ),
-    errorElement: <Login />,
+    errorElement: <RouteError />,
     loader: fetchAdminLoader,
   },
   {
@@ -184,7 +187,7 @@ export const router = createHashRouter([
         </Suspense>
       </SudoOnly>
     ),
-    errorElement: <Login />,
+    errorElement: <RouteError />,
     loader: fetchAdminLoader,
   },
   {
@@ -196,7 +199,7 @@ export const router = createHashRouter([
         </Suspense>
       </SudoOnly>
     ),
-    errorElement: <Login />,
+    errorElement: <RouteError />,
     loader: fetchAdminLoader,
   },
   {
@@ -208,7 +211,7 @@ export const router = createHashRouter([
         </Suspense>
       </SudoOnly>
     ),
-    errorElement: <Login />,
+    errorElement: <RouteError />,
     loader: fetchAdminLoader,
   },
   {
@@ -220,7 +223,7 @@ export const router = createHashRouter([
         </Suspense>
       </SudoOnly>
     ),
-    errorElement: <Login />,
+    errorElement: <RouteError />,
     loader: fetchAdminLoader,
   },
   {
@@ -232,7 +235,7 @@ export const router = createHashRouter([
         </Suspense>
       </SudoOnly>
     ),
-    errorElement: <Login />,
+    errorElement: <RouteError />,
     loader: fetchAdminLoader,
   },
   // Pages an optional add-on contributes (none in the public build).
@@ -245,7 +248,7 @@ export const router = createHashRouter([
     return {
       path,
       element: sudoOnly ? <SudoOnly>{page}</SudoOnly> : page,
-      errorElement: <Login />,
+      errorElement: <RouteError />,
       loader: fetchAdminLoader,
     };
   }),
@@ -262,3 +265,10 @@ export const router = createHashRouter([
     element: <Navigate to="/" replace />,
   },
 ]);
+
+// Already on the login page there is nowhere to go, and a second navigation
+// would wipe the "session expired" note the first one left there.
+setLoginRedirect((expired) => {
+  if (router.state.location.pathname.startsWith("/login")) return;
+  void router.navigate("/login", { replace: true, state: { sessionExpired: expired } });
+});

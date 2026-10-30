@@ -282,6 +282,63 @@ describe("Theme page", () => {
     expect(html.getAttribute("data-theme")).toBe("cockpit");
   });
 
+  it("keeps a saved look when the page is left, and drops what was changed after the save", () => {
+    const { unmount } = renderStudio();
+    fireEvent.click(screen.getByRole("radio", { name: /Graphite/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Save for me" }));
+    fireEvent.click(screen.getByRole("radio", { name: /Aurora/ }));
+    expect(screen.getByTestId("unsaved")).toBeInTheDocument();
+    unmount();
+    expect(html.getAttribute("data-theme")).toBe("graphite");
+    expect(JSON.parse(window.localStorage.getItem(STORAGE_KEY) as string).theme).toBe("graphite");
+  });
+
+  it("keeps what was applied to the panel when the page is left", async () => {
+    fetchMock.mockImplementation((url: string, opts?: { method?: string; body?: { theme: unknown } }) => {
+      if (url === "/settings/theme" && opts?.method === "PUT") return Promise.resolve({ theme: opts.body?.theme, allowed: DEFAULT_ALLOWED });
+      if (url === "/settings/theme") return Promise.resolve({ theme: {}, allowed: DEFAULT_ALLOWED });
+      return Promise.resolve({});
+    });
+    const { unmount } = renderStudio();
+    fireEvent.click(screen.getByRole("radio", { name: /Aurora/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply to the whole panel" }));
+    await screen.findByText("Applied to the whole panel.");
+    expect(screen.queryByTestId("unsaved")).toBeNull();
+    unmount();
+    expect(html.getAttribute("data-theme")).toBe("aurora");
+  });
+
+  it("goes back to a browser's own look when the page is left after applying a draft to the panel", async () => {
+    fetchMock.mockImplementation((url: string, opts?: { method?: string; body?: { theme: unknown } }) => {
+      if (url === "/settings/theme" && opts?.method === "PUT") return Promise.resolve({ theme: opts.body?.theme, allowed: DEFAULT_ALLOWED });
+      if (url === "/settings/theme") return Promise.resolve({ theme: {}, allowed: DEFAULT_ALLOWED });
+      return Promise.resolve({});
+    });
+    useAppearance.getState().set({ theme: "graphite" });
+    const { unmount } = renderStudio();
+    fireEvent.click(screen.getByRole("radio", { name: /Aurora/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply to the whole panel" }));
+    await screen.findByText("Applied to the whole panel.");
+    unmount();
+    expect(html.getAttribute("data-theme")).toBe("graphite");
+  });
+
+  it("does not bring the old default back when the page is left after resetting the panel theme", async () => {
+    setPanelDefault(panelThemeToAppearance({ preset: "aurora" }));
+    fetchMock.mockImplementation((url: string, opts?: { method?: string }) => {
+      if (url === "/settings/theme" && opts?.method === "DELETE") return Promise.resolve({ theme: {}, allowed: DEFAULT_ALLOWED });
+      if (url === "/settings/theme") return Promise.resolve({ theme: { preset: "aurora" }, allowed: DEFAULT_ALLOWED });
+      return Promise.resolve({});
+    });
+    const { unmount } = renderStudio();
+    expect(html.getAttribute("data-theme")).toBe("aurora");
+    fireEvent.click(screen.getByRole("button", { name: i18n.t("rapido.theme.resetPanel") as string }));
+    fireEvent.click(within(screen.getByText(i18n.t("rapido.theme.resetPanelConfirm") as string)).getByRole("button", { name: i18n.t("rapido.theme.resetPanel") as string }));
+    await screen.findByText(i18n.t("rapido.theme.resetDone") as string);
+    unmount();
+    expect(html.getAttribute("data-theme")).toBe("cockpit");
+  });
+
   it("saves for me only in this browser", () => {
     renderStudio();
     fireEvent.click(screen.getByRole("radio", { name: /Graphite/ }));

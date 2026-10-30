@@ -7,16 +7,20 @@ import zh from "../../../public/statics/locales/zh.json";
 
 const locales: Record<string, Record<string, string>> = { en, fa, ru, zh };
 
-// The Core Config, Monitoring, Logs and per-host load namespaces are the ones
-// every locale must cover completely. (Other namespaces have known older gaps -
-// e.g. ru/zh have no rapido.templates.* - which are not this test's business.)
+// The Core Config, Monitoring, Logs and per-host load namespaces, and the other
+// ones below, are those every locale must cover completely. (Other namespaces
+// have known older gaps, which are not this test's business.)
 const NAMESPACES = [
   "rapido.xrayConfig.",
+  "rapido.snapshots.",
+  "rapido.coreForm.",
   "rapido.monitoring.",
   "rapido.nodes.",
   "rapido.logs.",
   "rapido.hosts.load",
   "rapido.hosts.varLoad",
+  "rapido.templates.",
+  "rapido.routeError.",
 ];
 const PLURAL_SUFFIX = /_(zero|one|two|few|many|other)$/;
 
@@ -52,6 +56,17 @@ describe("locale files", () => {
       for (const key of Object.keys(en).filter(inScope)) {
         if (!(key in dict)) continue; // plural forms a language doesn't have
         expect(placeholders(dict[key]), `${lang} ${key}`).toEqual(placeholders(en[key as keyof typeof en]));
+      }
+    }
+  });
+
+  // What a non-UTF-8 write leaves behind: a whole string of question marks,
+  // which still parses, so nothing else catches it before an admin sees it.
+  it("hold real text, not characters lost to a wrong encoding", () => {
+    for (const [lang, dict] of Object.entries(locales)) {
+      for (const [key, value] of Object.entries(dict)) {
+        expect(value, `${lang} ${key}`).not.toMatch(/\?{3,}/);
+        expect(value, `${lang} ${key}`).not.toContain("�");
       }
     }
   });
@@ -129,6 +144,82 @@ describe("tunnel strings", () => {
     expect(i18n.getFixedT("en")("rapido.monitoring.tunnelDownFallback")).toBe("Down - using direct fallback");
     expect(i18n.getFixedT("en")("rapido.monitoring.agoSeconds", { value: 12 })).toBe("12 s ago");
     expect(i18n.getFixedT("en")("rapido.monitoring.agoMinutes", { value: 3 })).toBe("3 min ago");
+  });
+});
+
+// What a destructive action does, said before it happens (AGENTS.md rule 4), and
+// what the session and error pages say. Each is shown as is, so a gap or a copy of
+// the English would be the admin's only warning.
+const SAFETY_KEYS = [
+  "rapido.sessionExpired",
+  "rapido.routeError.title",
+  "rapido.routeError.body",
+  "rapido.routeError.chunkTitle",
+  "rapido.routeError.chunkBody",
+  "rapido.routeError.reload",
+  "rapido.gateway.deleteWarning",
+  "rapido.gateway.deleteFailed",
+  "rapido.nodes.confirmDisable",
+  "rapido.nodes.confirmDelete",
+  "rapido.nodes.openConnsNow",
+  "rapido.nodes.configProblem",
+  "rapido.nodes.agentVersion",
+  "rapido.admins.disableWarning",
+  "rapido.admins.activateWarning",
+  "rapido.admins.resetWarning",
+  "rapido.admins.deleteWarning",
+  "rapido.admins.affectedNow",
+  "rapido.admins.stillOwned",
+  "rapido.tunnels.confirmDelete",
+  "rapido.tunnels.confirmDeleteDetected",
+  "rapido.tunnels.confirmRestart",
+  "rapido.tunnels.confirmStop",
+  "rapido.tunnels.openConnsNow",
+  "rapido.tunnels.teardownWarning",
+  "rapido.hosts.remoteChanged",
+  "rapido.users.loadFailed",
+  "rapido.users.exportFailed",
+  "rapido.backups.restoring",
+  "rapido.backups.restoringHint",
+  "rapido.tickets.awaitingCountPage",
+  "rapido.integrations.notANumber",
+  "deleteUser.prompt",
+  "resetUserUsage.prompt",
+  "revokeUserSub.prompt",
+];
+
+describe("safety and session strings", () => {
+  it("are in all four languages, translated, with the same placeholders", () => {
+    for (const lang of ["fa", "ru", "zh"]) {
+      for (const key of SAFETY_KEYS) {
+        const english = en[key as keyof typeof en];
+        expect(english, key).toBeTruthy();
+        expect(locales[lang][key], `${lang} ${key}`).toBeTruthy();
+        expect(locales[lang][key], `${lang} ${key}`).not.toBe(english);
+        expect(placeholders(locales[lang][key]), `${lang} ${key}`).toEqual(placeholders(english));
+      }
+    }
+  });
+
+  it("keep the <b> around the username the user dialogs render through <Trans>", () => {
+    for (const lang of ["en", "fa", "ru", "zh"]) {
+      for (const key of ["deleteUser.prompt", "resetUserUsage.prompt", "revokeUserSub.prompt"]) {
+        expect(locales[lang][key], `${lang} ${key}`).toContain("<b>{{username}}</b>");
+      }
+    }
+  });
+});
+
+describe("user template strings", () => {
+  it("are translated, not English copied into ru and zh", () => {
+    const keys = Object.keys(en).filter((k) => k.startsWith("rapido.templates."));
+    expect(keys).toHaveLength(21);
+    for (const lang of ["ru", "zh"]) {
+      for (const key of keys) {
+        expect(locales[lang][key], `${lang} ${key}`).toBeTruthy();
+        expect(locales[lang][key], `${lang} ${key}`).not.toBe(en[key as keyof typeof en]);
+      }
+    }
   });
 });
 

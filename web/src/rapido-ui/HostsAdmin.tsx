@@ -7,6 +7,7 @@ import { useInboundsQuery } from "hooks/useInboundsQuery";
 import { Host, HostsMap } from "types/Host";
 import { HostLoadEntry } from "types/HostLoad";
 import { errorText } from "service/errors";
+import { toLatinDigits } from "utils/digits";
 import { Card } from "rapido-ui/Card";
 import { Badge } from "rapido-ui/Badge";
 import { Button } from "rapido-ui/Button";
@@ -157,9 +158,10 @@ const HostRow: FC<{
             dir="ltr"
             inputMode="numeric"
             value={host.port ?? ""}
-            onChange={(e) =>
-              onChange({ port: e.target.value ? Number(e.target.value) : null })
-            }
+            onChange={(e) => {
+              const digits = toLatinDigits(e.target.value).replace(/[^0-9]/g, "");
+              onChange({ port: digits ? Number(digits) : null });
+            }}
           />
         </label>
       </div>
@@ -333,20 +335,34 @@ export const HostsAdmin: FC = () => {
     if (!newHostTag && allTags.length > 0) setNewHostTag(allTags[0]);
   }, [allTags, newHostTag]);
 
-  // Local edit buffer, seeded from the query result and re-seeded whenever a
-  // fresh copy arrives (initial load, a manual refetch, or a successful
-  // save's echoed-back response) - never merged with in-progress edits, since
-  // "discard and reload" is the only way this page lets an admin back out of
-  // a change anyway.
-  useEffect(() => {
-    if (remoteHosts) {
-      setHosts(remoteHosts);
-      setOriginal(JSON.stringify(remoteHosts));
-      setMsg(null);
-    }
-  }, [remoteHosts]);
-
   const dirty = hosts !== null && JSON.stringify(hosts) !== original;
+
+  const adopt = (fresh: HostsMap) => {
+    setHosts(fresh);
+    setOriginal(JSON.stringify(fresh));
+  };
+
+  // Local edit buffer, seeded from the query result and re-seeded whenever a
+  // fresh copy arrives (initial load, a refetch, or a successful save's
+  // echoed-back response) - but only while there is nothing unsaved: a refetch
+  // on window focus must not throw away what an admin is typing. A copy that
+  // arrives during an edit is never merged, only announced below; "discard" is
+  // how an admin takes it.
+  useEffect(() => {
+    if (remoteHosts && !dirty) adopt(remoteHosts);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [remoteHosts]);
+  const remoteChanged = !!remoteHosts && original !== "" && JSON.stringify(remoteHosts) !== original;
+
+  // A refetch that returns what is already cached hands back the same object
+  // and changes nothing, so backing out takes the known copy straight away; the
+  // refetch is for anything newer.
+  const discard = () => {
+    if (remoteHosts) adopt(remoteHosts);
+    setConfirming(false);
+    setMsg(null);
+    refetch();
+  };
 
   const patch = (tag: string, index: number, p: Partial<Host>) => {
     setHosts((h) => (h ? patchHostAt(h, tag, index, p) : h));
@@ -399,7 +415,9 @@ export const HostsAdmin: FC = () => {
     });
   };
 
-  if (isError) {
+  // Only with nothing to show: a failed background refetch must not take the
+  // list, and the edits in it, off the page.
+  if (isError && !hosts) {
     return (
       <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-400">
         <p>{t("rapido.hosts.loadFailed")}</p>
@@ -419,14 +437,7 @@ export const HostsAdmin: FC = () => {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {dirty && <Badge tone="yellow">{t("rapido.hosts.unsaved")}</Badge>}
-          <Button
-            variant="chip"
-            disabled={saveHosts.isPending}
-            onClick={() => {
-              refetch();
-              setMsg(null);
-            }}
-          >
+          <Button variant="chip" disabled={saveHosts.isPending} onClick={discard}>
             {dirty ? t("rapido.hosts.discard") : t("rapido.tickets.refresh")}
           </Button>
           {confirming ? (
@@ -462,6 +473,12 @@ export const HostsAdmin: FC = () => {
           )}
         >
           {msg.text}
+        </div>
+      )}
+
+      {remoteChanged && (
+        <div role="status" className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-400">
+          {t("rapido.hosts.remoteChanged")}
         </div>
       )}
 
