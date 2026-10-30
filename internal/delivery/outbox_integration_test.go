@@ -155,3 +155,68 @@ func TestOutboxRetriesPreserveUserOrderAndDeliveryIdentity(t *testing.T) {
 		t.Fatal("retries changed delivery identity or reused another delivery's identity")
 	}
 }
+
+// A flood of notifications meeting a rate limit must not keep hitting it: everything
+// for that address waits as long as it was told, and other addresses carry on.
+func TestARateLimitHoldsBackTheWholeDestinationForAsLongAsItSaid(t *testing.T) {
+	pool := outboxTestPool(t)
+	ctx := context.Background()
+	var limited, other atomic.Int64
+	limitedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		limited.Add(1)
+		w.Header().Set("Retry-After", "600")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	t.Cleanup(limitedServer.Close)
+	otherServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		other.Add(1)
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	t.Cleanup(otherServer.Close)
+
+	const queued = 60
+	path := "/api/internal/gateway/users/sync"
+	enqueue := func(destination string, sequence int) {
+		// Separate ordering keys, so that first-in-first-out isn't what holds them back.
+		raw, err := json.Marshal(Payload{Body: json.RawMessage(`{}`), OrderingKey: fmt.Sprintf("user-%d", sequence)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, "INSERT INTO delivery_outbox (kind,destination,payload) VALUES ('gateway',$1,$2)", destination, raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for sequence := 0; sequence < queued; sequence++ {
+		enqueue(limitedServer.URL+path, sequence)
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		Run(runCtx, pool, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("delivery workers did not stop after cancellation")
+		}
+	})
+
+	waitOutbox(t, func() bool {
+		var waiting int
+		err := pool.QueryRow(ctx, "SELECT count(*) FROM delivery_outbox WHERE available_at>now()+interval '5 minutes'").Scan(&waiting)
+		return err == nil && waiting == queued
+	})
+	// Another address isn't affected.
+	enqueue(otherServer.URL+path, queued)
+	waitOutbox(t, func() bool { return other.Load() == 1 })
+
+	// Only what was in flight when the first answer came back got through: four
+	// workers, each with a request out, and one a moment late to hear about it.
+	if got := limited.Load(); got == 0 || got > 12 {
+		t.Errorf("%d requests reached a destination that had said to wait, out of %d queued", got, queued)
+	}
+}

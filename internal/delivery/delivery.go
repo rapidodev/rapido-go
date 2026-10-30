@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -104,7 +105,7 @@ func sendDelivery(ctx context.Context, client *http.Client, kind string, id int6
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return deliveryRefused{status: resp.StatusCode}
+		return deliveryRefused{status: resp.StatusCode, retryAfter: retryAfter(resp)}
 	}
 	if kind == "gateway" {
 		var result struct {
@@ -140,8 +141,38 @@ func refuseInternalAddress(_, address string, _ syscall.RawConn) error {
 	return nil
 }
 
+// maxRetryAfter bounds how long one answer can hold up a destination.
+const maxRetryAfter = time.Hour
+
+// retryAfter is how long a 429 says to stay away, from the standard header or from
+// Telegram's parameters.retry_after. Zero when it doesn't say.
+func retryAfter(resp *http.Response) time.Duration {
+	if resp.StatusCode != http.StatusTooManyRequests {
+		return 0
+	}
+	seconds, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After")))
+	if err != nil || seconds <= 0 {
+		var body struct {
+			Parameters struct {
+				RetryAfter int `json:"retry_after"`
+			} `json:"parameters"`
+		}
+		if json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&body) != nil {
+			return 0
+		}
+		seconds = body.Parameters.RetryAfter
+	}
+	if seconds <= 0 {
+		return 0
+	}
+	return min(time.Duration(seconds)*time.Second, maxRetryAfter)
+}
+
 // deliveryRefused is the other end answering, with something other than success.
-type deliveryRefused struct{ status int }
+type deliveryRefused struct {
+	status     int
+	retryAfter time.Duration
+}
 
 func (e deliveryRefused) Error() string { return fmt.Sprintf("HTTP %d", e.status) }
 
@@ -218,12 +249,26 @@ func worker(ctx context.Context, pool *pgxpool.Pool, kind string, logger *slog.L
 				err = sendDelivery(ctx, client, kind, id, destination, payload)
 			}
 			if err == nil {
-				_, err = pool.Exec(ctx, "DELETE FROM delivery_outbox WHERE id=$1", id)
+				if _, err := pool.Exec(ctx, "DELETE FROM delivery_outbox WHERE id=$1", id); err != nil {
+					// Its lease runs out in two minutes and it goes out once more.
+					logger.Warn("outbox delivery sent but not cleared", "delivery_id", id, "kind", kind, "error", err)
+				}
 			} else if refused := (deliveryRefused{}); errors.As(err, &refused) && refused.permanent() && attempts >= maxRefusedAttempts {
 				_, _ = pool.Exec(ctx, "DELETE FROM delivery_outbox WHERE id=$1", id)
 				logger.Error("outbox delivery dropped: refused every time", "delivery_id", id, "kind", kind, "status", refused.status, "attempts", attempts)
 			} else {
 				delay := time.Duration(1<<min(attempts, 10)) * time.Second
+				if refused.retryAfter > 0 {
+					// Told when to come back: everything else queued for that address
+					// would only get the same answer, and pressing on can get a bot banned.
+					// A row some other worker has locked is that worker's to defer, and
+					// several workers hear this at once: waiting for each other's rows
+					// is how they would deadlock.
+					delay = refused.retryAfter
+					_, _ = pool.Exec(ctx, `WITH queued AS (
+ SELECT id FROM delivery_outbox WHERE kind=$1 AND destination=$2 AND available_at<now()+$3::interval FOR UPDATE SKIP LOCKED)
+ UPDATE delivery_outbox o SET available_at=now()+$3::interval FROM queued WHERE o.id=queued.id`, kind, destination, fmt.Sprintf("%f seconds", delay.Seconds()))
+				}
 				_, _ = pool.Exec(ctx, "UPDATE delivery_outbox SET available_at=now()+$2::interval WHERE id=$1", id, fmt.Sprintf("%f seconds", delay.Seconds()))
 				logger.Warn("outbox delivery deferred", "delivery_id", id, "kind", kind, "attempt", attempts, "error", controlurl.RedactError(err))
 			}

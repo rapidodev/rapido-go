@@ -185,3 +185,33 @@ func TestGatewayDeliveryRequiresExplicitAcknowledgement(t *testing.T) {
 		})
 	}
 }
+
+func TestRetryAfterReadsTheHeaderAndTelegramsBody(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		header string
+		body   string
+		want   time.Duration
+	}{
+		{name: "header", status: 429, header: "30", want: 30 * time.Second},
+		{name: "telegram body", status: 429, body: `{"ok":false,"error_code":429,"parameters":{"retry_after":35}}`, want: 35 * time.Second},
+		{name: "header wins", status: 429, header: "7", body: `{"parameters":{"retry_after":35}}`, want: 7 * time.Second},
+		{name: "says nothing", status: 429, body: `{"ok":false}`},
+		{name: "not json", status: 429, body: `slow down`},
+		{name: "a date is not understood", status: 429, header: "Wed, 21 Oct 2026 07:28:00 GMT"},
+		{name: "negative", status: 429, header: "-5"},
+		{name: "absurd", status: 429, header: "99999999", want: maxRetryAfter},
+		{name: "only a 429 counts", status: 503, header: "30"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := &http.Response{StatusCode: tc.status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(tc.body))}
+			if tc.header != "" {
+				resp.Header.Set("Retry-After", tc.header)
+			}
+			if got := retryAfter(resp); got != tc.want {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
