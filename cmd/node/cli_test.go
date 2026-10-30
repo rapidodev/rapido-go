@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -69,6 +70,7 @@ func newCLIHost(t *testing.T) *cliHost {
 		t.Fatal(err)
 	}
 	h.c = &cli{
+		in:  strings.NewReader(""),
 		out: h.out, errOut: h.errOut,
 		paths: cliPaths{
 			Bin:          filepath.Join(dir, "usr", "local", "bin", "rapido-go-node"),
@@ -76,6 +78,7 @@ func newCLIHost(t *testing.T) *cliHost {
 			Unit:         filepath.Join(dir, "etc", "systemd", "system", unitName),
 			Sysctl:       filepath.Join(dir, "etc", "sysctl.d", "99-rapido-node.conf"),
 			CertDir:      filepath.Join(dir, "etc", "rapido-node"),
+			StateDir:     filepath.Join(dir, "var", "lib", "rapido-node"),
 			WireGuardDir: filepath.Join(dir, "etc", "wireguard"),
 			BBRList:      filepath.Join(dir, "proc", "tcp_available_congestion_control"),
 			Live:         filepath.Join(dir, "run", "live.json"),
@@ -442,7 +445,7 @@ func TestInstallRejectsBadInputBeforeTouchingTheHost(t *testing.T) {
 		{"not base64", []string{"--setup-blob", "not base64!!!"}, "base64"},
 		{"missing fields", []string{"--setup-blob", encodeTestBlob(t, nodeSetupBlob{Cert: "c", Key: "k"})}, "missing"},
 		{"newline injection", []string{"--setup-blob", p.blob(t) + "\nEVIL=1"}, "base64"},
-		{"no blob at all", nil, "--setup-blob is required"},
+		{"no blob at all", nil, "no setup blob given"},
 		{"no panel address", []string{"--setup-blob", noPanel}, "--panel-url"},
 		{"bad listen addr", []string{"--setup-blob", p.blob(t), "--listen-addr", "nonsense"}, "--listen-addr"},
 		{"bad port", []string{"--setup-blob", p.blob(t), "--listen-addr", "0.0.0.0:99999"}, "port"},
@@ -466,6 +469,158 @@ func TestInstallRejectsBadInputBeforeTouchingTheHost(t *testing.T) {
 				t.Errorf("commands ran despite the rejected input: %v", h.calls)
 			}
 		})
+	}
+}
+
+func TestInstallReadsTheBlobFromStdin(t *testing.T) {
+	p := newCLIPanel(t, "unused")
+	h := newCLIHost(t)
+	blob := p.blob(t)
+	h.c.in = strings.NewReader(blob + "\n")
+
+	if code := h.run("install", "--setup-blob-file", "-"); code != 0 {
+		t.Fatalf("install exited %d\n%s\n%s", code, h.out, h.errOut)
+	}
+	if got := h.read(h.c.paths.Env); !strings.Contains(got, "NODE_SETUP_BLOB="+blob+"\n") {
+		t.Errorf("env file lacks the blob from stdin: %q", got)
+	}
+	if strings.Contains(h.out.String(), "process list") {
+		t.Errorf("a blob on stdin must not be warned about:\n%s", h.out)
+	}
+}
+
+func TestInstallReadsTheBlobFromARootOnlyFile(t *testing.T) {
+	p := newCLIPanel(t, "unused")
+	h := newCLIHost(t)
+	blob := p.blob(t)
+	file := filepath.Join(h.dir, "node.blob")
+	if err := os.WriteFile(file, []byte(blob+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := h.run("install", "--setup-blob-file", file); code != 0 {
+		t.Fatalf("install exited %d\n%s\n%s", code, h.out, h.errOut)
+	}
+	if got := h.read(h.c.paths.Env); !strings.Contains(got, "NODE_SETUP_BLOB="+blob+"\n") {
+		t.Errorf("env file lacks the blob from the file: %q", got)
+	}
+	if !strings.Contains(h.out.String(), file+" can be deleted") {
+		t.Errorf("output does not say the file can go:\n%s", h.out)
+	}
+}
+
+func TestInstallRefusesABlobFileOthersCanRead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no group and other permission bits")
+	}
+	p := newCLIPanel(t, "unused")
+	h := newCLIHost(t)
+	file := filepath.Join(h.dir, "node.blob")
+	if err := os.WriteFile(file, []byte(p.blob(t)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code := h.run("install", "--setup-blob-file", file); code != 1 || !strings.Contains(h.errOut.String(), "chmod 600") {
+		t.Fatalf("code %d, err %q", code, h.errOut)
+	}
+	if h.exists(h.c.paths.Env) {
+		t.Error("installed from a file other users can read")
+	}
+}
+
+func TestInstallRefusesBlobFilesItCannotUse(t *testing.T) {
+	h := newCLIHost(t)
+	tooLarge := filepath.Join(h.dir, "large.blob")
+	if err := os.WriteFile(tooLarge, bytes.Repeat([]byte("A"), maxSetupBlob+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for file, want := range map[string]string{
+		filepath.Join(h.dir, "missing.blob"): "setup blob file",
+		h.dir:                                "not a regular file",
+		tooLarge:                             "too large",
+	} {
+		h.errOut.Reset()
+		if code := h.run("install", "--setup-blob-file", file); code != 1 || !strings.Contains(h.errOut.String(), want) {
+			t.Errorf("%s: code %d, err %q, want it to mention %q", file, code, h.errOut, want)
+		}
+	}
+	if h.exists(h.c.paths.Env) || len(h.calls) != 0 {
+		t.Errorf("the host was touched: %v", h.calls)
+	}
+}
+
+func TestInstallTheOldBlobFlagStillWorksButWarns(t *testing.T) {
+	p := newCLIPanel(t, "unused")
+	h := newCLIHost(t)
+	if code := h.run("install", "--setup-blob", p.blob(t)); code != 0 {
+		t.Fatalf("install exited %d\n%s\n%s", code, h.out, h.errOut)
+	}
+	if !strings.Contains(h.out.String(), "process list") {
+		t.Errorf("no warning about the blob on the command line:\n%s", h.out)
+	}
+}
+
+func TestInstallTakesTheBlobOnlyOnce(t *testing.T) {
+	p := newCLIPanel(t, "unused")
+	h := newCLIHost(t)
+	if code := h.run("install", "--setup-blob", p.blob(t), "--setup-blob-file", "-"); code != 1 || !strings.Contains(h.errOut.String(), "not both") {
+		t.Errorf("code %d, err %q", code, h.errOut)
+	}
+	if h.exists(h.c.paths.Env) {
+		t.Error("installed from an ambiguous command")
+	}
+}
+
+// The agent refuses a plain-HTTP panel on every start (internal/controlurl), so
+// install says so before it touches the host rather than leave a dead service.
+func TestInstallRefusesAPlainHTTPPanel(t *testing.T) {
+	noPanel := encodeTestBlob(t, nodeSetupBlob{Cert: "c", Key: "k", CA: "ca", Secret: testSecret})
+	h := newCLIHost(t)
+	if code := h.run("install", "--setup-blob", noPanel, "--panel-url", "http://panel.example.com"); code != 1 || !strings.Contains(h.errOut.String(), "HTTPS") {
+		t.Fatalf("code %d, err %q", code, h.errOut)
+	}
+	if h.exists(h.c.paths.Env) || len(h.calls) != 0 {
+		t.Errorf("the host was touched despite the refusal: %v", h.calls)
+	}
+}
+
+// seedPlainHTTPInstall is a node installed before the rule above existed.
+func seedPlainHTTPInstall(t *testing.T, h *cliHost, p *cliPanel) {
+	t.Helper()
+	h.seedInstalled(t, p, "NODE-BINARY-1")
+	blob := encodeTestBlob(t, nodeSetupBlob{Cert: "c", Key: "k", CA: "ca", Secret: testSecret})
+	if err := os.WriteFile(h.c.paths.Env, []byte(renderEnvFile(blob, defaultListenAddr, 0, "http://panel.example.com")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.c.httpClient = &http.Client{Transport: refuseTransport{t}}
+}
+
+// refuseTransport fails the test if anything at all is sent.
+type refuseTransport struct{ t *testing.T }
+
+func (r refuseTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.t.Errorf("a request carrying the node secret went to %s", req.URL)
+	return nil, errors.New("refused by the test")
+}
+
+func TestUpdateRefusesAPlainHTTPPanel(t *testing.T) {
+	p := newCLIPanel(t, "NODE-BINARY-2")
+	h := newCLIHost(t)
+	seedPlainHTTPInstall(t, h, p)
+	if code := h.run("update"); code != 1 || !strings.Contains(h.errOut.String(), "HTTPS") {
+		t.Fatalf("code %d, err %q", code, h.errOut)
+	}
+	if got := h.read(h.c.paths.Bin); got != "NODE-BINARY-1" || p.binaryGets != 0 {
+		t.Errorf("binary = %q after %d downloads, want nothing fetched over plain HTTP", got, p.binaryGets)
+	}
+}
+
+func TestStatusSendsNoSecretToAPlainHTTPPanel(t *testing.T) {
+	p := newCLIPanel(t, "unused")
+	h := newCLIHost(t)
+	seedPlainHTTPInstall(t, h, p)
+	h.run("status")
+	if !strings.Contains(h.out.String(), "panel     : unknown") {
+		t.Errorf("status output:\n%s", h.out)
 	}
 }
 
@@ -770,6 +925,9 @@ func TestUninstallKeepsCertificatesUnlessPurged(t *testing.T) {
 				t.Fatalf("install exited %d\n%s\n%s", code, h.out, h.errOut)
 			}
 			os.WriteFile(h.c.paths.Bin+".bak-20260101-000000", []byte("old"), 0o755)
+			state := filepath.Join(h.c.paths.StateDir, "tor", "x")
+			os.MkdirAll(state, 0o700)
+			os.WriteFile(filepath.Join(h.c.paths.StateDir, "last-good-config.json"), []byte("{}"), 0o600)
 
 			args := []string{"uninstall"}
 			if purge {
@@ -789,7 +947,32 @@ func TestUninstallKeepsCertificatesUnlessPurged(t *testing.T) {
 			if got := h.exists(h.c.paths.CertDir); got == purge {
 				t.Errorf("cert dir exists = %v with purge = %v", got, purge)
 			}
+			if got := h.exists(h.c.paths.StateDir); got == purge {
+				t.Errorf("state dir exists = %v with purge = %v", got, purge)
+			}
 		})
+	}
+}
+
+func TestUninstallPurgePointsAtACustomStateDirWithoutRemovingIt(t *testing.T) {
+	p := newCLIPanel(t, "unused")
+	h := newCLIHost(t)
+	h.seedInstalled(t, p, "NODE-BINARY-1")
+	custom := filepath.Join(h.dir, "elsewhere")
+	if err := os.MkdirAll(custom, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.c.paths.Env, []byte("NODE_STATE_DIR="+custom+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := h.run("uninstall", "--purge"); code != 0 {
+		t.Fatalf("uninstall exited %d\n%s\n%s", code, h.out, h.errOut)
+	}
+	if !h.exists(custom) {
+		t.Error("a hand-set state directory was removed")
+	}
+	if !strings.Contains(h.out.String(), "NODE_STATE_DIR pointed at "+custom) {
+		t.Errorf("the operator was not told about it:\n%s", h.out)
 	}
 }
 

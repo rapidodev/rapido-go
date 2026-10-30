@@ -110,7 +110,11 @@ func DialProbe(ctx context.Context, iface string) (time.Duration, error) {
 	if err == nil {
 		return rtt, nil
 	}
-	if _, baseErr := dnsLookup(ctx, ""); baseErr != nil {
+	// A context of its own: a black-holed exit has used up ctx by now, and judging
+	// this host's own network by that would blame the node for the tunnel.
+	baseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 4*time.Second)
+	defer cancel()
+	if _, baseErr := dnsLookup(baseCtx, ""); baseErr != nil {
 		return 0, fmt.Errorf("%w: %v (this host's own lookup also failed: %v)", ErrNodeOffline, err, baseErr)
 	}
 	return 0, fmt.Errorf("%w: %v", ErrExitUnreachable, err)

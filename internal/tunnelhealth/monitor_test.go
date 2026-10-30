@@ -278,3 +278,51 @@ func TestRunStopsWhenContextIsCancelled(t *testing.T) {
 		t.Fatal("Run did not return after its context was cancelled")
 	}
 }
+
+// Every failover and every return disconnects everyone on the exit, so a tunnel
+// that keeps dropping must not be believed as quickly each time.
+func TestAFlappingTunnelHasToProveItselfForLongerEachTime(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	fp := &fakeProbe{results: map[string]error{}, rtt: 40 * time.Millisecond}
+	m := New(Options{
+		Probe: fp.probe, Discover: func() []string { return []string{"uk"} },
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Now:    func() time.Time { return now },
+	})
+	ctx := context.Background()
+	tick := func(n int) {
+		for i := 0; i < n; i++ {
+			now = now.Add(5 * time.Second)
+			m.Tick(ctx)
+		}
+	}
+	roundsToRecover := func() int {
+		fp.set("uk", errors.New("down"))
+		tick(2)
+		if m.Up("uk") {
+			t.Fatal("did not go down")
+		}
+		fp.set("uk", nil)
+		for rounds := 1; rounds < 100; rounds++ {
+			tick(1)
+			if m.Up("uk") {
+				return rounds
+			}
+		}
+		t.Fatal("never came back")
+		return 0
+	}
+	fp.set("uk", nil)
+	tick(1)
+	for i, want := range []int{3, 6, 12, 24, 48, 48} {
+		if got := roundsToRecover(); got != want {
+			t.Errorf("drop %d: back after %d good rounds, want %d", i+1, got, want)
+		}
+	}
+
+	// Quiet for a while: its past no longer counts.
+	now = now.Add(flapMemory + time.Minute)
+	if got := roundsToRecover(); got != 3 {
+		t.Errorf("after a long quiet spell: back after %d rounds, want 3", got)
+	}
+}

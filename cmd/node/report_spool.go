@@ -103,7 +103,7 @@ func (s *server) pushReport(ctx context.Context, client *http.Client, cfg config
 		for name, u := range s.reportState.Queued {
 			users = append(users, reportUserUsage{Username: name, Uplink: u.Up, Downlink: u.Down})
 		}
-		s.reportState.Pending = &reportRequest{ReportID: uuid.NewString(), Users: users, Host: sample}
+		s.reportState.Pending = &reportRequest{AgentVersion: version, ConfigError: s.configError(), ReportID: uuid.NewString(), Users: users, Host: sample}
 		s.reportState.Queued = map[string]traffic.Usage{}
 	}
 	if err := s.saveReportSpool(cfg); err != nil {

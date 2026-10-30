@@ -106,6 +106,31 @@ type entry struct {
 	Status
 	okStreak   int
 	failStreak int
+	// recentDowns and lastDown are how often this tunnel has dropped lately.
+	recentDowns int
+	lastDown    time.Time
+}
+
+// flapMemory is how long a drop counts against a tunnel.
+const flapMemory = 30 * time.Minute
+
+func (e *entry) noteWentDown(now time.Time) {
+	if now.Sub(e.lastDown) > flapMemory {
+		e.recentDowns = 0
+	}
+	e.recentDowns++
+	e.lastDown = now
+}
+
+// upAfter is how many good rounds this tunnel needs before it counts as up again.
+// Each failover and each return disconnects everyone on the exit, so one that keeps
+// dropping has to prove itself for longer each time: fifteen seconds at first, up
+// to four minutes, with the default interval.
+func (e *entry) upAfter(base int, now time.Time) int {
+	if e.recentDowns < 2 || now.Sub(e.lastDown) > flapMemory {
+		return base
+	}
+	return base << min(e.recentDowns-1, 4)
 }
 
 type Monitor struct {
@@ -252,7 +277,7 @@ func (m *Monitor) record(name string, rtt time.Duration, err error) {
 		e.Domain = ""
 		e.okStreak++
 		e.failStreak = 0
-		if first || (!e.Up && e.okStreak >= m.opts.UpAfter) {
+		if first || (!e.Up && e.okStreak >= e.upAfter(m.opts.UpAfter, now)) {
 			e.Up = true
 		}
 	} else {
@@ -264,6 +289,9 @@ func (m *Monitor) record(name string, rtt time.Duration, err error) {
 		e.failStreak++
 		e.okStreak = 0
 		if first || missing || (e.Up && e.failStreak >= m.opts.DownAfter) {
+			if e.Up && !first {
+				e.noteWentDown(now)
+			}
 			e.Up = false
 		}
 	}

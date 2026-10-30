@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/legendary1205/rapido-go/internal/controlurl"
 	"github.com/legendary1205/rapido-go/internal/hostmetrics"
 )
 
@@ -35,12 +36,14 @@ const (
 	defaultEnvPath    = "/etc/rapido-node.env"
 	defaultListenAddr = "0.0.0.0:62051"
 	keepBackups       = 3
+	// maxSetupBlob bounds what is read from a file or stdin; real blobs are a few KB.
+	maxSetupBlob = 1 << 20
 )
 
 // cliPaths are every file the management commands touch. Tests point them at a
 // temp directory; the systemd unit text itself always names the canonical paths.
 type cliPaths struct {
-	Bin, Env, Unit, Sysctl, CertDir, WireGuardDir, BBRList string
+	Bin, Env, Unit, Sysctl, CertDir, StateDir, WireGuardDir, BBRList string
 	// Live is the snapshot the running agent keeps of its open connections.
 	Live string
 }
@@ -52,6 +55,7 @@ func defaultCLIPaths() cliPaths {
 		Unit:         "/etc/systemd/system/" + unitName,
 		Sysctl:       "/etc/sysctl.d/99-rapido-node.conf",
 		CertDir:      "/etc/rapido-node",
+		StateDir:     "/var/lib/rapido-node",
 		WireGuardDir: "/etc/wireguard",
 		BBRList:      "/proc/sys/net/ipv4/tcp_available_congestion_control",
 		Live:         defaultLiveStatePath,
@@ -61,6 +65,7 @@ func defaultCLIPaths() cliPaths {
 // cli is the management side of the binary. Everything with a side effect on
 // the host goes through a field here so the tests can stand in for systemd.
 type cli struct {
+	in          io.Reader
 	out, errOut io.Writer
 	paths       cliPaths
 	goos        string
@@ -81,7 +86,7 @@ type cli struct {
 
 func newCLI(out, errOut io.Writer) *cli {
 	return &cli{
-		out: out, errOut: errOut, paths: defaultCLIPaths(),
+		in: os.Stdin, out: out, errOut: errOut, paths: defaultCLIPaths(),
 		goos: runtime.GOOS, goarch: runtime.GOARCH,
 		euid: os.Geteuid, now: time.Now, sleep: time.Sleep,
 		run: execRun, lookPath: exec.LookPath, writeFile: writeFileAtomic,
@@ -151,13 +156,16 @@ func (c *cli) usage(w io.Writer) {
 Run with no arguments it is the agent itself (what the systemd service does).
 
 Commands (Linux + systemd, run as root):
-  install --setup-blob <b64> [--listen-addr ADDR] [--panel-url URL]
+  install --setup-blob-file <file|-> [--listen-addr ADDR] [--panel-url URL]
           [--report-interval SECONDS] [--no-tune]
-                     install or upgrade in place, then wait for the panel link
+                     install or upgrade in place, then wait for the panel link;
+                     the blob comes from a root-only file or, with -, from stdin
+                     (--setup-blob <b64> still works, but exposes it in ps)
   update             download the current build from the panel, verify, swap and
                      restart; rolls back if the service does not come up
   uninstall [--purge]
                      stop and remove the service; --purge also removes certificates
+                     and the saved state (TLS keys, user credentials)
   status             service, panel link, WireGuard tunnels, listening ports
   tunnels            bring up every /etc/wireguard/*.conf and enable it at boot
   version            print version information
@@ -351,6 +359,11 @@ func (c *cli) installedTarget() (panelURL, secret string, err error) {
 	if panelURL == "" || b.Secret == "" {
 		return "", "", errors.New("the installation has no panel URL or secret - re-run the install command from the panel")
 	}
+	// What this returns gets the node's secret and is where update downloads what
+	// it runs as root from, so it passes the same rule the agent applies.
+	if panelURL, err = controlurl.Normalize(panelURL); err != nil {
+		return "", "", fmt.Errorf("the installed panel address cannot be used: %w - re-run the install command from the panel", err)
+	}
 	return panelURL, b.Secret, nil
 }
 
@@ -442,21 +455,71 @@ func normalizePanelURL(raw string) (string, error) {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || strings.ContainsAny(raw, " \t\r\n\"'\\$") {
 		return "", fmt.Errorf("panel URL %q must look like https://panel.example.com", raw)
 	}
-	return raw, nil
+	// The rule the agent applies on every start: failing it here says so right
+	// away, instead of leaving a service that will not start.
+	return controlurl.Normalize(raw)
 }
 
 type installOptions struct {
 	Blob           string
+	BlobFile       string
 	ListenAddr     string
 	PanelURL       string
 	ReportInterval int
 	NoTune         bool
 }
 
+// givenSetupBlob is the blob the command was given, wherever it came from.
+// Empty is an answer here: install then keeps the one already installed.
+//
+// The blob holds this node's private key and secret. On the command line every
+// local user can read it in the process list and it stays in shell history, so
+// that form only remains for install commands already written down.
+func (c *cli) givenSetupBlob(o installOptions) (string, error) {
+	if o.BlobFile == "" {
+		if o.Blob != "" {
+			c.warn("--setup-blob leaves this node's private key in the process list and in shell history; prefer --setup-blob-file <root-only file>, or - to read it from stdin")
+		}
+		return o.Blob, nil
+	}
+	if o.Blob != "" {
+		return "", errors.New("give the setup blob once: --setup-blob or --setup-blob-file, not both")
+	}
+	r := c.in
+	if o.BlobFile != "-" {
+		f, err := os.Open(o.BlobFile)
+		if err != nil {
+			return "", fmt.Errorf("the setup blob file: %w", err)
+		}
+		defer f.Close()
+		fi, err := f.Stat()
+		if err != nil {
+			return "", fmt.Errorf("the setup blob file: %w", err)
+		}
+		if !fi.Mode().IsRegular() {
+			return "", fmt.Errorf("the setup blob file %s is not a regular file", o.BlobFile)
+		}
+		// Windows has no such bits to check, and runs this only under the tests.
+		if fi.Mode().Perm()&0o077 != 0 && runtime.GOOS != "windows" {
+			return "", fmt.Errorf("the setup blob file %s can be read by other users (mode %04o); run: chmod 600 %s", o.BlobFile, fi.Mode().Perm(), o.BlobFile)
+		}
+		r = f
+	}
+	raw, err := io.ReadAll(io.LimitReader(r, maxSetupBlob+1))
+	if err != nil {
+		return "", fmt.Errorf("read the setup blob: %w", err)
+	}
+	if len(raw) > maxSetupBlob {
+		return "", errors.New("that is too large to be a setup blob")
+	}
+	return string(raw), nil
+}
+
 func (c *cli) cmdInstall(args []string) error {
 	fs := c.flags("install")
 	var o installOptions
-	fs.StringVar(&o.Blob, "setup-blob", "", "the setup blob from the panel's Nodes page (optional when upgrading an existing install)")
+	fs.StringVar(&o.BlobFile, "setup-blob-file", "", "root-only file holding the setup blob from the panel's Nodes page, or - for stdin (optional when upgrading an existing install)")
+	fs.StringVar(&o.Blob, "setup-blob", "", "the setup blob itself; visible in the process list and shell history, prefer --setup-blob-file")
 	fs.StringVar(&o.ListenAddr, "listen-addr", "", "control-plane listen address (default "+defaultListenAddr+")")
 	fs.StringVar(&o.PanelURL, "panel-url", "", "panel address, used only when the blob carries none")
 	fs.IntVar(&o.ReportInterval, "report-interval", 0, "seconds between reports to the panel (default 10)")
@@ -473,12 +536,16 @@ func (c *cli) cmdInstall(args []string) error {
 func (c *cli) install(o installOptions) error {
 	existing := c.readEnv()
 
-	blob := strings.TrimSpace(o.Blob)
+	given, err := c.givenSetupBlob(o)
+	if err != nil {
+		return err
+	}
+	blob := strings.TrimSpace(given)
 	if blob == "" {
 		blob = existing["NODE_SETUP_BLOB"]
 	}
 	if blob == "" {
-		return errors.New("--setup-blob is required: copy the install command from the panel's Nodes page")
+		return errors.New("no setup blob given: copy it from the panel's Nodes page and pass --setup-blob-file <root-only file>, or - to read it from stdin")
 	}
 	// base64 decoding skips newlines, and this value is written into an env
 	// file line - a stray newline would inject another variable.
@@ -519,7 +586,7 @@ func (c *cli) install(o installOptions) error {
 	if panelURL == "" {
 		return errors.New("the setup blob carries no panel address; add --panel-url https://your-panel")
 	}
-	panelURL, err := normalizePanelURL(panelURL)
+	panelURL, err = normalizePanelURL(panelURL)
 	if err != nil {
 		return err
 	}
@@ -567,6 +634,9 @@ func (c *cli) install(o installOptions) error {
 	c.info("panel   : %s", panelURL)
 	c.info("control : %s (the node connects out to the panel; nothing needs to reach this port)", listen)
 	c.info("manage  : rapido-go-node status | update | tunnels | uninstall")
+	if o.BlobFile != "" && o.BlobFile != "-" {
+		c.info("the setup blob is stored now, so %s can be deleted", o.BlobFile)
+	}
 	c.postInstallNotes()
 	return nil
 }
@@ -792,7 +862,7 @@ func (c *cli) waitForAgent(started time.Time, syncInterval time.Duration, panelU
 
 func (c *cli) cmdUninstall(args []string) error {
 	fs := c.flags("uninstall")
-	purge := fs.Bool("purge", false, "also remove the node certificates in "+defaultCLIPaths().CertDir)
+	purge := fs.Bool("purge", false, "also remove the node certificates in "+defaultCLIPaths().CertDir+" and the saved state in "+defaultCLIPaths().StateDir)
 	if err := c.parse(fs, args); err != nil {
 		return err
 	}
@@ -800,6 +870,9 @@ func (c *cli) cmdUninstall(args []string) error {
 		return errors.New("this command must run as root (prefix it with sudo)")
 	}
 	c.step("Removing the node agent")
+	// Read before the env file that says so goes away. Only ever reported: nothing
+	// but a hand edit sets it, too little to remove a whole tree on.
+	customState := c.readEnv()["NODE_STATE_DIR"]
 	if _, err := c.lookPath("systemctl"); err == nil {
 		c.sh("systemctl", "disable", "--now", unitName)
 	}
@@ -817,13 +890,20 @@ func (c *cli) cmdUninstall(args []string) error {
 		c.sh("systemctl", "daemon-reload")
 	}
 	if *purge {
-		if err := os.RemoveAll(c.paths.CertDir); err != nil {
-			c.warn("could not remove %s: %v", c.paths.CertDir, err)
-		} else {
-			c.info("removed %s", c.paths.CertDir)
+		// The state directory holds what the panel last sent: inbound TLS keys and
+		// every user's credentials.
+		for _, dir := range []string{c.paths.CertDir, c.paths.StateDir} {
+			if err := os.RemoveAll(dir); err != nil {
+				c.warn("could not remove %s: %v", dir, err)
+			} else {
+				c.info("removed %s", dir)
+			}
+		}
+		if customState != "" && customState != c.paths.StateDir {
+			c.warn("NODE_STATE_DIR pointed at %s, which holds TLS keys and user credentials too; remove it yourself", customState)
 		}
 	} else {
-		c.info("kept %s (certificates); use --purge to remove them", c.paths.CertDir)
+		c.info("kept %s (certificates) and %s (saved state); use --purge to remove them", c.paths.CertDir, c.paths.StateDir)
 	}
 	c.info("network tuning stays active until the next reboot")
 	return nil

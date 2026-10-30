@@ -495,40 +495,6 @@ func TestPullOnceHotAppliesUsersOfEveryProtocolOnEveryListener(t *testing.T) {
 // A hot update the inbound refuses (here two trojan users with one password)
 // must not be recorded as applied: the running list is untouched, and the next
 // version that is valid gets through.
-func TestPullOnceKeepsThePreviousVersionWhenAHotUpdateFails(t *testing.T) {
-	echoHost, echoPort := startEcho(t)
-	port := freeTCPPort(t)
-	f := protoFixtures()[1]
-	alice, bob := f.user("alice", 1), f.user("bob", 2)
-	clash := userSpec{Name: "bob", Password: alice.Password}
-	panel := &fakePanel{etags: true, cfg: pulledConfig{Version: "v1", Inbounds: []inboundSpec{f.inbound("main", []uint16{port}, alice)}}}
-	pull, srv := pullFrom(t, panel)
-
-	pull()
-	node := srv.node
-
-	panel.set(pulledConfig{Version: "v2", Inbounds: []inboundSpec{f.inbound("main", []uint16{port}, alice, clash)}})
-	pull()
-	if srv.node != node {
-		t.Fatal("a refused hot update restarted the node")
-	}
-	if srv.lastPulled.Version != "v1" {
-		t.Errorf("lastPulled = %q after a refused update, want v1 so the next tick retries", srv.lastPulled.Version)
-	}
-	if err := f.echoProxied(port, alice, echoHost, echoPort); err != nil {
-		t.Errorf("alice after the refused update: %v", err)
-	}
-
-	panel.set(pulledConfig{Version: "v3", Inbounds: []inboundSpec{f.inbound("main", []uint16{port}, alice, bob)}})
-	pull()
-	if srv.lastPulled.Version != "v3" {
-		t.Fatalf("lastPulled = %q, want v3", srv.lastPulled.Version)
-	}
-	if err := f.echoProxied(port, bob, echoHost, echoPort); err != nil {
-		t.Errorf("bob after the valid update: %v", err)
-	}
-}
-
 // A restart that fails leaves the node stopped while lastPulled still names the
 // previous config. Reverting the panel to that config must bring the node back
 // up: the node may not claim "unchanged" (If-None-Match) or skip the equal

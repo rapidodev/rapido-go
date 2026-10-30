@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -209,6 +211,15 @@ type server struct {
 	// never interleave.
 	lastPulled *pulledConfig
 
+	// rejected is the config last found unable to run, until one runs; see
+	// configRejection. restoreWanted is set while the core is down because a
+	// start failed, not because anybody asked for that. refusedSince is when the
+	// panel began answering 401 to this node's secret, zero while it accepts it.
+	// All guarded by mu.
+	rejected      *configRejection
+	restoreWanted bool
+	refusedSince  time.Time
+
 	// monitor probes every WireGuard tunnel for the life of the process,
 	// whether or not a core is running: the panel's monitoring page wants the
 	// verdicts even on an idle node. Nil in tests.
@@ -351,15 +362,31 @@ func main() {
 	mux.HandleFunc("POST /stop", srv.handleStop)
 	mux.HandleFunc("PUT /inbounds/{tag}/users", srv.handleUpdateUsers)
 
-	if raw, err := os.ReadFile(filepath.Join(cfg.StateDir, "last-good-config.json")); err == nil {
-		var previous pulledConfig
-		if json.Unmarshal(raw, &previous) == nil {
-			previous.Version = ""
-			srv.mu.Lock()
-			srv.applyFullLocked(previous)
-			srv.mu.Unlock()
+	attempts := noteBootAttempt(cfg.StateDir)
+	if previous, ok, crashedDigest := loadBootConfig(cfg.StateDir, attempts); ok {
+		previous.Version = ""
+		srv.dropUnusableUsers(&previous)
+		srv.mu.Lock()
+		if crashedDigest != "" {
+			logger.Error("kept crashing soon after starting; going back to the previous config", "attempts", attempts)
+			srv.noteConfigRejectedLocked(crashedDigest, errors.New(crashLoopRejected))
+			clearBootAttempts(cfg.StateDir)
 		}
+		if err := srv.applyFullLocked(previous); err != nil {
+			// Whatever stopped it may be gone a moment later, and the panel may
+			// not be reachable to offer anything better.
+			srv.lastPulled = &previous
+			srv.restoreWanted = true
+		}
+		srv.mu.Unlock()
 	}
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-time.After(bootProbation):
+			clearBootAttempts(cfg.StateDir)
+		}
+	}()
 	if cfg.PanelURL != "" && cfg.ReportSecret != "" {
 		go srv.syncLoop(ctx, cfg)
 		go srv.configLoop(ctx, cfg)
@@ -562,6 +589,11 @@ type outboundSpec struct {
 	// interface is healthy again. Ignored without a BindInterface and for
 	// block/selector/urltest.
 	DirectFallback bool `json:"direct_fallback,omitempty"`
+
+	URL       string `json:"url,omitempty"`       // urltest
+	Interval  string `json:"interval,omitempty"`  // urltest
+	Tolerance int    `json:"tolerance,omitempty"` // urltest
+	Default   string `json:"default,omitempty"`   // selector
 }
 
 type routingRuleSpec struct {
@@ -578,7 +610,16 @@ type routingRuleSpec struct {
 	PortRange     []string `json:"port_range,omitempty"`
 	Network       []string `json:"network,omitempty"`
 	Protocol      []string `json:"protocol,omitempty"`
-	OutboundTag   string   `json:"outbound_tag"`
+
+	// The matchers a pull with schema=4 announces this agent understands.
+	DomainRegex       []string `json:"domain_regex,omitempty"`
+	SourceIPCIDR      []string `json:"source_ip_cidr,omitempty"`
+	SourceIPIsPrivate bool     `json:"source_ip_is_private,omitempty"`
+	SourcePort        []int    `json:"source_port,omitempty"`
+	SourcePortRange   []string `json:"source_port_range,omitempty"`
+	AuthUser          []string `json:"auth_user,omitempty"`
+
+	OutboundTag string `json:"outbound_tag"`
 }
 
 type dnsServerSpec struct {
@@ -650,6 +691,7 @@ func (s *server) handleStart(w http.ResponseWriter, r *http.Request) {
 func (s *server) handleStop(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.restoreWanted = false
 	if s.node == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"detail": "already stopped"})
 		return
@@ -872,7 +914,33 @@ func buildInboundTransport(in inboundSpec) (*sbox.V2RayTransportOptions, error) 
 	return nil, fmt.Errorf("inbound %q: unsupported transport %q", in.Tag, in.Transport.Type)
 }
 
+// torDataDirectory places a name from the panel under this node's state
+// directory, and refuses to be talked out of it.
+func torDataDirectory(name string) string {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+		return ""
+	}
+	return filepath.Join(getEnv("NODE_STATE_DIR", "/var/lib/rapido-node"), "tor", name)
+}
+
+// usersOnce converts an inbound's users once for all of its listeners, which only
+// read them. built holds the result between calls.
+func usersOnce[T any](built *any, specs []userSpec, convert func(userSpec) T) []T {
+	if list, ok := (*built).([]T); ok {
+		return list
+	}
+	list := make([]T, len(specs))
+	for i, u := range specs {
+		list[i] = convert(u)
+	}
+	*built = list
+	return list
+}
+
 func buildOptionsPlan(req startRequest) (sbox.Options, nodePlan, error) {
+	if err := checkPortsDistinct(req.Inbounds); err != nil {
+		return sbox.Options{}, nodePlan{}, err
+	}
 	plan := nodePlan{derivedTags: make(map[string][]string), shadowsocksMethods: make(map[string]string)}
 	portsByTag := make(map[string][]uint16, len(req.Inbounds))
 	inbounds := make([]sbox.Inbound, 0, len(req.Inbounds))
@@ -880,6 +948,7 @@ func buildOptionsPlan(req startRequest) (sbox.Options, nodePlan, error) {
 		if err := validateUserList(in.Protocol, in.Users); err != nil {
 			return sbox.Options{}, nodePlan{}, err
 		}
+		var built any
 		ports := in.ports()
 		portsByTag[in.Tag] = ports
 		for _, port := range ports {
@@ -901,10 +970,7 @@ func buildOptionsPlan(req startRequest) (sbox.Options, nodePlan, error) {
 
 			switch in.Protocol {
 			case "vless":
-				users := make([]sbox.VLESSUser, 0, len(in.Users))
-				for _, u := range in.Users {
-					users = append(users, sbox.VLESSUser{Name: u.Name, UUID: u.UUID, Flow: u.Flow})
-				}
+				users := usersOnce(&built, in.Users, func(u userSpec) sbox.VLESSUser { return sbox.VLESSUser{Name: u.Name, UUID: u.UUID, Flow: u.Flow} })
 				inbounds = append(inbounds, sbox.Inbound{Type: "vless", Tag: tag, Options: &sbox.VLESSInboundOptions{
 					ListenOptions:              listenOptions,
 					Users:                      users,
@@ -912,10 +978,7 @@ func buildOptionsPlan(req startRequest) (sbox.Options, nodePlan, error) {
 					Transport:                  transport,
 				}})
 			case "vmess":
-				users := make([]sbox.VMessUser, 0, len(in.Users))
-				for _, u := range in.Users {
-					users = append(users, sbox.VMessUser{Name: u.Name, UUID: u.UUID})
-				}
+				users := usersOnce(&built, in.Users, func(u userSpec) sbox.VMessUser { return sbox.VMessUser{Name: u.Name, UUID: u.UUID} })
 				inbounds = append(inbounds, sbox.Inbound{Type: "vmess", Tag: tag, Options: &sbox.VMessInboundOptions{
 					ListenOptions:              listenOptions,
 					Users:                      users,
@@ -923,10 +986,7 @@ func buildOptionsPlan(req startRequest) (sbox.Options, nodePlan, error) {
 					Transport:                  transport,
 				}})
 			case "trojan":
-				users := make([]sbox.TrojanUser, 0, len(in.Users))
-				for _, u := range in.Users {
-					users = append(users, sbox.TrojanUser{Name: u.Name, Password: u.Password})
-				}
+				users := usersOnce(&built, in.Users, func(u userSpec) sbox.TrojanUser { return sbox.TrojanUser{Name: u.Name, Password: u.Password} })
 				inbounds = append(inbounds, sbox.Inbound{Type: "trojan", Tag: tag, Options: &sbox.TrojanInboundOptions{
 					ListenOptions:              listenOptions,
 					Users:                      users,
@@ -934,10 +994,7 @@ func buildOptionsPlan(req startRequest) (sbox.Options, nodePlan, error) {
 					Transport:                  transport,
 				}})
 			case "shadowsocks":
-				users := make([]sbox.ShadowsocksUser, 0, len(in.Users))
-				for _, u := range in.Users {
-					users = append(users, sbox.ShadowsocksUser{Name: u.Name, Password: u.Password})
-				}
+				users := usersOnce(&built, in.Users, func(u userSpec) sbox.ShadowsocksUser { return sbox.ShadowsocksUser{Name: u.Name, Password: u.Password} })
 				method := shadowsocksMethod(in.Users)
 				if err := checkShadowsocksMethod(method); err != nil {
 					return sbox.Options{}, nodePlan{}, fmt.Errorf("inbound %q: %w", in.Tag, err)
@@ -953,10 +1010,7 @@ func buildOptionsPlan(req startRequest) (sbox.Options, nodePlan, error) {
 				// reasoning as this protocol's own outbound side (see
 				// buildOutboundTLS's doc comment); sing-box itself refuses to
 				// even start one without TLS.
-				users := make([]sbox.Hysteria2User, 0, len(in.Users))
-				for _, u := range in.Users {
-					users = append(users, sbox.Hysteria2User{Name: u.Name, Password: u.Password})
-				}
+				users := usersOnce(&built, in.Users, func(u userSpec) sbox.Hysteria2User { return sbox.Hysteria2User{Name: u.Name, Password: u.Password} })
 				var obfs *sbox.Hysteria2Obfs
 				if in.Hysteria2ObfsPassword != "" {
 					obfs = &sbox.Hysteria2Obfs{Type: "salamander", Password: in.Hysteria2ObfsPassword}
@@ -971,10 +1025,7 @@ func buildOptionsPlan(req startRequest) (sbox.Options, nodePlan, error) {
 				}})
 			case "tuic":
 				// Also QUIC-based - same mandatory-TLS reasoning as hysteria2.
-				users := make([]sbox.TUICUser, 0, len(in.Users))
-				for _, u := range in.Users {
-					users = append(users, sbox.TUICUser{Name: u.Name, UUID: u.UUID, Password: u.Password})
-				}
+				users := usersOnce(&built, in.Users, func(u userSpec) sbox.TUICUser { return sbox.TUICUser{Name: u.Name, UUID: u.UUID, Password: u.Password} })
 				inbounds = append(inbounds, sbox.Inbound{Type: "tuic", Tag: tag, Options: &sbox.TUICInboundOptions{
 					ListenOptions:              listenOptions,
 					Users:                      users,
@@ -987,10 +1038,7 @@ func buildOptionsPlan(req startRequest) (sbox.Options, nodePlan, error) {
 				// comment for why this fork (and so this builder) only ever
 				// targets version 6, the one version with both a real
 				// sing-box client and server in this dependency tree.
-				users := make([]sbox.SnellUser, 0, len(in.Users))
-				for _, u := range in.Users {
-					users = append(users, sbox.SnellUser{Name: u.Name, UserKey: u.UserKey})
-				}
+				users := usersOnce(&built, in.Users, func(u userSpec) sbox.SnellUser { return sbox.SnellUser{Name: u.Name, UserKey: u.UserKey} })
 				inbounds = append(inbounds, sbox.Inbound{Type: "snell", Tag: tag, Options: &sbox.SnellInboundOptions{
 					Version: 6,
 					AbstractSnellInboundOptions: sbox.AbstractSnellInboundOptions{
@@ -1003,10 +1051,7 @@ func buildOptionsPlan(req startRequest) (sbox.Options, nodePlan, error) {
 				// hysteria2/tuic's QUIC transport: AnyTLS's whole design is to
 				// look like an ordinary TLS connection - see
 				// internal/nodecore/anytls's own doc comment.
-				users := make([]sbox.AnyTLSUser, 0, len(in.Users))
-				for _, u := range in.Users {
-					users = append(users, sbox.AnyTLSUser{Name: u.Name, Password: u.Password})
-				}
+				users := usersOnce(&built, in.Users, func(u userSpec) sbox.AnyTLSUser { return sbox.AnyTLSUser{Name: u.Name, Password: u.Password} })
 				inbounds = append(inbounds, sbox.Inbound{Type: "anytls", Tag: tag, Options: &sbox.AnyTLSInboundOptions{
 					ListenOptions:              listenOptions,
 					Users:                      users,
@@ -1017,10 +1062,7 @@ func buildOptionsPlan(req startRequest) (sbox.Options, nodePlan, error) {
 				// hysteria2, but with no congestion-control fallback: up_mbps/
 				// down_mbps are required (validated in internal/httpapi/
 				// inbounds.go, not here) rather than an optional hint.
-				users := make([]sbox.HysteriaUser, 0, len(in.Users))
-				for _, u := range in.Users {
-					users = append(users, sbox.HysteriaUser{Name: u.Name, AuthString: u.Password})
-				}
+				users := usersOnce(&built, in.Users, func(u userSpec) sbox.HysteriaUser { return sbox.HysteriaUser{Name: u.Name, AuthString: u.Password} })
 				inbounds = append(inbounds, sbox.Inbound{Type: "hysteria", Tag: tag, Options: &sbox.HysteriaInboundOptions{
 					ListenOptions:              listenOptions,
 					UpMbps:                     int(in.UpMbps),
@@ -1044,10 +1086,7 @@ func buildOptionsPlan(req startRequest) (sbox.Options, nodePlan, error) {
 				// would make every real naive inbound fail to start. Caught
 				// by internal/nodecore/naive's own unit test before this
 				// ever reached a real node.
-				users := make([]auth.User, 0, len(in.Users))
-				for _, u := range in.Users {
-					users = append(users, auth.User{Username: u.Name, Password: u.Password})
-				}
+				users := usersOnce(&built, in.Users, func(u userSpec) auth.User { return auth.User{Username: u.Name, Password: u.Password} })
 				inbounds = append(inbounds, sbox.Inbound{Type: "naive", Tag: tag, Options: &sbox.NaiveInboundOptions{
 					ListenOptions:              listenOptions,
 					Network:                    "tcp",
@@ -1063,10 +1102,7 @@ func buildOptionsPlan(req startRequest) (sbox.Options, nodePlan, error) {
 				// handshake with an embedded shadowsocks-2022 inner data
 				// layer, whose inbound-level method+PSK that upstream
 				// struct has no field for at all.
-				users := make([]sbox.ShadowTLSUser, 0, len(in.Users))
-				for _, u := range in.Users {
-					users = append(users, sbox.ShadowTLSUser{Name: u.Name, Password: u.Password})
-				}
+				users := usersOnce(&built, in.Users, func(u userSpec) sbox.ShadowTLSUser { return sbox.ShadowTLSUser{Name: u.Name, Password: u.Password} })
 				inbounds = append(inbounds, sbox.Inbound{Type: "shadowtls", Tag: tag, Options: &forkedshadowtls.InboundOptions{
 					ListenOptions: listenOptions,
 					Users:         users,
@@ -1238,8 +1274,10 @@ func leafOutboundOptions(ob outboundSpec, bind string) (any, error) {
 	case "tor":
 		// No ServerOptions at all: this outbound talks to a local `tor`
 		// process it spawns itself - see ExecutablePath's own doc comment.
+		// ExecutablePath is ignored on purpose: this process runs as root, so a path
+		// from the panel would make any sudo admin root on every node.
 		return &sbox.TorOutboundOptions{
-			DialerOptions: dialerOptions, ExecutablePath: ob.ExecutablePath, DataDirectory: ob.DataDirectory,
+			DialerOptions: dialerOptions, DataDirectory: torDataDirectory(ob.DataDirectory),
 		}, nil
 	}
 	return nil, fmt.Errorf("unknown outbound type: %s", ob.Type)
@@ -1317,9 +1355,21 @@ func buildCoreOptions(core *coreSpec, portsByTag map[string][]uint16) ([]sbox.Ou
 		case "block":
 			outbounds = append(outbounds, sbox.Outbound{Type: ob.Type, Tag: ob.Tag, Options: &sbox.StubOptions{}})
 		case "selector":
-			outbounds = append(outbounds, sbox.Outbound{Type: ob.Type, Tag: ob.Tag, Options: &sbox.SelectorOutboundOptions{Outbounds: resolveOutboundTags(ob.Outbounds)}})
+			opts := &sbox.SelectorOutboundOptions{Outbounds: resolveOutboundTags(ob.Outbounds)}
+			if ob.Default != "" {
+				opts.Default = resolveOutboundTag(ob.Default)
+			}
+			outbounds = append(outbounds, sbox.Outbound{Type: ob.Type, Tag: ob.Tag, Options: opts})
 		case "urltest":
-			outbounds = append(outbounds, sbox.Outbound{Type: ob.Type, Tag: ob.Tag, Options: &sbox.URLTestOutboundOptions{Outbounds: resolveOutboundTags(ob.Outbounds)}})
+			opts := &sbox.URLTestOutboundOptions{Outbounds: resolveOutboundTags(ob.Outbounds), URL: ob.URL, Tolerance: uint16(ob.Tolerance)}
+			if ob.Interval != "" {
+				interval, err := time.ParseDuration(ob.Interval)
+				if err != nil {
+					return nil, nil, nil, nil, nil, fmt.Errorf("outbound %s: invalid interval: %w", ob.Tag, err)
+				}
+				opts.Interval = badoption.Duration(interval)
+			}
+			outbounds = append(outbounds, sbox.Outbound{Type: ob.Type, Tag: ob.Tag, Options: opts})
 		default:
 			opts, err := leafOutboundOptions(ob, ob.BindInterface)
 			if err != nil {
@@ -1369,7 +1419,8 @@ func buildCoreOptions(core *coreSpec, portsByTag map[string][]uint16) ([]sbox.Ou
 	}
 	for _, r := range core.RoutingRules {
 		raw := sbox.RawDefaultRule{
-			IPIsPrivate: r.IPIsPrivate,
+			IPIsPrivate:       r.IPIsPrivate,
+			SourceIPIsPrivate: r.SourceIPIsPrivate,
 		}
 		if len(r.Inbound) > 0 {
 			tags := inboundMatchTags(r.Inbound, r.InboundPort, portsByTag)
@@ -1405,6 +1456,25 @@ func buildCoreOptions(core *coreSpec, portsByTag map[string][]uint16) ([]sbox.Ou
 				ports[i] = uint16(p)
 			}
 			raw.Port = ports
+		}
+		if len(r.DomainRegex) > 0 {
+			raw.DomainRegex = badoption.Listable[string](r.DomainRegex)
+		}
+		if len(r.SourceIPCIDR) > 0 {
+			raw.SourceIPCIDR = badoption.Listable[string](r.SourceIPCIDR)
+		}
+		if len(r.SourcePort) > 0 {
+			ports := make(badoption.Listable[uint16], len(r.SourcePort))
+			for i, p := range r.SourcePort {
+				ports[i] = uint16(p)
+			}
+			raw.SourcePort = ports
+		}
+		if len(r.SourcePortRange) > 0 {
+			raw.SourcePortRange = badoption.Listable[string](r.SourcePortRange)
+		}
+		if len(r.AuthUser) > 0 {
+			raw.AuthUser = badoption.Listable[string](r.AuthUser)
 		}
 		rules = append(rules, sbox.Rule{Type: "default", DefaultOptions: sbox.DefaultRule{
 			RawDefaultRule: raw,
@@ -1485,6 +1555,10 @@ type reportRequest struct {
 	ReportID string             `json:"report_id"`
 	Users    []reportUserUsage  `json:"users"`
 	Host     hostmetrics.Sample `json:"host"`
+	// AgentVersion and ConfigError are what the Nodes page can't learn otherwise:
+	// which build runs here, and why this node isn't running the current config.
+	AgentVersion string `json:"agent_version"`
+	ConfigError  string `json:"config_error,omitempty"`
 }
 
 // syncLoop is both halves of the node<->panel sync mechanism: Phase 7.3's
@@ -1497,7 +1571,9 @@ type reportRequest struct {
 // sing-box core is currently started - an idle node still reports its own
 // host health and still checks whether it should start one.
 func (s *server) syncLoop(ctx context.Context, cfg config) {
-	client := &http.Client{Timeout: 5 * time.Second}
+	// As long as the panel's own budget for a request: giving up earlier cancels
+	// a commit that was only slow, and the retry is then slower still.
+	client := &http.Client{Timeout: 30 * time.Second}
 	ticker := time.NewTicker(cfg.ReportInterval)
 	defer ticker.Stop()
 	for {
@@ -1570,14 +1646,17 @@ type pulledConfig struct {
 // implement that just answers 200 with the full body, which the version
 // comparison below handles exactly as it always did.
 func (s *server) pullOnce(ctx context.Context, client *http.Client, cfg config) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.PanelURL+"/api/internal/node-config?schema=3", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.PanelURL+"/api/internal/node-config?schema=4", nil)
 	if err != nil {
 		s.logger.Error("pull config: build request", "error", err)
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.ReportSecret)
 	s.mu.Lock()
-	if s.runningLastPulledLocked() {
+	s.restoreIfDownLocked()
+	// A rejected config whose rest is over needs its body again, even if nothing
+	// changed since: the answer to a conditional request would just be 304.
+	if s.runningLastPulledLocked() && !s.configRetryDueLocked() {
 		req.Header.Set("If-None-Match", `"`+s.lastPulled.Version+`"`)
 	}
 	s.mu.Unlock()
@@ -1588,21 +1667,20 @@ func (s *server) pullOnce(ctx context.Context, client *http.Client, cfg config) 
 		return
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotModified {
+	if resp.StatusCode == http.StatusUnauthorized {
+		s.noteRefusedByPanel(time.Now())
 		return
 	}
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		s.mu.Lock()
-		_ = s.stopNodeLocked()
-		s.lastPulled = nil
-		if s.stateDir != "" {
-			_ = os.Remove(filepath.Join(s.stateDir, "last-good-config.json"))
-		}
-		s.mu.Unlock()
-		return
-	}
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotModified {
+		// A 403 lands here too: this panel never sends one for a node, so it came
+		// from something in between, and says nothing about this node.
 		s.logger.Warn("pull config: panel rejected request", "status", resp.StatusCode)
+		return
+	}
+	s.mu.Lock()
+	s.refusedSince = time.Time{}
+	s.mu.Unlock()
+	if resp.StatusCode == http.StatusNotModified {
 		return
 	}
 	var pulled pulledConfig
@@ -1621,11 +1699,12 @@ func (s *server) pullOnce(ctx context.Context, client *http.Client, cfg config) 
 		s.logger.Error("pull config: decode response; full refresh next tick", "error", err)
 		return
 	}
+	s.dropUnusableUsers(&pulled)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.runningLastPulledLocked() && s.lastPulled.Version == pulled.Version {
+	if s.runningLastPulledLocked() && s.lastPulled.Version == pulled.Version && !s.configRetryDueLocked() {
 		return
 	}
 
@@ -1634,6 +1713,8 @@ func (s *server) pullOnce(ctx context.Context, client *http.Client, cfg config) 
 	if s.node == nil {
 		if len(pulled.Inbounds) == 0 {
 			s.lastPulled = &pulled
+			s.rejected = nil
+			s.restoreWanted = false
 			_ = s.persistConfig("last-good-config.json", s.lastPulled)
 			return
 		}
@@ -1641,16 +1722,22 @@ func (s *server) pullOnce(ctx context.Context, client *http.Client, cfg config) 
 	}
 
 	if needsRestart {
-		s.applyFullLocked(pulled)
+		digest := configShapeDigest(pulled)
+		if s.rejected != nil && s.rejected.digest == digest && !s.configRetryDueLocked() {
+			s.applyUsersOnlyLocked(pulled)
+			return
+		}
+		if err := s.applyFullLocked(pulled); err != nil {
+			s.noteConfigRejectedLocked(digest, err)
+			s.applyUsersOnlyLocked(pulled)
+			return
+		}
+		s.rejected = nil
 		return
 	}
 
-	for _, in := range pulled.Inbounds {
-		if err := validateUserList(in.Protocol, in.Users); err != nil {
-			s.logger.Error("reject invalid hot configuration", "error", err)
-			return
-		}
-	}
+	// Whatever was rejected, this config's shape is the one running.
+	s.rejected = nil
 	if len(hot) > 0 {
 		if err := s.persistConfig("previous-config.json", s.lastPulled); err != nil {
 			s.logger.Error("snapshot failed; users unchanged", "error", err)
@@ -1681,7 +1768,9 @@ func (s *server) pullOnce(ctx context.Context, client *http.Client, cfg config) 
 		// generation rather than leaving a partially applied credential set.
 		if s.lastPulled != nil {
 			previous := *s.lastPulled
-			s.applyFullLocked(previous)
+			if err := s.applyFullLocked(previous); err != nil {
+				s.logger.Error("restore after a failed hot update", "error", err)
+			}
 		}
 		return
 	}
@@ -1702,23 +1791,29 @@ func (s *server) runningLastPulledLocked() bool {
 
 // applyFullLocked stops whatever's currently running (if anything) and
 // starts fresh from pulled - the same internal path POST /start already
-// uses. Caller must hold s.mu.
-func (s *server) applyFullLocked(pulled pulledConfig) {
+// uses. An error means pulled isn't running; what ran before still does unless
+// even that wouldn't start again, which leaves restoreWanted set. Caller must
+// hold s.mu.
+func (s *server) applyFullLocked(pulled pulledConfig) error {
 	opts, plan, err := buildOptionsPlan(startRequest{Inbounds: pulled.Inbounds, Core: &pulled.Core})
 	if err != nil {
-		s.logger.Error("new config rejected before stopping core", "error", err)
-		return
+		return fmt.Errorf("config rejected before stopping the core: %w", err)
+	}
+	var running []inboundSpec
+	if s.node != nil && s.lastPulled != nil {
+		running = s.lastPulled.Inbounds
+	}
+	if err := checkPortsFree(pulled.Inbounds, running); err != nil {
+		return fmt.Errorf("config rejected before stopping the core: %w", err)
 	}
 	candidate, err := nodecore.New(s.ctx, opts, s.traffic)
 	if err != nil {
-		s.logger.Error("new config rejected before stopping core", "error", err)
-		return
+		return fmt.Errorf("config rejected before stopping the core: %w", err)
 	}
 	previous := s.lastPulled
 	if err := s.persistConfig("previous-config.json", previous); err != nil {
 		candidate.Close()
-		s.logger.Error("snapshot failed; core unchanged", "error", err)
-		return
+		return fmt.Errorf("snapshot failed; core unchanged: %w", err)
 	}
 	if err := s.stopNodeLocked(); err != nil {
 		s.logger.Warn("close core", "error", err)
@@ -1729,19 +1824,22 @@ func (s *server) applyFullLocked(pulled pulledConfig) {
 		if previous != nil {
 			if recoveryErr := s.startNodeLocked(startRequest{Inbounds: previous.Inbounds, Core: &previous.Core}); recoveryErr != nil {
 				s.logger.Error("core rollback failed", "error", recoveryErr)
+				s.restoreWanted = true
 			}
 			s.lastPulled = previous
 		}
-		return
+		return fmt.Errorf("new core failed to start: %w", err)
 	}
 	s.node = candidate
 	s.plan = plan
 	s.startSupervisorLocked(plan)
 	s.lastPulled = &pulled
+	s.restoreWanted = false
 	if err := s.persistConfig("last-good-config.json", s.lastPulled); err != nil {
 		s.logger.Error("persist last good config", "error", err)
 	}
 	s.logger.Info("validated core config applied", "version", pulled.Version)
+	return nil
 }
 
 // userUpdate names an inbound whose user list changed and should be hot-applied.
