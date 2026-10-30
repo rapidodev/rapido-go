@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin"
-for command in mkdir chown; do
+for command in mkdir chown chmod; do
     printf '#!/bin/sh\nexit 0\n' > "$work/bin/$command"
 done
 cat > "$work/bin/su-exec" <<'SH'

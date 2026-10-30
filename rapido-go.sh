@@ -44,6 +44,10 @@ RAPIDO_ADMIN_PASS="${RAPIDO_ADMIN_PASS:-}"
 RAPIDO_YES="${RAPIDO_YES:-0}"
 RAPIDO_SKIP_PREFLIGHT="${RAPIDO_SKIP_PREFLIGHT:-0}"
 
+# Update inputs, from a flag (see parse_update_args) or the environment.
+RAPIDO_NO_ROLLBACK="${RAPIDO_NO_ROLLBACK:-0}"
+RAPIDO_REPLACE_PRIVATE_IMAGE="${RAPIDO_REPLACE_PRIVATE_IMAGE:-0}"
+
 # Set by resolve_repo_access: 0 when the repository AND the images can be read
 # without a token (so none is used or stored), 1 otherwise.
 TOKEN_NEEDED=1
@@ -417,19 +421,20 @@ detect_install_mode() {
     fi
 }
 
-repo_url() {
-    if [ -n "$RAPIDO_REPO_TOKEN" ]; then
-        printf 'https://%s@github.com/%s/%s.git' "$RAPIDO_REPO_TOKEN" "$REPO_OWNER" "$REPO_NAME"
-    else
-        printf 'https://github.com/%s/%s.git' "$REPO_OWNER" "$REPO_NAME"
-    fi
-}
+repo_url() { printf 'https://github.com/%s/%s.git' "$REPO_OWNER" "$REPO_NAME"; }
 
-# Keeps the token out of .git/config, out of `git remote -v`, and out of any
-# later `git fetch` a different operator on this box might run.
-scrub_remote() {
-    git -C "$APP_DIR" remote set-url origin \
-        "https://github.com/${REPO_OWNER}/${REPO_NAME}.git" 2>/dev/null || true
+# git for anything that talks to GitHub. The token never goes in the URL, where
+# any local user could read it from the process list and where it would land in
+# .git/config: a one-line credential helper hands it over from the environment.
+# GIT_TERMINAL_PROMPT=0: a missing/wrong token on a private repo must fail with
+# the caller's die() message, not hang forever on a credential prompt with no
+# terminal attached to answer it (this is exactly what happens with no token at
+# all - found by actually running an install non-interactively over SSH, not
+# assumed).
+git_remote() {
+    RAPIDO_GIT_TOKEN="$RAPIDO_REPO_TOKEN" GIT_TERMINAL_PROMPT=0 git -c credential.helper= \
+        -c 'credential.helper=!f() { if [ "$1" = get ] && [ -n "$RAPIDO_GIT_TOKEN" ]; then printf "username=x-access-token\npassword=%s\n" "$RAPIDO_GIT_TOKEN"; fi; }; f' \
+        "$@"
 }
 
 file_sum() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1 || true; }
@@ -491,10 +496,9 @@ fetch_source_git() {
     if [ -d "$APP_DIR/.git" ]; then
         log "Updating source in $APP_DIR..."
         git -C "$APP_DIR" remote set-url origin "$(repo_url)"
-        GIT_TERMINAL_PROMPT=0 git -C "$APP_DIR" -c credential.helper= fetch --depth 1 origin "$REPO_BRANCH" \
-            || { scrub_remote; die "Could not fetch the repository. If it is private, run: RAPIDO_REPO_TOKEN=<token> rapido-go update"; }
+        git_remote -C "$APP_DIR" fetch --depth 1 origin "$REPO_BRANCH" \
+            || die "Could not fetch the repository. If it is private, run: RAPIDO_REPO_TOKEN=<token> rapido-go update"
         git -C "$APP_DIR" reset --hard "origin/$REPO_BRANCH" >/dev/null
-        scrub_remote
     elif [ -d "$APP_DIR" ] && [ -n "$(ls -A "$APP_DIR" 2>/dev/null || true)" ]; then
         # The directory already holds files (a lightweight install being
         # switched to a full checkout to build locally, or an interrupted
@@ -504,22 +508,15 @@ fetch_source_git() {
         git -C "$APP_DIR" init -q
         git -C "$APP_DIR" remote add origin "$(repo_url)" 2>/dev/null \
             || git -C "$APP_DIR" remote set-url origin "$(repo_url)"
-        GIT_TERMINAL_PROMPT=0 git -C "$APP_DIR" -c credential.helper= fetch --depth 1 origin "$REPO_BRANCH" \
-            || { scrub_remote; die "Could not fetch the repository. If it is private, pass a token: RAPIDO_REPO_TOKEN=<token>"; }
+        git_remote -C "$APP_DIR" fetch --depth 1 origin "$REPO_BRANCH" \
+            || die "Could not fetch the repository. If it is private, pass a token: RAPIDO_REPO_TOKEN=<token>"
         git -C "$APP_DIR" checkout -q -f -B "$REPO_BRANCH" FETCH_HEAD
-        scrub_remote
     else
         log "Downloading Rapido-Go into $APP_DIR..."
         mkdir -p "$(dirname "$APP_DIR")"
-        # GIT_TERMINAL_PROMPT=0: a missing/wrong token on a private repo must
-        # fail with the die() message below, not hang forever on a credential
-        # prompt with no terminal attached to answer it (this is exactly what
-        # happens with no token at all - found by actually running an install
-        # non-interactively over SSH, not assumed).
-        GIT_TERMINAL_PROMPT=0 git -c credential.helper= clone --depth 1 --branch "$REPO_BRANCH" \
+        git_remote clone --depth 1 --branch "$REPO_BRANCH" \
             "$(repo_url)" "$APP_DIR" >/dev/null \
             || die "Could not clone the repository (git's own reason is above). If $APP_DIR already exists from an interrupted install, remove it and retry."
-        scrub_remote
     fi
     ok "Source ready ($(git -C "$APP_DIR" rev-parse --short HEAD))."
 }
@@ -1117,9 +1114,20 @@ ALLOWED_ORIGINS="https://${RAPIDO_DOMAIN}${RAPIDO_EXTRA_DOMAINS:+,https://${RAPI
 EOF
 }
 
+# The dumps and install archives kept here hold every credential the panel has,
+# so nobody but root may read them - however this directory came to exist and
+# whatever an older version of this script left in it.
+secure_data_dir() {
+    mkdir -p "$DATA_DIR"
+    chmod 700 "$DATA_DIR"
+    chmod 600 "$DATA_DIR"/*.gz 2>/dev/null || true
+}
+
 generate_env() {
     local env_file="$APP_DIR/.env"
+    secure_data_dir
     if [ -f "$env_file" ]; then
+        chmod 600 "$env_file"
         warn "$env_file already exists - leaving it untouched."
         return
     fi
@@ -1132,8 +1140,6 @@ generate_env() {
     ip="${SERVER_IP:-}"
     if [ -z "$ip" ]; then ip="$(detect_public_ip)"; fi
     if [ -z "$ip" ]; then ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"; fi
-    mkdir -p "$DATA_DIR"
-    chmod 700 "$DATA_DIR"
     log "This machine: $(nproc 2>/dev/null || echo '?') cores, ${ram:-?} MB RAM - Postgres shared_buffers $sb, effective_cache_size $ecs"
 
     ( umask 077; render_env "$db_pass" "$RAPIDO_ADMIN_USER" "$RAPIDO_ADMIN_PASS" "$sb" "$ecs" "$ip" > "$env_file" )
@@ -1157,8 +1163,48 @@ image_has_private_features() {
     return 1
 }
 
+# The panel container, running or stopped (empty when there is none).
+panel_container() {
+    [ -d "$APP_DIR" ] || return 0
+    compose ps -a -q panel 2>/dev/null | head -n 1 || true
+}
+
+# A private build does not always go by the alias: a local build carries the
+# public image's own name, so only the running container's image can tell.
+running_panel_is_private() {
+    local cid id
+    cid="$(panel_container)"
+    [ -n "$cid" ] || return 1
+    id="$(docker inspect --format '{{.Image}}' "$cid" 2>/dev/null || true)"
+    [ -n "$id" ] && image_has_private_features "$id"
+}
+
 private_installation() {
-    image_has_private_features rapido-go-panel:private || image_has_private_features rapido-go-panel:previous
+    image_has_private_features rapido-go-panel:private || image_has_private_features rapido-go-panel:previous || running_panel_is_private
+}
+
+# Runs before any panel pull. The alias has its own check (tag_private_panel_image
+# refuses a public image for it) and so has a local build (build_local_image);
+# any other name would simply move to whatever the registry holds, and the next
+# recreate would drop the private add-on without a word.
+refuse_public_over_private() {
+    local ref
+    [ "${RAPIDO_BUILD_LOCALLY:-}" = "1" ] && return 0
+    [ -d "$APP_DIR" ] || return 0
+    ref="$(image_list | grep 'rapido-go-panel' | head -n 1 || true)"
+    [ "$ref" != "rapido-go-panel:private" ] || return 0
+    if ! running_panel_is_private && ! image_has_private_features "$ref"; then return 0; fi
+    if [ "$RAPIDO_REPLACE_PRIVATE_IMAGE" = "1" ]; then
+        warn "Replacing the private build with $ref (--replace-private-image)."
+        return 0
+    fi
+    err "The running panel is a private build, and pulling $ref would replace it with whatever the registry holds - the public image lacks the private add-on."
+    note "Nothing was changed. Choose one:"
+    note "  Keep the add-on, from a registry: set RAPIDO_IMAGE=rapido-go-panel and RAPIDO_TAG=private in $APP_DIR/.env,"
+    note "    then run: RAPIDO_PRIVATE_IMAGE_SOURCE=<private image> rapido-go update"
+    note "  Keep the add-on, built here: RAPIDO_BUILD_LOCALLY=1 rapido-go update (needs its sources in $APP_DIR)"
+    note "  Drop the add-on on purpose: rapido-go update --replace-private-image"
+    exit 1
 }
 
 # Keep the previous local alias available for an operator rollback.
@@ -1208,6 +1254,7 @@ PULL_FAILED=""
 pull_images() {
     local imgs img n=0 i tmp
     PULL_FAILED=""
+    refuse_public_over_private
     imgs="$(image_list)"
     if [ -z "$imgs" ]; then
         warn "Could not list the stack's images - docker compose will pull them as it starts."
@@ -1373,7 +1420,7 @@ wait_healthy() {
         compose exec -T panel wget -q -O /dev/null http://127.0.0.1:8000/dashboard/ 2>/dev/null </dev/null \
             && { ok "Panel is answering internally (${i}s)."; break; }
         sleep 1
-        [ "$i" -eq 60 ] && { warn "The panel did not answer internally within 60s. Check: rapido-go logs panel"; return 0; }
+        [ "$i" -eq 60 ] && { err "The panel did not answer internally within 60s. Check: rapido-go logs panel"; return 1; }
     done
 
     log "Waiting for https://${RAPIDO_DOMAIN}/dashboard/ (Caddy obtaining a certificate)..."
@@ -1466,9 +1513,12 @@ cmd_install() {
     obtain_images
     log "Starting Rapido-Go..."
     compose up -d
-    wait_healthy
+    local answering=1
+    wait_healthy || answering=0
     verify_stack || die "The stack did not come up cleanly - see the output above."
     print_summary
+    # After the summary, or its one-time password would be lost with the failure.
+    [ "$answering" = "1" ] || die "Installed, but the panel is not answering - see the output above."
     # The summary (and the one-time password in it) is the last thing on the
     # screen - streaming logs under it would scroll it away. Opt back in with
     # RAPIDO_FOLLOW_LOGS=1.
@@ -1515,18 +1565,128 @@ update_needed() {
     return 0
 }
 
+parse_update_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --no-rollback)           RAPIDO_NO_ROLLBACK=1; shift ;;
+            --replace-private-image) RAPIDO_REPLACE_PRIVATE_IMAGE=1; shift ;;
+            -h|--help)               usage; exit 0 ;;
+            *) die "Unknown option for update: $1 (see: rapido-go help)" ;;
+        esac
+    done
+}
+
+# What the panel ran before this update. A pull moves the image's name to what it
+# downloads, leaving the old image for `image prune` - a tag of its own keeps it.
+PREVIOUS_PANEL_TAG="rapido-go-panel:pre-update"
+PREVIOUS_PANEL_ID=""
+PREVIOUS_PANEL_REF=""
+
+keep_previous_panel_image() {
+    local cid
+    PREVIOUS_PANEL_ID=""
+    PREVIOUS_PANEL_REF=""
+    cid="$(panel_container)"
+    [ -n "$cid" ] || return 0
+    PREVIOUS_PANEL_ID="$(docker inspect --format '{{.Image}}' "$cid" 2>/dev/null || true)"
+    PREVIOUS_PANEL_REF="$(docker inspect --format '{{.Config.Image}}' "$cid" 2>/dev/null || true)"
+    [ -n "$PREVIOUS_PANEL_ID" ] || return 0
+    docker tag "$PREVIOUS_PANEL_ID" "$PREVIOUS_PANEL_TAG" \
+        || die "Could not keep the current panel image as $PREVIOUS_PANEL_TAG, so an update could not be rolled back. Nothing was changed."
+}
+
+# The image the stack is now configured to run (empty when it cannot be told).
+configured_panel_id() {
+    local ref
+    ref="$(image_list | grep 'rapido-go-panel' | head -n 1 || true)"
+    [ -n "$ref" ] || return 0
+    docker image inspect --format '{{.Id}}' "$ref" 2>/dev/null || true
+}
+
+# `compose up -d` re-applies migrations via the migrate service, then recreates
+# whatever image tag or config changed. Called as a condition, which turns off
+# errexit in here: the && chain is what stops at the first failure.
+apply_update() { compose up -d && wait_healthy && verify_stack; }
+
+print_rollback_steps() {
+    note "To go back by hand:"
+    note "  tar xzf $2 -C $APP_DIR"
+    if [ -n "$PREVIOUS_PANEL_ID" ]; then
+        note "  docker tag $PREVIOUS_PANEL_TAG ${PREVIOUS_PANEL_REF:-<the panel image in docker-compose.prod.yml>}"
+    fi
+    note "  rapido-go restore $1"
+}
+
+# Puts back the files, the image and - when the image changed, because migrations
+# may have run - the database as it was before the update. Only the pair is safe:
+# the old image on a migrated schema is exactly what must not start. The database
+# being replaced is saved first, so nothing is destroyed outright. Also called as
+# a condition, so every step is checked by hand.
+ROLLBACK_SAFETY=""
+rollback_update() {
+    local dump="$1" archive="$2" new_id
+    new_id="$(configured_panel_id)"
+    tar xzf "$archive" -C "$APP_DIR" || return 1
+    install_command
+    compose stop panel backend || return 1
+    if [ "$new_id" != "$PREVIOUS_PANEL_ID" ]; then
+        ROLLBACK_SAFETY="$DATA_DIR/pre-rollback-$(date +%Y%m%d-%H%M%S).sql.gz"
+        ( cmd_backup "$ROLLBACK_SAFETY" ) || return 1
+        replace_database "$dump" || return 1
+        flush_cache
+    fi
+    docker tag "$PREVIOUS_PANEL_ID" "$PREVIOUS_PANEL_REF" || return 1
+    compose up -d --remove-orphans || return 1
+    wait_healthy && verify_stack
+}
+
+# The new version did not prove itself: say exactly what to go back to, then go
+# back when that can be done. The update has failed either way, so this never
+# returns.
+update_failed() {
+    local dump="$1" archive="$2"
+    err "The update did not come up cleanly."
+    note "Database before the update: $dump"
+    if [ -n "$PREVIOUS_PANEL_ID" ]; then
+        note "Panel image before it:      $PREVIOUS_PANEL_TAG ($PREVIOUS_PANEL_ID, was ${PREVIOUS_PANEL_REF:-unknown})"
+    else
+        note "Panel image before it:      unknown - no panel container existed when the update started"
+    fi
+    note "Files before it:            $archive"
+    if [ "$RAPIDO_NO_ROLLBACK" = "1" ] || [ -z "$PREVIOUS_PANEL_ID" ] || [ -z "$PREVIOUS_PANEL_REF" ]; then
+        print_rollback_steps "$dump" "$archive"
+        exit 1
+    fi
+    log "Rolling back to the previous image and, if it changed, the database from before the update..."
+    if rollback_update "$dump" "$archive"; then
+        ok "Rolled back: the panel is on $PREVIOUS_PANEL_TAG again."
+        if [ -n "$ROLLBACK_SAFETY" ]; then
+            warn "Whatever changed since $dump is gone from the live database; the database the failed update left is in $ROLLBACK_SAFETY"
+        fi
+        exit 1
+    fi
+    err "The rollback did not finish - see the output above."
+    print_rollback_steps "$dump" "$archive"
+    exit 1
+}
+
 cmd_update() {
     require_root
     require_installed
     ensure_docker
+    refuse_public_over_private
     log "Backing up before modifying the installation..."
-    cmd_backup
-    local archive="$DATA_DIR/install-$(date +%Y%m%d-%H%M%S).tar.gz" optional
+    local stamp dump archive optional
+    stamp="$(date +%Y%m%d-%H%M%S)"
+    dump="$DATA_DIR/backup-$stamp.sql.gz"
+    archive="$DATA_DIR/install-$stamp.tar.gz"
+    cmd_backup "$dump"
     local backup_files=(.env "$(compose_file)")
-    for optional in rapido-go.sh Caddyfile; do
+    for optional in rapido-go.sh Caddyfile .source-version; do
         if [ -f "$APP_DIR/$optional" ]; then backup_files+=("$optional"); fi
     done
     (umask 077; tar czf "$archive" -C "$APP_DIR" "${backup_files[@]}")
+    keep_previous_panel_image
     resolve_repo_access lenient
     local before_sum after_sum before_fp
     before_sum="$(file_sum "$APP_DIR/$(compose_file)")"
@@ -1543,39 +1703,104 @@ cmd_update() {
         return 0
     fi
     log "Applying the update..."
-    compose up -d  # re-applies migrations via the migrate service, then recreates whatever image tag or config changed
-    wait_healthy
+    apply_update || update_failed "$dump" "$archive"
+    # Only a stack that proved itself may lose the way back.
     docker image prune -f >/dev/null 2>&1 || true
     ls -1t "$DATA_DIR"/backup-*.sql.gz 2>/dev/null | tail -n +6 | xargs -r rm -f || true
-    verify_stack || die "The stack did not come back cleanly after the update."
     ok "Updated to $(installed_version_label)."
     follow_logs
 }
 
+# The last line pg_dump writes. Without it the file ends where the dump stopped,
+# and psql would replace the database with that much of it.
+PG_DUMP_TRAILER="-- PostgreSQL database dump complete"
+
+# 0 when <file> is a whole dump, otherwise says what is wrong with it. It looks
+# at the end of the text only: a dump cut short can hold those same words in
+# somebody's data.
+check_dump_file() {
+    local file="$1" ending
+    if ! gzip -t "$file" 2>/dev/null; then
+        err "$file is not an intact gzip file: it is damaged, or was cut off while being written or copied."
+        return 1
+    fi
+    # Into a variable rather than piping into `grep -q`: grep exits at the first
+    # match, which under `pipefail` turns the SIGPIPE the writer then gets into a
+    # failed pipeline - a healthy dump of a large database was reported as empty
+    # and blocked `rapido-go update`.
+    ending="$(gunzip -c "$file" 2>/dev/null | tail -c 4096 | tr -d '\0' || true)"
+    case "$ending" in
+        *"$PG_DUMP_TRAILER"*) return 0 ;;
+    esac
+    err "$file is not a complete PostgreSQL dump: pg_dump's closing line is missing."
+    return 1
+}
+
 cmd_backup() {
     require_installed
-    local dest="${1:-$DATA_DIR/backup-$(date +%Y%m%d-%H%M%S).sql.gz}"
+    local dest="${1:-$DATA_DIR/backup-$(date +%Y%m%d-%H%M%S).sql.gz}" partial
+    partial="$dest.partial"
+    secure_data_dir
     mkdir -p "$(dirname "$dest")"
     log "Dumping the database to $dest..."
+    # A dump holds every credential the panel has, so it is private from its
+    # first byte, and it only gets its final name once complete: a dump killed
+    # halfway must never look like a backup someone could restore.
+    #
     # Check the DUMP, not the file. gzip of a failed or empty pg_dump still
     # writes a valid ~20-byte stream, so `[ -s "$dest" ]` is true and the
     # old guard never fired - `rapido-go update` would then report a
     # successful backup and go on to rebuild on top of nothing.
-    if ! compose exec -T postgres sh -c 'exec pg_dump -U rapido rapido' | gzip > "$dest"; then
-        rm -f "$dest"
+    if ! (umask 077; compose exec -T postgres sh -c 'exec pg_dump -U rapido rapido' </dev/null | gzip > "$partial"); then
+        rm -f "$partial"
         die "pg_dump failed - nothing was written. Is the database up? (rapido-go status)"
     fi
-    # Read the first byte into a variable rather than piping into `grep -q`:
-    # grep exits at the first match, which under `pipefail` turns the SIGPIPE
-    # gunzip then gets into a failed pipeline - a healthy dump of a large
-    # database was reported as empty and blocked `rapido-go update`.
-    local first_byte
-    first_byte="$(gunzip -c "$dest" 2>/dev/null | head -c 1 || true)"
-    if [ -z "$first_byte" ]; then
-        rm -f "$dest"
-        die "The backup came out empty - nothing was written."
+    if ! check_dump_file "$partial"; then
+        rm -f "$partial"
+        die "The backup came out empty or incomplete - nothing was written."
     fi
+    mv -f "$partial" "$dest"
     ok "Backup written: $dest ($(du -h "$dest" | cut -f1))"
+}
+
+# Replaces the whole database with a dump check_dump_file has passed, in one
+# transaction: a failure anywhere leaves the database exactly as it was. The
+# schema goes first because a dump only ever fills an existing, empty one - its
+# first CREATE TABLE fails on any database that still has its tables. As in
+# internal/httpapi/backup.go, which reaches the same state with psql's
+# --single-transaction, but that flag commits at the end of input, and here the
+# end of input may be gunzip failing, Ctrl-C or a dropped SSH session closing the
+# pipe. So the transaction is spelled out: COMMIT is only sent once gunzip has
+# got through the whole file, and anything less rolls back when psql disconnects.
+replace_database() {
+    {
+        printf 'BEGIN;\nSET client_min_messages = warning;\nDROP SCHEMA public CASCADE;\nCREATE SCHEMA public;\n'
+        gunzip -c "$1" && printf '\nCOMMIT;\n'
+    } | compose exec -T postgres sh -c 'exec psql -U rapido -d rapido -v ON_ERROR_STOP=1 -q >/dev/null'
+}
+
+# Every cached value is stale the moment the database is replaced, and Redis is
+# only a cache here (see docker-compose.prod.yml), so nothing is lost with it.
+flush_cache() {
+    compose exec -T redis redis-cli FLUSHALL </dev/null >/dev/null 2>&1 \
+        || warn "Could not empty the Redis cache: old values may be served until they expire. To clear it: rapido-go down, then rapido-go up"
+}
+
+# The way out of cmd_restore, whichever way that is: never leave the panel
+# stopped. errexit is off and signals are ignored so that nothing cuts this short.
+RESTORE_SAFETY=""
+start_panel_after_restore() {
+    local rc=$?
+    set +e
+    trap - EXIT
+    trap '' INT TERM HUP
+    log "Starting the panel and backend..."
+    if ! compose up -d panel backend; then
+        err "They did not start - check: rapido-go logs panel"
+        if [ -f "$RESTORE_SAFETY" ]; then note "The database as it was before this restore is in $RESTORE_SAFETY"; fi
+        [ "$rc" -ne 0 ] || rc=1
+    fi
+    exit "$rc"
 }
 
 cmd_restore() {
@@ -1584,16 +1809,31 @@ cmd_restore() {
     local src="${1:-}"
     [ -n "$src" ] || die "Usage: rapido-go restore <backup.sql.gz>"
     [ -f "$src" ] || die "No such file: $src"
-    warn "This REPLACES the current database with the contents of $src."
+    log "Checking $src..."
+    check_dump_file "$src" || die "Nothing was changed."
+    RESTORE_SAFETY="$DATA_DIR/pre-restore-$(date +%Y%m%d-%H%M%S).sql.gz"
+    warn "This REPLACES THE WHOLE DATABASE with the contents of $src."
+    warn "Everything changed since that backup was taken is lost: users, traffic, admins, nodes, hosts and settings all go back to what the file holds."
+    warn "Users created since then lose access at their node's next sync. Nodes added since then are refused, stop serving after a grace period and must be installed again."
+    warn "The dashboard and subscription links are down while this runs; clients already connected stay connected."
+    warn "With the panel stopped, the current database is first saved to $RESTORE_SAFETY - that file is the only way back."
     printf "Type 'yes' to continue: "
     local answer; read -r answer || answer=""
     [ "$answer" = "yes" ] || die "Aborted."
-    # Panel/backend hold open connections that would fight a restore.
+    trap start_panel_after_restore EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    # Panel/backend hold open connections that would fight a restore. Stopped
+    # first so that no write can fall between the safety backup and the restore,
+    # where neither would cover it.
     compose stop panel backend
-    gunzip -c "$src" | compose exec -T postgres sh -c \
-        'exec psql -U rapido -d rapido -v ON_ERROR_STOP=1'
-    compose up -d panel backend
+    cmd_backup "$RESTORE_SAFETY"
+    log "Replacing the database with $src..."
+    replace_database "$src" || die "The restore failed and was rolled back: the database is as it was (the reason is above). Nothing else changed."
+    flush_cache
     ok "Restored from $src"
+    note "To undo this: rapido-go restore $RESTORE_SAFETY"
 }
 
 cmd_edit_env() {
@@ -1613,18 +1853,66 @@ cmd_edit_env() {
     fi
 }
 
+# The default keeps every volume, so all that is lost with $APP_DIR is what the
+# kept data cannot be used without: the database only opens with the password in
+# .env. --purge is the one path in this script that deletes a volume.
 cmd_uninstall() {
     require_root
     require_installed
-    warn "This stops and removes Rapido-Go's containers and its source at $APP_DIR."
-    warn "Your data in $DATA_DIR (database backups) is KEPT."
+    local purge=0 stamp final kept answer f
+    local config_files=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --purge) purge=1; shift ;;
+            *) die "Unknown option for uninstall: $1 (see: rapido-go help)" ;;
+        esac
+    done
+    stamp="$(date +%Y%m%d-%H%M%S)"
+    final="$DATA_DIR/final-$stamp.sql.gz"
+    kept="$DATA_DIR/config-$stamp.tar.gz"
+
+    if [ "$purge" = "1" ]; then
+        warn "--purge PERMANENTLY DELETES this panel and everything it holds:"
+        warn "  the database (every user, admin, node and host, all traffic history),"
+        warn "  the TLS certificates, the backups made from the dashboard and the SSH known hosts (Docker volumes),"
+        warn "  and $APP_DIR with .env, the Caddyfile and custom templates."
+        warn "The dashboard and every subscription link stop answering for good; nodes keep serving what they last had, but can no longer be changed."
+        warn "This cannot be undone. The only thing kept is a final database dump: $final"
+        printf "Type 'purge' to continue: "
+        read -r answer || answer=""
+        [ "$answer" = "purge" ] || die "Aborted."
+        cmd_backup "$final"
+        compose down --remove-orphans --volumes \
+            || die "Could not remove the containers and volumes, so nothing else was removed. Final database dump: $final"
+        rm -rf "$APP_DIR"
+        rm -f "$BIN_PATH"
+        ok "Rapido-Go and its data are gone. Final database dump: $final"
+        return 0
+    fi
+
+    warn "This stops and removes Rapido-Go's containers and its files at $APP_DIR."
+    warn "The dashboard and every subscription link stop answering; nodes keep serving what they last had, but can no longer be changed."
+    warn "KEPT: the database, TLS certificates, dashboard backups and SSH known hosts (Docker volumes), and $DATA_DIR."
+    warn "Your .env, Caddyfile and custom templates are saved to $kept, which the kept database needs: it only opens with the password in that .env."
+    note "(to delete the data as well, run: rapido-go uninstall --purge)"
     printf "Type 'yes' to continue: "
-    local answer; read -r answer || answer=""
+    read -r answer || answer=""
     [ "$answer" = "yes" ] || die "Aborted."
-    compose down --remove-orphans --volumes || true
+    secure_data_dir
+    for f in .env Caddyfile "$CUSTOM_COMPOSE_FILE" templates; do
+        if [ -e "$APP_DIR/$f" ]; then config_files+=("$f"); fi
+    done
+    if [ ${#config_files[@]} -gt 0 ]; then
+        (umask 077; tar czf "$kept" -C "$APP_DIR" "${config_files[@]}") \
+            || die "Could not save the configuration to $kept, so nothing was removed."
+    fi
+    compose down --remove-orphans \
+        || warn "Could not remove every container (docker ps --filter label=com.docker.compose.project=$COMPOSE_PROJECT)."
     rm -rf "$APP_DIR"
     rm -f "$BIN_PATH"
-    ok "Rapido-Go removed. Backups left in $DATA_DIR"
+    ok "Rapido-Go removed. Its data is still in Docker volumes and $DATA_DIR."
+    note "To reinstall over it: mkdir -p $APP_DIR && tar xzf $kept -C $APP_DIR, then run the install command."
+    note "To delete it for good: docker volume ls -q --filter label=com.docker.compose.project=$COMPOSE_PROJECT | xargs -r docker volume rm"
 }
 
 # ── versions ─────────────────────────────────────────────────────────────────
@@ -1941,8 +2229,8 @@ usage() {
     _u_mid
     _u_head "SETUP"
     _u_row  "install [options]" "Install Docker if needed, fetch and start"
-    _u_row  "update"    "Pull new images and restart if anything changed"
-    _u_row  "uninstall" "Remove containers and source (backups kept)"
+    _u_row  "update [options]" "Pull new images and restart if anything changed"
+    _u_row  "uninstall [--purge]" "Remove containers, files; --purge: data too"
     _u_gap
 
     _u_head "RUNNING"
@@ -1971,6 +2259,11 @@ usage() {
     _u_row  "--token <pat>"         "GitHub token, only for a private repo/images"
     _u_row  "--yes"                 "Never ask - take the defaults"
     _u_row  "--skip-preflight"      "Turn failed server checks into warnings"
+    _u_gap
+
+    _u_head "UPDATE OPTIONS"
+    _u_row  "--no-rollback"           "Leave a failed update in place, to debug it"
+    _u_row  "--replace-private-image" "Allow a pull over a private build"
     _u_gap
 
     _u_head "ENVIRONMENT"
@@ -2012,10 +2305,13 @@ main() {
         logs)      cmd_logs "${1:-}" ;;
         backup)    cmd_backup "${1:-}" ;;
         restore)   cmd_restore "${1:-}" ;;
-        update)    cmd_update ;;
+        update)
+            parse_update_args "$@"
+            cmd_update
+            ;;
         doctor)    cmd_doctor ;;
         edit-env)  cmd_edit_env ;;
-        uninstall) cmd_uninstall ;;
+        uninstall) cmd_uninstall "$@" ;;
         version|-v|--version) cmd_version ;;
         ""|help|-h|--help) usage ;;
         *) err "Unknown command: $cmd"; echo; usage; exit 1 ;;

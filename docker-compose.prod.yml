@@ -17,10 +17,17 @@
 # token used to clone the private source, since a token with read access
 # to the repo also has read:packages on its own images by default).
 
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
 services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    logging: *logging
     environment:
       POSTGRES_USER: rapido
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in your .env file}
@@ -82,6 +89,8 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    logging: *logging
+    mem_limit: 512m
     command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
     volumes:
       - redis_data:/data
@@ -97,16 +106,22 @@ services:
   migrate:
     image: ${RAPIDO_IMAGE:-ghcr.io/rapidodev/rapido-go-panel}:${RAPIDO_TAG:-latest}
     user: "10001:10001"
+    logging: *logging
     depends_on:
       postgres:
         condition: service_healthy
+    # The connection string stays in the environment: as an argument it would
+    # show the database password in `ps` on the host.
+    environment:
+      GOOSE_DBSTRING: postgres://rapido:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in your .env file}@postgres:5432/rapido?sslmode=disable
     entrypoint: ["goose", "-dir", "/app/internal/db/migrations", "postgres"]
-    command: ["postgres://rapido:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in your .env file}@postgres:5432/rapido?sslmode=disable", "up"]
+    command: ["up"]
     restart: "no"
 
   panel:
     image: ${RAPIDO_IMAGE:-ghcr.io/rapidodev/rapido-go-panel}:${RAPIDO_TAG:-latest}
     restart: unless-stopped
+    logging: *logging
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -176,10 +191,15 @@ services:
     volumes:
       - ./templates:/app/templates:ro
       - ssh_data:/var/lib/rapido-go/ssh
+      # Backups taken from the dashboard, and the safety backup every restore
+      # takes first. In the container's own layer they'd be gone with the next
+      # update or restart.
+      - db_backups:/app/db_backups
 
   backend:
     image: ${RAPIDO_IMAGE:-ghcr.io/rapidodev/rapido-go-panel}:${RAPIDO_TAG:-latest}
     restart: unless-stopped
+    logging: *logging
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -212,6 +232,8 @@ services:
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
+    logging: *logging
+    mem_limit: 1g
     ports:
       - "80:80"
       - "443:443"
@@ -224,6 +246,7 @@ services:
 
 volumes:
   ssh_data:
+  db_backups:
   postgres_data:
   redis_data:
   caddy_data:

@@ -97,10 +97,10 @@ It ends with a summary: dashboard URL(s), admin login, subscription base URL, ba
 Unlike the install command above, there is no fixed link for this - each node needs its own certificate and report secret, so the command is generated per node and shown to you exactly once. Open **Nodes** in the dashboard, click **Add Node**, and it shows a one-time install command in the form
 
 ```bash
-curl -fsSL https://<panel>/install/node.sh | sudo bash -s -- '<setup_blob>'
+curl -fsSL https://<panel>/install/node.sh | sudo bash
 ```
 
-Copy it right away - the `<setup_blob>` is not stored anywhere the dashboard can show you again - and run it as shown, as root, on the node server. The blob carries the certificate, key, CA, report secret and panel URL, so there is nothing else to configure, and the node only ever dials out to the panel. The script and the node binary are both served by your own panel, so the node server needs no GitHub access.
+Run it as root on the node server. It asks for the setup blob shown next to it: paste it there, where it stays hidden and out of your shell history. Copy it right away, since the blob is not stored anywhere the dashboard can show you again. (Without a terminal, put it in a file only root can read and pass `-s -- --setup-blob-file <file>`.) The blob carries the certificate, key, CA, report secret and panel URL, so there is nothing else to configure, and the node only ever dials out to the panel. The script and the node binary are both served by your own panel, so the node server needs no GitHub access.
 
 Afterwards the node manages itself with `rapido-go-node status`, `rapido-go-node update` (downloads the version your panel ships, verifies it, and rolls back if it does not start), `rapido-go-node tunnels` (brings up and enables WireGuard exits) and `rapido-go-node uninstall`.
 
@@ -126,7 +126,7 @@ All names are stored in `.env` (`RAPIDO_DOMAIN`, `RAPIDO_EXTRA_DOMAINS`, `RAPIDO
 | `doctor` | Read-only health check: containers, database, disk, certificate days left, the dashboard answering, installed vs. latest version. Exits 1 on a failure. |
 | `edit-env` | Edit `.env`, then offers to apply it. |
 | `version` | Script, source and image versions. |
-| `uninstall` | Remove the containers and `/opt/rapido-go` (backups are kept). |
+| `uninstall` | Remove the containers and `/opt/rapido-go`, keeping the data. `--purge` deletes the data too. |
 
 ### Update
 
@@ -152,7 +152,7 @@ Every `update` takes a backup first. Copy backups off the server - they live on 
 
 ### Uninstall
 
-`rapido-go uninstall` removes the containers, their volumes (**including the database**) and `/opt/rapido-go`. Backups in `/var/lib/rapido-go` are kept - run `rapido-go backup` first if you may want the data.
+`rapido-go uninstall` removes the containers and `/opt/rapido-go`, and keeps the data: the database and certificates stay in their Docker volumes, backups stay in `/var/lib/rapido-go`, and `.env`, the Caddyfile and your templates are archived there too, since the database only opens with the password in `.env`. `rapido-go uninstall --purge` **deletes the database and certificates for good** after one last dump, and asks you to type `purge` first.
 
 ### Migrating from the Python panel
 
@@ -316,10 +316,10 @@ bash <(curl -fsSL -H "Authorization: Bearer $RAPIDO_REPO_TOKEN" -H "Accept: appl
 برخلاف دستور نصب بالا، اینجا لینک ثابتی وجود ندارد — هر نود گواهی و رمز گزارش مخصوص خودش را لازم دارد، پس این دستور برای هر نود جداگانه ساخته می‌شود و فقط یک بار نشانتان داده می‌شود. در داشبورد به صفحه‌ی **Nodes** بروید، روی **Add Node** بزنید؛ یک دستور نصب یک‌باره به این شکل نشان می‌دهد:
 
 ```bash
-curl -fsSL https://<panel>/install/node.sh | sudo bash -s -- '<setup_blob>'
+curl -fsSL https://<panel>/install/node.sh | sudo bash
 ```
 
-همان لحظه کپی‌اش کنید — این `<setup_blob>` جایی ذخیره نمی‌شود که داشبورد دوباره نشانتان بدهد — و همان‌طور که نشان داده شده، با کاربر root، روی سرور نود اجرا کنید. این blob گواهی، کلید، CA، رمز گزارش و آدرس پنل را با خودش دارد، پس چیز دیگری برای تنظیم نمی‌ماند و نود فقط به سمت پنل اتصال خروجی می‌زند. اسکریپت و باینری نود را هم پنل خودتان سرو می‌کند، پس سرور نود نیازی به دسترسی گیت‌هاب ندارد.
+آن را با کاربر root روی سرور نود اجرا کنید. دستور، setup blob را که کنارش نشان داده شده می‌خواهد: همان‌جا paste کنید؛ نه نمایش داده می‌شود و نه در تاریخچهٔ شل می‌ماند. همان لحظه کپی‌اش کنید، چون این blob جایی ذخیره نمی‌شود که داشبورد دوباره نشانتان بدهد. (اگر ترمینال ندارید، آن را در فایلی بگذارید که فقط root بخواند و `-s -- --setup-blob-file <file>` را بدهید.) این blob گواهی، کلید، CA، رمز گزارش و آدرس پنل را با خودش دارد، پس چیز دیگری برای تنظیم نمی‌ماند و نود فقط به سمت پنل اتصال خروجی می‌زند. اسکریپت و باینری نود را هم پنل خودتان سرو می‌کند، پس سرور نود نیازی به دسترسی گیت‌هاب ندارد.
 
 بعد از آن، نود خودش را مدیریت می‌کند: `rapido-go-node status`، `rapido-go-node update` (نسخه‌ای را که پنلتان دارد دانلود، تأیید و اگر بالا نیامد برمی‌گرداند)، `rapido-go-node tunnels` (تونل‌های وایرگارد را بالا و فعال می‌کند) و `rapido-go-node uninstall`.
 
@@ -345,7 +345,7 @@ curl -fsSL https://<panel>/install/node.sh | sudo bash -s -- '<setup_blob>'
 | `doctor` | بررسی فقط‌خواندنی: کانتینرها، دیتابیس، دیسک، روزهای باقی‌مانده‌ی گواهی، پاسخ‌دادن داشبورد، نسخه‌ی نصب‌شده در برابر آخرین نسخه. در صورت خطا با کد 1 خارج می‌شود. |
 | `edit-env` | ویرایش `.env` و سپس پیشنهاد اعمال. |
 | `version` | نسخه‌ی اسکریپت، سورس و ایمیج. |
-| `uninstall` | کانتینرها و `/opt/rapido-go` را پاک می‌کند (بکاپ‌ها می‌مانند). |
+| `uninstall` | کانتینرها و `/opt/rapido-go` را پاک می‌کند و داده را نگه می‌دارد. `--purge` داده را هم پاک می‌کند. |
 
 ### به‌روزرسانی
 
@@ -367,7 +367,7 @@ rapido-go restore /root/rapido.sql.gz     # دیتابیس را جایگزین �
 
 ### حذف
 
-`rapido-go uninstall` کانتینرها، ولوم‌هایشان (**از جمله دیتابیس**) و `/opt/rapido-go` را پاک می‌کند. بکاپ‌های `/var/lib/rapido-go` می‌مانند؛ اگر ممکن است داده را بخواهید، اول `rapido-go backup` بزنید.
+`rapido-go uninstall` کانتینرها و `/opt/rapido-go` را پاک می‌کند و داده را نگه می‌دارد: دیتابیس و گواهی‌ها در ولوم‌های داکر می‌مانند، بکاپ‌ها در `/var/lib/rapido-go` می‌مانند، و `.env`، Caddyfile و قالب‌ها هم همان‌جا آرشیو می‌شوند، چون دیتابیس فقط با رمز داخل `.env` باز می‌شود. `rapido-go uninstall --purge` پس از یک dump نهایی **دیتابیس و گواهی‌ها را برای همیشه پاک می‌کند** و قبلش می‌خواهد کلمهٔ `purge` را تایپ کنید.
 
 ### مهاجرت از پنل پایتونی
 

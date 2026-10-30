@@ -5,13 +5,13 @@
 #  Run this ON THE OLD PANEL SERVER. It reads that panel and pushes into a
 #  Rapido-Go panel you have already installed somewhere else:
 #
-#    bash migrate-from-rapido.sh --target https://newpanel.example.com \
-#                                --user admin --pass 'xxxxx'
+#    bash migrate-from-rapido.sh --target https://newpanel.example.com --user admin
 #
 #  It NEVER writes to the old panel - no schema change, no restart, not even
 #  a file touched. The old panel keeps serving customers throughout, so you
 #  can run this as many times as you like and cut DNS over only once you are
-#  happy with what landed.
+#  happy with what landed. The TARGET is another matter: every run replaces its
+#  users, admins, proxies, hosts and inbounds, and it asks first.
 #
 #  Three things have to move, and only the first is in the database dump.
 #  Migrations that copy just the dump look like they worked and then serve
@@ -42,21 +42,27 @@ TARGET=""; TUSER=""; TPASS=""
 PANEL_CONTAINER=""; MYSQL_CONTAINER=""; DB_NAME=""
 WORK_DIR="${MIGRATE_WORK_DIR:-/var/tmp/rapido-migrate}"
 DRY_RUN=0
+REPLACE_TARGET=0
 
 usage() {
     cat <<EOF
 ${C_BOLD}migrate-from-rapido.sh${C_RESET} - move a Python Rapido/Marzban panel to Rapido-Go
 
-  --target URL       Rapido-Go panel base URL      (required)
+  --target URL       Rapido-Go panel base URL, https:// (required)
   --user NAME        a sudo admin on the TARGET    (required)
-  --pass SECRET      that admin's password         (required)
+  --pass SECRET      that admin's password (asked for if omitted; passed
+                     here it shows in the process list and shell history)
   --panel NAME       old panel container   (default: autodetect)
   --mysql NAME       old MySQL container   (default: autodetect)
   --db NAME          old database name     (default: autodetect)
   --dry-run          export and report, push nothing
+  --replace-target-data
+                     replace the target's data without asking (unattended runs)
   -h, --help         this text
 
 Run it on the OLD panel server. Nothing on the old panel is modified.
+The target's certificate must verify. For a private CA, point CURL_CA_BUNDLE
+at its root certificate.
 EOF
 }
 
@@ -69,14 +75,27 @@ while [ $# -gt 0 ]; do
         --mysql)  MYSQL_CONTAINER="${2:-}"; shift 2 ;;
         --db)     DB_NAME="${2:-}"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
+        --replace-target-data) REPLACE_TARGET=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "Unknown option: $1 (see --help)" ;;
     esac
 done
 
 [ -n "$TARGET" ] || { usage; exit 1; }
+# The sudo password and the whole customer database go to this address.
+case "$TARGET" in
+    https://*) ;;
+    *) die "--target must be an https:// URL: a sudo admin's password and every customer's data are sent to it." ;;
+esac
 if [ "$DRY_RUN" -eq 0 ]; then
-    [ -n "$TUSER" ] && [ -n "$TPASS" ] || die "--user and --pass are required unless --dry-run"
+    [ -n "$TUSER" ] || die "--user is required unless --dry-run"
+    if [ -z "$TPASS" ]; then
+        [ -t 0 ] || die "--pass is required when there is no terminal to ask on"
+        printf "Password for %s on %s: " "$TUSER" "$TARGET"
+        read -rs TPASS || TPASS=""
+        printf "\n"
+        [ -n "$TPASS" ] || die "No password given."
+    fi
 fi
 TARGET="${TARGET%/}"
 
@@ -267,18 +286,38 @@ source_counts() {
         (SELECT COUNT(*) FROM proxies));"
 }
 
+# The password and the token go to curl on stdin, never as an argument any local
+# user could read from the process list; -S so that a certificate curl refuses
+# says so instead of looking like a failed login.
 api() {  # api METHOD PATH [curl args...]
     local method="$1" path="$2"; shift 2
-    curl -sk -X "$method" "$TARGET$path" -H "Authorization: Bearer $TOKEN" "$@"
+    printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" \
+        | curl -sS -K - -X "$method" "$TARGET$path" "$@"
 }
 
 login() {
     log "Logging in to $TARGET ..."
-    TOKEN=$(curl -sk -X POST "$TARGET/api/admin/token" \
-        --data-urlencode "username=$TUSER" --data-urlencode "password=$TPASS" \
+    TOKEN=$(printf '%s' "$TPASS" | curl -sS -X POST "$TARGET/api/admin/token" \
+        --data-urlencode "username=$TUSER" --data-urlencode "password@-" \
         | python3 -c 'import json,sys; print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null || true)
-    [ -n "$TOKEN" ] || die "Login failed on the target panel - check --user/--pass and that $TARGET is reachable."
+    # Anything but token characters is dropped: it ends up in a curl config.
+    TOKEN="$(printf '%s' "$TOKEN" | tr -cd 'A-Za-z0-9._~+/=-')"
+    [ -n "$TOKEN" ] || die "Login failed on the target panel - check --user/--pass, that $TARGET is reachable and that its certificate verifies."
     ok "Authenticated."
+}
+
+# Every run wipes these tables on the target, whatever is in them by then.
+confirm_replace() {
+    [ "$REPLACE_TARGET" -eq 1 ] && return 0
+    [ -t 0 ] || die "Nothing was pushed: this replaces data on the target and there is no terminal to ask on. To do it unattended, add --replace-target-data."
+    warn "This REPLACES data on $TARGET with the old panel's:"
+    warn "  every admin, user, proxy, host, inbound and user template there is wiped first,"
+    warn "  so anything created or changed on the target since the last run is lost,"
+    warn "  and subscription links of users who are not in the old panel stop working."
+    warn "The target saves a safety backup of its database first (see its dashboard). The old panel is not touched."
+    printf "Type 'replace' to continue: "
+    local answer; read -r answer || answer=""
+    [ "$answer" = "replace" ] || die "Aborted - nothing was pushed."
 }
 
 push() {
@@ -365,6 +404,7 @@ main() {
     fi
 
     login
+    confirm_replace
     push
     verify
 
