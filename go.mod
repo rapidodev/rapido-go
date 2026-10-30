@@ -1,29 +1,38 @@
 module github.com/legendary1205/rapido-go
 
-go 1.27.0
+go 1.27.3
 
 require (
+	github.com/anytls/sing-anytls v0.0.11
 	github.com/gin-gonic/gin v1.12.0
+	github.com/go-chi/chi/v5 v5.2.5
 	github.com/goccy/go-yaml v1.19.2
+	github.com/gofrs/uuid/v5 v5.5.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/redis/go-redis/v9 v9.22.0
+	github.com/sagernet/netlink v0.0.0-20260814022025-64455d367bbf
 	github.com/sagernet/sing v0.9.0-beta.4
 	github.com/sagernet/sing-box v1.14.0
 	github.com/sagernet/sing-mux v0.3.5
+	github.com/sagernet/sing-quic v0.7.0-beta.4
 	github.com/sagernet/sing-shadowsocks v0.2.8
+	github.com/sagernet/sing-shadowtls v0.2.1
+	github.com/sagernet/sing-snell v0.0.0-20260829071736-20f2eaec77c3
+	github.com/sagernet/sing-tun v0.9.0-beta.4
 	github.com/sagernet/sing-vmess v0.2.8-0.20250909125414-3aed155119a1
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
-	golang.org/x/crypto v0.56.0
-	golang.org/x/sync v0.22.0
-	golang.org/x/sys v0.47.0
+	golang.org/x/crypto v0.58.0
+	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f
+	golang.org/x/net v0.62.0
+	golang.org/x/sync v0.24.0
+	golang.org/x/sys v0.49.0
 )
 
 require (
 	github.com/ajg/form v1.5.1 // indirect
 	github.com/andybalholm/brotli v1.1.0 // indirect
-	github.com/anytls/sing-anytls v0.0.11 // indirect
 	github.com/bytedance/gopkg v0.1.3 // indirect
 	github.com/bytedance/sonic v1.15.0 // indirect
 	github.com/bytedance/sonic/loader v0.5.0 // indirect
@@ -38,7 +47,6 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.12 // indirect
 	github.com/gin-contrib/sse v1.1.0 // indirect
-	github.com/go-chi/chi/v5 v5.2.5 // indirect
 	github.com/go-chi/render v1.0.3 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
@@ -48,7 +56,6 @@ require (
 	github.com/gobwas/pool v0.2.1 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
-	github.com/gofrs/uuid/v5 v5.5.1 // indirect
 	github.com/google/btree v1.1.3 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/gopacket v1.1.19 // indirect
@@ -81,18 +88,13 @@ require (
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
-	github.com/quic-go/quic-go v0.59.0 // indirect
+	github.com/quic-go/quic-go v0.59.1 // indirect
 	github.com/sagernet/bbolt v0.0.0-20260823094646-e24805439c9c // indirect
 	github.com/sagernet/fswatch v0.1.2 // indirect
 	github.com/sagernet/gvisor v0.0.0-20260727.0-sing-box-mod.1 // indirect
-	github.com/sagernet/netlink v0.0.0-20260814022025-64455d367bbf // indirect
 	github.com/sagernet/nftables v0.3.0-mod.4 // indirect
 	github.com/sagernet/quic-go v0.61.0-sing-box-mod.7 // indirect
-	github.com/sagernet/sing-quic v0.7.0-beta.4 // indirect
 	github.com/sagernet/sing-shadowsocks2 v0.2.1 // indirect
-	github.com/sagernet/sing-shadowtls v0.2.1 // indirect
-	github.com/sagernet/sing-snell v0.0.0-20260829071736-20f2eaec77c3 // indirect
-	github.com/sagernet/sing-tun v0.9.0-beta.4 // indirect
 	github.com/sagernet/sing-usbip v0.0.0-20260817040617-28bd42667eca // indirect
 	github.com/sagernet/smux v1.5.50-sing-box-mod.1 // indirect
 	github.com/sagernet/ws v0.0.0-20231204124109-acfe8907c854 // indirect
@@ -107,12 +109,10 @@ require (
 	go.uber.org/zap/exp v0.3.0 // indirect
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
 	golang.org/x/arch v0.22.0 // indirect
-	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
-	golang.org/x/mod v0.38.0 // indirect
-	golang.org/x/net v0.57.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/mod v0.41.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
-	golang.org/x/tools v0.48.0 // indirect
+	golang.org/x/tools v0.51.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251202230838-ff82c1b0f217 // indirect
 	google.golang.org/grpc v1.79.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
