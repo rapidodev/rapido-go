@@ -23,6 +23,9 @@ export default defineConfig({
     setupFiles: ["./src/setupTests.ts"],
     css: false,
     globals: true,
+    // The editor's form tests type field by field and take seconds on a fast
+    // machine, so a busy CI runner could fail them on the default 5s alone.
+    testTimeout: 20_000,
   },
   define: {
     // Locale JSON is served from a stable, unhashed URL, unlike every other

@@ -40,6 +40,17 @@ jobs:
       - run: sqlc generate
       - run: go install -tags 'no_clickhouse no_libsql no_mssql no_mysql no_sqlite3 no_vertica no_ydb' github.com/pressly/goose/v3/cmd/goose@v3.28.0
       - run: goose -dir internal/db/migrations postgres "$TEST_DATABASE_URL" up
+      # As the panel image has them: the same major as the server. A runner's own can
+      # be newer (Ubuntu 26 has 18), and a dump from those doesn't restore into this one.
+      - name: Use the database server's own pg_dump and psql
+        run: |
+          mkdir -p "$RUNNER_TEMP/pgtools"
+          for tool in pg_dump psql; do
+            printf '#!/bin/sh\nexec docker exec -i -e PGPASSWORD %s %s "$@"\n' "${{ job.services.postgres.id }}" "$tool" > "$RUNNER_TEMP/pgtools/$tool"
+            chmod +x "$RUNNER_TEMP/pgtools/$tool"
+          done
+          "$RUNNER_TEMP/pgtools/psql" --version
+          echo "$RUNNER_TEMP/pgtools" >> "$GITHUB_PATH"
       - run: go vet ./...
       - run: go test -race -p 1 -timeout 15m ./...
       - name: Security and delivery coverage
