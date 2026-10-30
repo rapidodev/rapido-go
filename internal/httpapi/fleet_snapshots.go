@@ -56,6 +56,10 @@ func (h *Handler) restoreFleetSnapshot(ctx context.Context, raw []byte) (coreCon
 		return coreConfigDTO{}, fmt.Errorf("unsupported snapshot or missing transaction")
 	}
 	q := h.store.Queries
+	keptTags, err := q.ListInboundTags(ctx)
+	if err != nil {
+		return coreConfigDTO{}, err
+	}
 	for _, restore := range []func(context.Context, []byte) error{
 		q.RestoreFleetInbounds, q.DeleteNonSnapshotInbounds,
 	} {
@@ -69,16 +73,10 @@ func (h *Handler) restoreFleetSnapshot(ctx context.Context, raw []byte) (coreCon
 	if err := q.RestoreFleetHosts(ctx, raw); err != nil {
 		return coreConfigDTO{}, err
 	}
-	if err := q.ClearFleetExclusions(ctx); err != nil {
+	if err := q.RestoreFleetExclusions(ctx, generated.RestoreFleetExclusionsParams{Config: raw, KeptTags: keptTags}); err != nil {
 		return coreConfigDTO{}, err
 	}
-	if err := q.RestoreFleetExclusions(ctx, raw); err != nil {
-		return coreConfigDTO{}, err
-	}
-	if err := q.ClearFleetTemplateInbounds(ctx); err != nil {
-		return coreConfigDTO{}, err
-	}
-	if err := q.RestoreFleetTemplateInbounds(ctx, raw); err != nil {
+	if err := q.RestoreFleetTemplateInbounds(ctx, generated.RestoreFleetTemplateInboundsParams{Config: raw, KeptTags: keptTags}); err != nil {
 		return coreConfigDTO{}, err
 	}
 	if err := q.RestoreFleetNodeProfiles(ctx, raw); err != nil {

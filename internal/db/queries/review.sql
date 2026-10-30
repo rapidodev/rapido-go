@@ -15,13 +15,18 @@ WHERE status = 'active'
 -- name: GetOnHoldUsers :many
 SELECT * FROM users WHERE status = 'on_hold';
 
--- name: UpdateUserStatusOnly :exec
--- Mirrors crud.update_user_status exactly - distinct from UpdateUserCore
--- (used by the admin-facing PUT /user endpoint, which never touches
--- last_status_change) because only specific flows like this job stamp it.
-UPDATE users SET status = $2, last_status_change = now() WHERE id = $1;
+-- name: ApplyReviewedStatus :execrows
+-- Limits or expires a user the job read a moment ago, if that still holds: a
+-- renewal in between would otherwise leave them limited with no usage, and
+-- nothing ever flips that back.
+UPDATE users SET status = sqlc.arg(status)::text, last_status_change = now()
+WHERE id = sqlc.arg(id) AND status = 'active' AND CASE sqlc.arg(status)::text
+    WHEN 'limited' THEN data_limit > 0 AND used_traffic >= data_limit
+    WHEN 'expired' THEN expire IS NOT NULL AND expire <> 0 AND expire <= extract(epoch FROM now())
+    ELSE false
+END;
 
--- name: ActivateOnHoldUser :exec
+-- name: ActivateOnHoldUser :execrows
 -- Combines crud.update_user_status(active) + crud.start_user_expire into
 -- one statement - both mutate the same row with no observable
 -- intermediate state, so there's no reason to round-trip twice. Sets
@@ -33,7 +38,7 @@ UPDATE users SET
     expire = extract(epoch FROM now())::int + on_hold_expire_duration,
     on_hold_expire_duration = NULL,
     on_hold_timeout = NULL
-WHERE id = $1;
+WHERE id = $1 AND status = 'on_hold';
 
 -- name: ClearNodeUserUsages :exec
 -- Mirrors crud._clear_node_usages - called by both the manual reset-usage
@@ -47,10 +52,17 @@ DELETE FROM node_user_usages WHERE user_id = $1;
 -- add_remaining_traffic discards it (see the Go rewrite's memory note
 -- flagging this field's name as likely inverted from its actual effect -
 -- ported as-is, not fixed, since nothing here changes that behavior).
+--
+-- A plan that names no limit or no expiry leaves that one as it is. What's left
+-- of the old limit is never below zero and an unlimited user has none, so a user
+-- past their limit doesn't start the new plan in debt, or with no limit at all.
 UPDATE users u SET
     status = 'active',
-    data_limit = np.data_limit + (CASE WHEN np.add_remaining_traffic THEN 0 ELSE u.data_limit - u.used_traffic END),
-    expire = extract(epoch FROM now())::int + np.expire,
+    last_status_change = now(),
+    data_limit = CASE WHEN np.data_limit > 0
+        THEN np.data_limit + (CASE WHEN np.add_remaining_traffic THEN 0 ELSE GREATEST(COALESCE(u.data_limit, 0) - u.used_traffic, 0) END)
+        ELSE u.data_limit END,
+    expire = CASE WHEN COALESCE(np.expire, 0) > 0 THEN extract(epoch FROM now())::int + np.expire ELSE u.expire END,
     used_traffic = 0
 FROM next_plans np
 WHERE u.id = $1 AND np.user_id = u.id

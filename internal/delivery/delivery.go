@@ -5,13 +5,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -100,7 +104,7 @@ func sendDelivery(ctx context.Context, client *http.Client, kind string, id int6
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
+		return deliveryRefused{status: resp.StatusCode}
 	}
 	if kind == "gateway" {
 		var result struct {
@@ -117,6 +121,46 @@ func sendDelivery(ctx context.Context, client *http.Client, kind string, id int6
 	}
 	return nil
 }
+
+// refuseInternalAddress is a net.Dialer Control: it sees the address actually
+// being connected to, after DNS, so a name resolving to one of these gains nothing.
+func refuseInternalAddress(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return err
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return err
+	}
+	ip = ip.Unmap()
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return fmt.Errorf("refusing to deliver to internal address %s", ip)
+	}
+	return nil
+}
+
+// deliveryRefused is the other end answering, with something other than success.
+type deliveryRefused struct{ status int }
+
+func (e deliveryRefused) Error() string { return fmt.Sprintf("HTTP %d", e.status) }
+
+// permanent is an answer that retrying won't change: the request itself is what's
+// being refused. An auth failure isn't one, since someone can fix the secret and
+// the change then still arrives, in order.
+func (e deliveryRefused) permanent() bool {
+	switch e.status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
+		return false
+	}
+	return e.status >= 400 && e.status < 500
+}
+
+// maxRefusedAttempts is how many times a permanently refused delivery is tried:
+// with the backoff below that's hours, enough for a passing misconfiguration. In a
+// gateway's first-in-first-out order, keeping it forever would block every later
+// change to that user on that peer.
+const maxRefusedAttempts = 20
 
 // Run claims short leases with SKIP LOCKED. A crash leaves a retryable record.
 // Gateway destinations retain FIFO order; older failed changes block newer ones.
@@ -135,6 +179,18 @@ func Run(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) {
 }
 func worker(ctx context.Context, pool *pgxpool.Pool, kind string, logger *slog.Logger) {
 	client := &http.Client{Timeout: 10 * time.Second}
+	if kind == "notification" {
+		// A webhook goes wherever an admin typed. It can't be allowed to reach the
+		// panel itself or a cloud provider's metadata service. Private ranges stay
+		// open: a bot on the same network is an ordinary setup.
+		client.Transport = &http.Transport{
+			Proxy:               http.ProxyFromEnvironment,
+			DialContext:         (&net.Dialer{Timeout: 10 * time.Second, Control: refuseInternalAddress}).DialContext,
+			TLSHandshakeTimeout: 10 * time.Second,
+			IdleConnTimeout:     90 * time.Second,
+			MaxIdleConns:        16,
+		}
+	}
 	timer := time.NewTicker(time.Second)
 	defer timer.Stop()
 	for {
@@ -163,10 +219,13 @@ func worker(ctx context.Context, pool *pgxpool.Pool, kind string, logger *slog.L
 			}
 			if err == nil {
 				_, err = pool.Exec(ctx, "DELETE FROM delivery_outbox WHERE id=$1", id)
+			} else if refused := (deliveryRefused{}); errors.As(err, &refused) && refused.permanent() && attempts >= maxRefusedAttempts {
+				_, _ = pool.Exec(ctx, "DELETE FROM delivery_outbox WHERE id=$1", id)
+				logger.Error("outbox delivery dropped: refused every time", "delivery_id", id, "kind", kind, "status", refused.status, "attempts", attempts)
 			} else {
 				delay := time.Duration(1<<min(attempts, 10)) * time.Second
 				_, _ = pool.Exec(ctx, "UPDATE delivery_outbox SET available_at=now()+$2::interval WHERE id=$1", id, fmt.Sprintf("%f seconds", delay.Seconds()))
-				logger.Warn("outbox delivery deferred", "delivery_id", id, "kind", kind, "attempt", attempts)
+				logger.Warn("outbox delivery deferred", "delivery_id", id, "kind", kind, "attempt", attempts, "error", controlurl.RedactError(err))
 			}
 		}
 	}

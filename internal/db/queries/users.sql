@@ -53,6 +53,9 @@ DELETE FROM users WHERE id = $1;
 -- bumped to now(), matching the unconditional `dbuser.edit_at =
 -- datetime.utcnow()` at the end of the current update_user.
 UPDATE users SET
+    -- Auto-delete counts from this: a status set here must restart its clock
+    -- like one set by the review job does.
+    last_status_change = CASE WHEN status IS DISTINCT FROM $2 THEN now() ELSE last_status_change END,
     status = $2,
     data_limit = $3,
     data_limit_reset_strategy = $4,
@@ -69,7 +72,7 @@ RETURNING *;
 -- used by both the manual reset-usage endpoint and NextPlan firing (Phase
 -- 5) - status is passed in already computed (crud.reset_user_data_usage
 -- reactivates unless the user is expired/disabled).
-UPDATE users SET used_traffic = 0, status = $2 WHERE id = $1
+UPDATE users SET used_traffic = 0, status = $2, last_usage_reset_at = now() WHERE id = $1
 RETURNING *;
 
 -- name: UpdateUserSub :exec

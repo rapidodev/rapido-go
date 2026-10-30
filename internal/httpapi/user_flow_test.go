@@ -135,14 +135,12 @@ func TestModifyUserNextPlanUpsertAndClear(t *testing.T) {
 		t.Fatal("next_plan was not persisted")
 	}
 
-	// Omitting next_plan on a later PUT clears it - matches crud.update_user's
-	// if/elif (Python can't distinguish "omitted" from "explicit null" either).
-	resp = doRequest(t, router, "PUT", "/api/user/nextplan_test", token, map[string]interface{}{"note": "unrelated edit"})
+	resp = doRequest(t, router, "PUT", "/api/user/nextplan_test", token, map[string]interface{}{"next_plan": nil})
 	if resp.Code != 200 {
-		t.Fatalf("clear next_plan via omission: %d %v", resp.Code, resp.Body)
+		t.Fatalf("clear next_plan: %d %v", resp.Code, resp.Body)
 	}
 	if resp.Body["next_plan"] != nil {
-		t.Errorf("next_plan = %v, want cleared after a PUT that omits it", resp.Body["next_plan"])
+		t.Errorf("next_plan = %v, want cleared by an explicit null", resp.Body["next_plan"])
 	}
 }
 

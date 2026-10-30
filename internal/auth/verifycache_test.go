@@ -1,6 +1,9 @@
 package auth
 
 import (
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -136,5 +139,33 @@ func TestVerifyCacheWithRealBcrypt(t *testing.T) {
 	}
 	if c.Verify("alice", "nope", hashed) || c.Verify("alice", "nope", hashed) {
 		t.Error("wrong password accepted")
+	}
+}
+
+func TestVerifyRunsOnlyAFewBcryptsAtOnce(t *testing.T) {
+	var running, peak atomic.Int32
+	c := NewVerifyCacheWith(func(plain, hashed string) bool {
+		now := running.Add(1)
+		for {
+			seen := peak.Load()
+			if now <= seen || peak.CompareAndSwap(seen, now) {
+				break
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+		running.Add(-1)
+		return false
+	})
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			c.Verify("u", fmt.Sprint(i), "h")
+		}(i)
+	}
+	wg.Wait()
+	if int(peak.Load()) > cap(c.slots) {
+		t.Errorf("%d ran at once, the limit is %d", peak.Load(), cap(c.slots))
 	}
 }

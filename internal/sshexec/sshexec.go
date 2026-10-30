@@ -113,7 +113,7 @@ func (c *Client) Run(ctx context.Context, command string) (string, error) {
 	}
 	ch := make(chan result, 1)
 	go func() {
-		out, err := session.CombinedOutput(command)
+		out, err := cappedCombinedOutput(session, command)
 		ch <- result{out, err}
 	}()
 	select {
@@ -128,6 +128,51 @@ func (c *Client) Run(ctx context.Context, command string) (string, error) {
 	}
 }
 
+// A remote host is not trusted to keep its output small: read uncapped, a command
+// writing forever would run the panel out of memory.
+const (
+	maxCommandOutput = 4 << 20
+	maxFetchedFile   = 64 << 20
+)
+
+// cappedBuffer keeps the first limit bytes and quietly drops the rest. It must
+// keep reporting success: a writer that fails would kill the session's copying.
+type cappedBuffer struct {
+	buf        bytes.Buffer
+	limit      int
+	overflowed bool
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if room := b.limit - b.buf.Len(); room < len(p) {
+		b.overflowed = true
+		b.buf.Write(p[:max(room, 0)])
+		return len(p), nil
+	}
+	b.buf.Write(p)
+	return len(p), nil
+}
+
+// cappedCombinedOutput is session.CombinedOutput with a limit.
+func cappedCombinedOutput(session *ssh.Session, command string) ([]byte, error) {
+	var mu sync.Mutex
+	out := cappedBuffer{limit: maxCommandOutput}
+	writer := writerFunc(func(p []byte) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return out.Write(p)
+	})
+	session.Stdout, session.Stderr = writer, writer
+	err := session.Run(command)
+	mu.Lock()
+	defer mu.Unlock()
+	return out.buf.Bytes(), err
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
 // RunOut runs command and returns its stdout only (stderr is dropped), for
 // fetching a file's raw bytes - Run's combined output would mix any warning
 // into the data.
@@ -138,7 +183,7 @@ func (c *Client) RunOut(ctx context.Context, command string) ([]byte, error) {
 	}
 	defer session.Close()
 
-	var stdout bytes.Buffer
+	stdout := cappedBuffer{limit: maxFetchedFile}
 	session.Stdout = &stdout
 
 	ch := make(chan error, 1)
@@ -151,7 +196,10 @@ func (c *Client) RunOut(ctx context.Context, command string) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("sshexec: command failed: %w", err)
 		}
-		return stdout.Bytes(), nil
+		if stdout.overflowed {
+			return nil, fmt.Errorf("sshexec: output is larger than %d bytes", maxFetchedFile)
+		}
+		return stdout.buf.Bytes(), nil
 	}
 }
 
@@ -172,7 +220,7 @@ func (c *Client) RunStdin(ctx context.Context, command string, stdin []byte) (st
 	}
 	ch := make(chan result, 1)
 	go func() {
-		out, err := session.CombinedOutput(command)
+		out, err := cappedCombinedOutput(session, command)
 		ch <- result{out, err}
 	}()
 	select {

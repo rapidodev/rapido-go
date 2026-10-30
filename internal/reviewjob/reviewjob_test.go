@@ -336,3 +336,53 @@ func TestStatusChangeFiresReportOnNextPlanFire(t *testing.T) {
 		t.Errorf("discord payload missing AutoReset marker: %s", bodies[0])
 	}
 }
+
+// One user whose next plan can't be applied must not leave everyone after them
+// unreviewed, on every tick, until somebody fixes that row by hand.
+func TestOneFailingUserDoesNotStopTheReview(t *testing.T) {
+	h := newTestHarness(t)
+	ctx := context.Background()
+	broken := h.createTestUser(t, "aa_broken_plan", "active", 1000, 1000, 0)
+	if _, err := h.q.UpsertNextPlan(ctx, generated.UpsertNextPlanParams{
+		UserID: broken.ID, DataLimit: 5000, Expire: pgtype.Int4{Int32: 2147483000, Valid: true}, FireOnEither: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	after := h.createTestUser(t, "zz_after_it", "active", 1000, 1000, 0)
+
+	if err := review(ctx, h.q, testDispatcher(h.q), testLogger()); err != nil {
+		t.Fatalf("review: %v", err)
+	}
+	got, err := h.q.GetUserByID(ctx, after.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "limited" {
+		t.Errorf("the user after the failing one: status = %q, want limited", got.Status)
+	}
+}
+
+// A renewal between the job's read and its write must win: limiting anyway would
+// leave the user limited with no usage, and nothing ever flips that back.
+func TestReviewDoesNotUndoARenewalMadeSinceItRead(t *testing.T) {
+	h := newTestHarness(t)
+	ctx := context.Background()
+	u := h.createTestUser(t, "renewed_meanwhile", "active", 1000, 1000, 0)
+	h.execRaw(t, "UPDATE users SET used_traffic = 0 WHERE id = $1", u.ID)
+
+	changed, err := h.q.ApplyReviewedStatus(ctx, generated.ApplyReviewedStatusParams{ID: u.ID, Status: "limited"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed != 0 {
+		t.Error("a user no longer over their limit was limited")
+	}
+	expired := h.createTestUser(t, "extended_meanwhile", "active", 0, 0, time.Now().Add(time.Hour).Unix())
+	changed, err = h.q.ApplyReviewedStatus(ctx, generated.ApplyReviewedStatusParams{ID: expired.ID, Status: "expired"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed != 0 {
+		t.Error("a user whose expiry is in the future was expired")
+	}
+}

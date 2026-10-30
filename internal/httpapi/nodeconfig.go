@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -251,10 +252,29 @@ func (h *Handler) loadNodeConfigSnapshot(ctx context.Context, version int64) (*n
 
 	usersByProtocol := make(map[string][]nodeConfigUserSpec)
 	excludedByUser := map[string]map[string]bool{}
+	credentials := make(map[string]bool, len(proxyRows))
+	var unservable []string
 	for _, p := range proxyRows {
 		settings, err := proxysettings.FromStored(proxysettings.ProxyType(p.Type), p.Settings)
 		if err != nil {
 			continue // a malformed row shouldn't take down every other user's config
+		}
+		// Nor should one a core can't serve: one bad entry costs a node the
+		// whole list, so every later add, revoke and limit stops reaching it.
+		if err := settings.Validate(); err != nil {
+			unservable = append(unservable, p.Username+" ("+p.Type+"): "+err.Error())
+			continue
+		}
+		// Two users sharing a credential are one account to a core. Ordered by
+		// user id, so the older one keeps it; the other's client still connects,
+		// and its traffic counts against the older user until this is resolved.
+		if field, value := settings.Credential(); field != "" {
+			key := p.Type + "/" + value
+			if credentials[key] {
+				unservable = append(unservable, p.Username+" ("+p.Type+"): shares a credential with an older user")
+				continue
+			}
+			credentials[key] = true
 		}
 		denied := map[string]bool{}
 		for _, tag := range p.ExcludedTags {
@@ -384,6 +404,8 @@ func (h *Handler) loadNodeConfigSnapshot(ctx context.Context, version int64) (*n
 		inbounds = append(inbounds, spec)
 	}
 
+	h.nodeConfig.noteUnservable(h.logger, unservable)
+
 	// One encode per protocol, reused by every inbound of that protocol - see
 	// nodeConfigInboundWire for why.
 	usersJSON := make(map[string]json.RawMessage, len(usersByProtocol))
@@ -409,12 +431,67 @@ func (h *Handler) loadNodeConfigSnapshot(ctx context.Context, version int64) (*n
 // marshalling it a second time purely to reproduce what this already had in
 // hand.
 func (s *nodeConfigSnapshot) render(p nodeProfile) (nodeConfigResponse, []byte, error) {
-	return s.renderSchema(p, false)
+	return s.renderSchema(p, nodeConfigSchema{})
 }
 
-func (s *nodeConfigSnapshot) renderSchema(p nodeProfile, compact bool) (nodeConfigResponse, []byte, error) {
+// nodeConfigSchema is what a pulling agent says it understands, as ?schema=N.
+type nodeConfigSchema struct {
+	// compact: user lists as shared sets (2+), and deltas on top of them (3+).
+	compact bool
+	delta   bool
+	// extendedRules: the routing-rule matchers ruleUsesExtendedMatchers names (4+).
+	extendedRules bool
+}
+
+func parseNodeConfigSchema(raw string) nodeConfigSchema {
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return nodeConfigSchema{}
+	}
+	return nodeConfigSchema{compact: n >= 2, delta: n >= 3, extendedRules: n >= 4}
+}
+
+// cacheKey files a rendered payload by everything that shapes its bytes.
+func (s nodeConfigSchema) cacheKey(p nodeProfile) string {
+	key := p.key()
+	if s.compact {
+		key += "/v2"
+	}
+	if s.extendedRules {
+		key += "/rules2"
+	}
+	return key
+}
+
+// rulesFor leaves out the rules an agent can't honour. An older agent ignores a
+// matcher it doesn't know, so it would apply what is left of such a rule to far
+// more traffic than the rule says; not sending the rule fails towards the routing
+// around it. A config using none of these is returned untouched, so its bytes and
+// version stay the same for every agent and nothing restarts over this.
+func (s nodeConfigSchema) rulesFor(core coreConfigDTO) coreConfigDTO {
+	if s.extendedRules {
+		return core
+	}
+	for i, rule := range core.RoutingRules {
+		if !ruleUsesExtendedMatchers(rule) {
+			continue
+		}
+		kept := append(make([]routingRuleDTO, 0, len(core.RoutingRules)-1), core.RoutingRules[:i]...)
+		for _, later := range core.RoutingRules[i+1:] {
+			if !ruleUsesExtendedMatchers(later) {
+				kept = append(kept, later)
+			}
+		}
+		core.RoutingRules = kept
+		break
+	}
+	return core
+}
+
+func (s *nodeConfigSnapshot) renderSchema(p nodeProfile, schema nodeConfigSchema) (nodeConfigResponse, []byte, error) {
+	compact := schema.compact
 	inbounds := p.filterInbounds(s.inbounds)
-	core := p.CoreOverrides.apply(s.core)
+	core := schema.rulesFor(p.CoreOverrides.apply(s.core))
 	payload := nodeConfigResponse{Inbounds: inbounds, Core: core}
 
 	// emptyUsers matches what the spec form emits for an inbound with no users.
@@ -567,7 +644,8 @@ func (h *Handler) handleGetNodeConfig(c *gin.Context) {
 		c.JSON(http.StatusOK, nodeConfigResponse{Version: "disabled", Inbounds: []nodeConfigInboundSpec{}, Core: coreConfigDTO{LogLevel: "warn"}})
 		return
 	}
-	entry, err := h.cachedNodeConfigSchema(ctx, profile, c.Query("schema") == "2" || c.Query("schema") == "3")
+	schema := parseNodeConfigSchema(c.Query("schema"))
+	entry, err := h.cachedNodeConfigSchema(ctx, profile, schema)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not build node config"})
 		return
@@ -577,8 +655,8 @@ func (h *Handler) handleGetNodeConfig(c *gin.Context) {
 		c.AbortWithStatus(http.StatusNotModified)
 		return
 	}
-	if c.Query("schema") == "3" {
-		if delta := h.nodeConfig.delta(profile.key()+"/v2", c.GetHeader("If-None-Match"), entry); delta != nil {
+	if schema.delta {
+		if delta := h.nodeConfig.delta(schema.cacheKey(profile), c.GetHeader("If-None-Match"), entry); delta != nil {
 			c.Data(200, "application/json; charset=utf-8", delta)
 			return
 		}

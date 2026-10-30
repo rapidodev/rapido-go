@@ -22,7 +22,7 @@ func BenchmarkConfigRender50K(b *testing.B) {
 			b.ResetTimer()
 			var body []byte
 			for i := 0; i < b.N; i++ {
-				p, canonical, err := snap.renderSchema(nodeProfile{}, compact)
+				p, canonical, err := snap.renderSchema(nodeProfile{}, nodeConfigSchema{compact: compact})
 				if err != nil {
 					b.Fatal(err)
 				}

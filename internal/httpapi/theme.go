@@ -125,7 +125,8 @@ func (h *Handler) readTheme(c *gin.Context) (themeResponse, bool) {
 		_ = json.Unmarshal(row.Theme, &theme)
 	}
 	resp := themeResponse{Theme: theme, Allowed: allowedThemeValues()}
-	if row.UpdatedAt.Valid && row.UpdatedBy.Valid {
+	// Which admin changed it is for those who manage the panel; every reseller reads this.
+	if identity := auth.CurrentIdentity(c); identity != nil && identity.IsSudo && row.UpdatedAt.Valid && row.UpdatedBy.Valid {
 		t := row.UpdatedAt.Time
 		resp.UpdatedAt = &t
 		by := row.UpdatedBy.String

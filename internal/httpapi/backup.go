@@ -1,18 +1,24 @@
 package httpapi
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"github.com/google/uuid"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -102,12 +108,27 @@ func (h *Handler) handleListBackups(c *gin.Context) {
 // an OS subprocess call; it is not mocking business logic.
 type dumpDatabaseFn func(ctx context.Context, w *os.File) error
 
+// splitDatabasePassword moves the password out of a connection URL: pg_dump's and
+// psql's arguments can be read by anyone who can list processes on the host, and
+// PGPASSWORD is where those tools look for it instead.
+func splitDatabasePassword(databaseURL string) (address, password string) {
+	parsed, err := url.Parse(databaseURL)
+	if err != nil || parsed.User == nil {
+		return databaseURL, ""
+	}
+	password, _ = parsed.User.Password()
+	parsed.User = url.User(parsed.User.Username())
+	return parsed.String(), password
+}
+
 // execPgDump is the real implementation: runs pg_dump against databaseURL,
 // writing a gzip-compressed plain-SQL dump to w.
 func execPgDump(ctx context.Context, databaseURL string, w *os.File) error {
 	gz := gzip.NewWriter(w)
-	cmd := exec.CommandContext(ctx, "pg_dump", "--dbname="+databaseURL,
+	address, password := splitDatabasePassword(databaseURL)
+	cmd := exec.CommandContext(ctx, "pg_dump", "--dbname="+address,
 		"--format=plain", "--no-owner", "--no-privileges", "--clean", "--if-exists")
+	cmd.Env = append(os.Environ(), "PGPASSWORD="+password)
 	cmd.Stdout = gz
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -126,6 +147,7 @@ func (h *Handler) handleCreateBackup(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
 		return
 	}
+	h.pruneOldBackups()
 	c.JSON(http.StatusOK, info)
 }
 
@@ -133,30 +155,44 @@ func (h *Handler) handleCreateBackup(c *gin.Context) {
 // restore flow below can take a real safety backup of the current database
 // before ever touching it - the one genuine protection against "restored
 // the wrong file" - without going through gin.Context/HTTP at all.
+//
+// It leaves pruning to handleCreateBackup. A safety backup that pushed out the
+// oldest file could delete the very backup being restored, and a few failed
+// restores in a row would rotate every good backup away.
+//
+// A backup holds every credential the panel has, the secret that signs its
+// tokens among them, so nothing but the panel's own user may read it. It only
+// gets its final name once complete: a dump killed halfway must never look like
+// a backup someone could restore.
 func (h *Handler) createBackupNow(ctx context.Context) (backupInfo, error) {
-	if err := os.MkdirAll(h.backupDir, 0o755); err != nil {
+	if err := os.MkdirAll(h.backupDir, 0o700); err != nil {
 		return backupInfo{}, fmt.Errorf("could not create the backup directory: %w", err)
 	}
+	removeStaleBackupScratch(h.backupDir)
 
 	filename := newBackupFilename(time.Now())
 	path := filepath.Join(h.backupDir, filename)
-	f, err := os.Create(path)
+	scratch := filepath.Join(h.backupDir, backupScratchPrefix+filename)
+	f, err := os.OpenFile(scratch, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return backupInfo{}, fmt.Errorf("could not create the backup file: %w", err)
 	}
 
 	dumpErr := h.dumpDatabase(ctx, f)
+	syncErr := f.Sync()
 	closeErr := f.Close()
 	if dumpErr != nil {
-		os.Remove(path)
+		os.Remove(scratch)
 		return backupInfo{}, fmt.Errorf("backup failed: %w", dumpErr)
 	}
-	if closeErr != nil {
-		os.Remove(path)
-		return backupInfo{}, fmt.Errorf("could not finalize the backup file: %w", closeErr)
+	if err := errors.Join(syncErr, closeErr); err != nil {
+		os.Remove(scratch)
+		return backupInfo{}, fmt.Errorf("could not finalize the backup file: %w", err)
 	}
-
-	h.pruneOldBackups()
+	if err := os.Rename(scratch, path); err != nil {
+		os.Remove(scratch)
+		return backupInfo{}, fmt.Errorf("could not finalize the backup file: %w", err)
+	}
 
 	stat, err := os.Stat(path)
 	if err != nil {
@@ -164,6 +200,30 @@ func (h *Handler) createBackupNow(ctx context.Context) (backupInfo, error) {
 	}
 	createdAt, _ := backupCreatedAt(filename)
 	return backupInfo{Filename: filename, SizeBytes: stat.Size(), CreatedAt: createdAt}, nil
+}
+
+// backupScratchPrefix marks a file still being written: no backup filename can
+// start with it, so listing, downloading and restoring never see one.
+const backupScratchPrefix = ".partial-"
+
+// backupUploadPrefix is the same for an uploaded file while it's handled.
+const backupUploadPrefix = ".upload-"
+
+// removeStaleBackupScratch clears what a killed process left behind. The age
+// keeps it from touching a dump another request is writing right now.
+func removeStaleBackupScratch(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), backupScratchPrefix) && !strings.HasPrefix(entry.Name(), backupUploadPrefix) {
+			continue
+		}
+		if info, err := entry.Info(); err == nil && time.Since(info.ModTime()) > 6*time.Hour {
+			os.Remove(filepath.Join(dir, entry.Name()))
+		}
+	}
 }
 
 // pruneOldBackups keeps only the most recent h.backupKeep files, mirroring
@@ -200,6 +260,51 @@ func (h *Handler) handleDownloadBackup(c *gin.Context) {
 // logic without needing the real psql binary installed).
 type restoreDatabaseFn func(ctx context.Context, gz io.Reader) error
 
+// pgDumpTrailer is the last thing pg_dump writes. Without it the file ends where
+// the dump stopped, and psql would replace the database with that much of it.
+const pgDumpTrailer = "-- PostgreSQL database dump complete"
+
+// verifyCompleteDump reads a gzipped dump all the way through, before anything
+// is touched: a truncated file only fails once psql has already got most of it,
+// and whether psql then commits depends on where exactly it was cut.
+func verifyCompleteDump(file io.ReadSeeker) error {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	gzr, err := gzip.NewReader(file)
+	if err != nil {
+		return fmt.Errorf("the backup file is not a valid gzip stream: %w", err)
+	}
+	defer gzr.Close()
+	tail := &tailWriter{limit: 4096}
+	if _, err := io.Copy(tail, gzr); err != nil {
+		return fmt.Errorf("the backup file is damaged or incomplete: %w", err)
+	}
+	if !bytes.Contains(tail.buf, []byte(pgDumpTrailer)) {
+		return errors.New("the backup file is incomplete: pg_dump did not finish writing it")
+	}
+	_, err = file.Seek(0, io.SeekStart)
+	return err
+}
+
+// tailWriter keeps the last limit bytes written to it.
+type tailWriter struct {
+	limit int
+	buf   []byte
+}
+
+func (t *tailWriter) Write(p []byte) (int, error) {
+	if len(p) >= t.limit {
+		t.buf = append(t.buf[:0], p[len(p)-t.limit:]...)
+		return len(p), nil
+	}
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > t.limit {
+		t.buf = append(t.buf[:0], t.buf[len(t.buf)-t.limit:]...)
+	}
+	return len(p), nil
+}
+
 // pgDumpHeader is what every dump execPgDump produces starts with (pg_dump
 // always emits this comment first) - the one check handleRestoreUpload can
 // make without a real Postgres instance to hand the file to: does this at
@@ -209,12 +314,18 @@ const pgDumpHeader = "-- PostgreSQL database dump"
 
 // execPsqlRestore is the real implementation: replaces the ENTIRE public
 // schema and replays gz's (gzip-compressed) SQL against it, all inside one
-// psql --single-transaction session. Postgres DDL is transactional, so
-// DROP SCHEMA/CREATE SCHEMA is part of the same atomic unit as the actual
-// restore - a failure anywhere rolls back to the exact pre-restore state,
-// not a half-dropped one. This is prepended to the dump content rather
-// than run as a separate statement beforehand specifically to get that
-// atomicity for free from psql/Postgres instead of building it by hand.
+// transaction. Postgres DDL is transactional, so DROP SCHEMA/CREATE SCHEMA is
+// part of the same atomic unit as the actual restore - a failure anywhere rolls
+// back to the exact pre-restore state, not a half-dropped one. The transaction is
+// spelled out in the stream rather than left to psql's --single-transaction, which
+// commits at the end of its input, however that end came about: here COMMIT is
+// only sent once the whole dump has gone through, and without it psql just
+// disconnects and Postgres rolls everything back.
+//
+// The dump comes from a file, possibly an uploaded one, and psql would run any
+// shell command it finds in there (`\!`). \restrict turns every backslash command
+// off for the session; only \unrestrict with this one random key turns them back
+// on, and the file can't know that key.
 func execPsqlRestore(ctx context.Context, databaseURL string, gz io.Reader) error {
 	gzr, err := gzip.NewReader(gz)
 	if err != nil {
@@ -222,8 +333,18 @@ func execPsqlRestore(ctx context.Context, databaseURL string, gz io.Reader) erro
 	}
 	defer gzr.Close()
 
-	cmd := exec.CommandContext(ctx, "psql", "--dbname="+databaseURL,
-		"--set", "ON_ERROR_STOP=1", "--single-transaction", "-q")
+	key := make([]byte, 16)
+	if _, err := rand.Read(key); err != nil {
+		return fmt.Errorf("psql: %w", err)
+	}
+	preamble := "\\restrict " + hex.EncodeToString(key) + "\nBEGIN;\nDROP SCHEMA public CASCADE;\nCREATE SCHEMA public;\n"
+
+	runCtx, abort := context.WithCancel(ctx)
+	defer abort()
+	address, password := splitDatabasePassword(databaseURL)
+	cmd := exec.CommandContext(runCtx, "psql", "--dbname="+address,
+		"--set", "ON_ERROR_STOP=1", "-q")
+	cmd.Env = append(os.Environ(), "PGPASSWORD="+password)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("psql: %w", err)
@@ -245,22 +366,65 @@ func execPsqlRestore(ctx context.Context, databaseURL string, gz io.Reader) erro
 	copyDone := make(chan error, 1)
 	go func() {
 		defer stdin.Close()
-		if _, err := io.WriteString(stdin, "DROP SCHEMA public CASCADE;\nCREATE SCHEMA public;\n"); err != nil {
-			copyDone <- err
-			return
+		_, err := io.WriteString(stdin, preamble)
+		if err == nil {
+			err = copyDumpForRestrictedPsql(stdin, gzr)
 		}
-		_, err := io.Copy(stdin, gzr)
+		if err == nil {
+			_, err = io.WriteString(stdin, "\nCOMMIT;\n")
+		}
+		if err != nil {
+			abort()
+		}
 		copyDone <- err
 	}()
 	waitErr := cmd.Wait()
 	copyErr := <-copyDone
-	if waitErr != nil {
-		return fmt.Errorf("psql: %w: %s", waitErr, stderr.String())
-	}
 	if copyErr != nil {
 		return fmt.Errorf("streaming restore data to psql: %w", copyErr)
 	}
+	if waitErr != nil {
+		return fmt.Errorf("psql: %w: %s", waitErr, stderr.String())
+	}
 	return nil
+}
+
+// copyDumpForRestrictedPsql copies a dump, leaving out the \restrict and
+// \unrestrict lines pg_dump itself writes: inside our own \restrict they'd be
+// refused as the backslash commands they are. COPY data is passed through
+// untouched, where such a line would be somebody's data.
+func copyDumpForRestrictedPsql(dst io.Writer, src io.Reader) error {
+	reader := bufio.NewReaderSize(src, 1<<20)
+	atLineStart, inCopy := true, false
+	for {
+		chunk, err := reader.ReadSlice('\n')
+		skip := false
+		if atLineStart && len(chunk) > 0 {
+			switch {
+			case inCopy:
+				inCopy = !bytes.HasPrefix(chunk, []byte("\\."))
+			case bytes.HasPrefix(chunk, []byte("\\restrict ")) || bytes.HasPrefix(chunk, []byte("\\unrestrict ")):
+				skip = true
+			case bytes.HasPrefix(chunk, []byte("COPY ")) && bytes.HasSuffix(bytes.TrimRight(chunk, "\r\n"), []byte("FROM stdin;")):
+				inCopy = true
+			}
+		}
+		if len(chunk) > 0 {
+			atLineStart = chunk[len(chunk)-1] == '\n'
+			if !skip {
+				if _, werr := dst.Write(chunk); werr != nil {
+					return werr
+				}
+			}
+		}
+		switch {
+		case err == nil || errors.Is(err, bufio.ErrBufferFull):
+		case errors.Is(err, io.EOF):
+			return nil
+		default:
+			return err
+		}
+	}
 }
 
 type restoreResultDTO struct {
@@ -276,7 +440,10 @@ type restoreResultDTO struct {
 // gap between "we captured the safety backup" and "we started
 // overwriting" - otherwise a write landing in that gap would be silently
 // lost by the restore with no backup covering it either.
-func (h *Handler) restoreFromReader(ctx context.Context, gz io.Reader) (restoreResultDTO, error) {
+func (h *Handler) restoreFromReader(ctx context.Context, gz io.ReadSeeker) (restoreResultDTO, error) {
+	if err := verifyCompleteDump(gz); err != nil {
+		return restoreResultDTO{}, err
+	}
 	restoreTx, err := h.store.Pool.Begin(ctx)
 	if err != nil {
 		return restoreResultDTO{}, err
@@ -324,7 +491,9 @@ func (h *Handler) restoreFromReader(ctx context.Context, gz io.Reader) (restoreR
 	// replaced wholesale - flush rather than try to invalidate individual
 	// keys one at a time (see cache.Client.FlushAll's own doc comment on
 	// why a full flush is safe on this project's dedicated Redis instance).
-	if err := h.store.Cache.FlushAll(ctx); err != nil {
+	flushCtx, cancelFlush := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancelFlush()
+	if err := h.store.Cache.FlushAll(flushCtx); err != nil {
 		return restoreResultDTO{}, fmt.Errorf("database restored from %s, but the cache could not be flushed - restart the panel process: %w", safety.Filename, err)
 	}
 
@@ -394,11 +563,11 @@ func (h *Handler) handleRestoreUpload(c *gin.Context) {
 		return
 	}
 
-	if err := os.MkdirAll(h.backupDir, 0o755); err != nil {
+	if err := os.MkdirAll(h.backupDir, 0o700); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not create a scratch directory for the upload"})
 		return
 	}
-	tmpPath := filepath.Join(h.backupDir, ".upload-"+newBackupFilename(time.Now()))
+	tmpPath := filepath.Join(h.backupDir, backupUploadPrefix+newBackupFilename(time.Now()))
 	if err := c.SaveUploadedFile(fileHeader, tmpPath); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not save the uploaded file"})
 		return

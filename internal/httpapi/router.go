@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -64,7 +65,8 @@ type Handler struct {
 	loadCapacity  int
 	sortByLoad    bool
 
-	keyLoader       func(context.Context) ([]byte, error)
+	keyLoader       func(context.Context) (SigningKeys, error)
+	subscriptionKey atomic.Pointer[[]byte]
 	afterRestore    func(context.Context) error
 	databaseURL     string
 	backupDir       string
@@ -196,6 +198,7 @@ func NewRouter(h *Handler, logger *slog.Logger, allowedOrigins []string) *gin.En
 
 	requireAdmin := auth.RequireAdmin(h.issuer, h.store, h.sudoUsername)
 	requireSudo := auth.RequireSudo(h.issuer, h.store, h.sudoUsername)
+	requireOwner := auth.RequireOwner(h.issuer, h.store, h.sudoUsername)
 
 	api := r.Group("/api")
 	{
@@ -327,10 +330,10 @@ func NewRouter(h *Handler, logger *slog.Logger, allowedOrigins []string) *gin.En
 
 		api.GET("/settings/backup", requireSudo, h.handleListBackups)
 		api.POST("/settings/backup", requireSudo, h.handleCreateBackup)
-		api.GET("/settings/backup/:filename", requireSudo, h.handleDownloadBackup)
-		api.DELETE("/settings/backup/:filename", requireSudo, h.handleDeleteBackup)
-		api.POST("/settings/backup/:filename/restore", requireSudo, h.handleRestoreBackup)
-		api.POST("/settings/backup/restore-upload", requireSudo, h.handleRestoreUpload)
+		api.GET("/settings/backup/:filename", requireOwner, h.handleDownloadBackup)
+		api.DELETE("/settings/backup/:filename", requireOwner, h.handleDeleteBackup)
+		api.POST("/settings/backup/:filename/restore", requireOwner, h.handleRestoreBackup)
+		api.POST("/settings/backup/restore-upload", requireOwner, h.handleRestoreUpload)
 
 		api.GET("/settings/gateway", requireSudo, h.handleGetGatewaySettings)
 		api.PUT("/settings/gateway", requireSudo, h.handleUpdateGatewaySettings)
@@ -422,13 +425,29 @@ func slogMiddleware(logger *slog.Logger) gin.HandlerFunc {
 	}
 }
 
+// signingSecret is the key subscription links are signed with. Admin tokens have
+// their own, in h.issuer.
 func (h *Handler) signingSecret() []byte {
-	if h.issuer != nil {
-		return h.issuer.Secret()
+	if key := h.subscriptionKey.Load(); key != nil {
+		return *key
 	}
-	return h.jwtSecret
+	if h.jwtSecret != nil {
+		return h.jwtSecret
+	}
+	return h.issuer.Secret()
 }
-func (h *Handler) WithSigningKeyLoader(fn func(context.Context) ([]byte, error)) *Handler {
+
+// SigningKeys are the panel's two keys: Subscription signs subscription links, and
+// Admin, which took over at AdminSince, signs admin tokens. Before that one key
+// did both, and it's still honoured for tokens from then: see AcceptRetiredKey.
+type SigningKeys struct {
+	Subscription, Admin []byte
+	AdminSince          time.Time
+}
+
+// WithSigningKeyLoader sets where the keys are read from on every request, so a
+// database restore takes effect at once.
+func (h *Handler) WithSigningKeyLoader(fn func(context.Context) (SigningKeys, error)) *Handler {
 	h.keyLoader = fn
 	return h
 }
@@ -441,12 +460,14 @@ func (h *Handler) refreshSigningIdentity() gin.HandlerFunc {
 		path := c.Request.URL.Path
 		needsIdentity := strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/sub/")
 		if h.keyLoader != nil && needsIdentity {
-			secret, err := h.keyLoader(c.Request.Context())
+			keys, err := h.keyLoader(c.Request.Context())
 			if err != nil {
 				c.AbortWithStatusJSON(503, gin.H{"detail": "Signing identity unavailable"})
 				return
 			}
-			h.issuer.UpdateSecret(secret)
+			h.subscriptionKey.Store(&keys.Subscription)
+			h.issuer.UpdateSecret(keys.Admin)
+			h.issuer.AcceptRetiredKey(keys.Subscription, keys.AdminSince)
 		}
 		c.Next()
 	}

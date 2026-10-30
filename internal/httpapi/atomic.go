@@ -59,6 +59,13 @@ func needsAtomicMutation(method, path string) bool {
 	if path == "/api/admin/token" {
 		return false
 	}
+	// Minutes on an SSH session, which no database transaction should wait on: it
+	// writes nothing but its own log line, and by the time a transaction would
+	// commit, the request's budget is long gone and the answer would be a 503 for
+	// a restart that worked.
+	if isNodeRestartPath(path) {
+		return false
+	}
 	for _, p := range []string{"/api/user", "/api/admin", "/api/hosts", "/api/node", "/api/inbounds", "/api/tickets", "/api/internal/gateway/users/sync", "/api/settings/core-config", "/api/settings/xray-config", "/api/core/config"} {
 		if strings.HasPrefix(path, p) {
 			return true
@@ -96,7 +103,12 @@ func atomicMutations(h *Handler) gin.HandlerFunc {
 		// next-plan decisions atomic across API workers, not just within a process.
 		keys := []string{}
 		path := c.Request.URL.Path
+		// Taking the fleet lock and a snapshot is only for who the route will let
+		// through: otherwise any reseller could keep every config change waiting by
+		// sending requests that end in a 403 anyway.
+		structural := false
 		if claims, err := h.issuer.Verify(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")); err == nil {
+			structural = claims.IsSudo() && structuralConfigMutation(c.Request.Method, path)
 			keys = append(keys, "admin:"+claims.Username)
 		}
 		parts := strings.Split(strings.Trim(path, "/"), "/")
@@ -123,7 +135,7 @@ func atomicMutations(h *Handler) gin.HandlerFunc {
 		if len(keys) == 0 {
 			keys = append(keys, "settings:"+path)
 		}
-		if structuralConfigMutation(c.Request.Method, path) {
+		if structural {
 			keys = append(keys, "fleet-config")
 		}
 		sort.Strings(keys)
@@ -133,7 +145,7 @@ func atomicMutations(h *Handler) gin.HandlerFunc {
 				return
 			}
 		}
-		if structuralConfigMutation(c.Request.Method, path) {
+		if structural {
 			if err := h.saveFleetSnapshot(ctx, c.Request.Method+" "+path); err != nil {
 				c.AbortWithStatusJSON(503, gin.H{"detail": "Snapshot failed; configuration unchanged"})
 				return

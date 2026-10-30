@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/legendary1205/rapido-go/internal/controlurl"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -98,6 +100,21 @@ func TestForumTopicCreationUsesSynchronousTransport(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), `"message_thread_id":123`) {
 		t.Fatal("topic creation response was replaced by a queue acknowledgement")
+	}
+}
+
+// A deferred delivery logs why. A Telegram destination has the bot token in its URL,
+// and the HTTP client's error quotes the whole URL.
+func TestADeferredDeliverysReasonLeavesOutTheDestination(t *testing.T) {
+	gone := httptest.NewServer(http.NotFoundHandler())
+	destination := gone.URL + "/bot123456:test-only-token/sendMessage"
+	gone.Close()
+	err := sendDelivery(context.Background(), &http.Client{Timeout: time.Second}, "notification", 1, destination, Payload{Body: json.RawMessage(`{}`)})
+	if err == nil {
+		t.Fatal("a delivery to a closed server succeeded")
+	}
+	if reason := controlurl.RedactError(err).Error(); strings.Contains(reason, "test-only-token") {
+		t.Errorf("the logged reason has the token in it: %s", reason)
 	}
 }
 

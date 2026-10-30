@@ -3,7 +3,9 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -485,5 +487,77 @@ func TestNodeInboundTransport(t *testing.T) {
 		if tr := nodeInboundTransport(c.protocol, c.network, "/p", ""); tr != nil {
 			t.Errorf("%s/%s got transport %+v, want none", c.protocol, c.network, tr)
 		}
+	}
+}
+
+// While users change every second, a node polling every ten seconds comes back
+// several versions behind, and must still get only what changed.
+func TestANodeSeveralChangesBehindGetsOnlyWhatChanged(t *testing.T) {
+	router, token := newTestRouter(t)
+	_, secret := createTestNode(t, router, token, "delta-node")
+	doRequest(t, router, "POST", "/api/inbounds/sync", token, []map[string]interface{}{{"tag": "VLESS TCP", "protocol": "vless"}})
+	doRequest(t, router, "PUT", "/api/hosts", token, map[string]interface{}{
+		"VLESS TCP": []map[string]interface{}{{"remark": "n1", "address": "1.2.3.4", "port": 8443}},
+	})
+	create := func(name string) {
+		t.Helper()
+		resp := doRequest(t, router, "POST", "/api/user", token, map[string]interface{}{
+			"username": name, "proxies": map[string]interface{}{"vless": map[string]interface{}{}},
+		})
+		if resp.Code != http.StatusOK {
+			t.Fatalf("create %s: %d %v", name, resp.Code, resp.Body)
+		}
+	}
+	pull := func(etag string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "/api/internal/node-config?schema=4", nil)
+		req.Header.Set("Authorization", "Bearer "+secret)
+		if etag != "" {
+			req.Header.Set("If-None-Match", etag)
+		}
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+	for i := 0; i < 40; i++ {
+		create(fmt.Sprintf("delta_base_%d", i))
+	}
+	base := pull("")
+	etag := base.Header().Get("ETag")
+	if base.Code != http.StatusOK || etag == "" {
+		t.Fatalf("first pull: %d", base.Code)
+	}
+
+	// Other nodes keep polling meanwhile, so each version gets built.
+	for i := 0; i < nodeConfigHistory-2; i++ {
+		create(fmt.Sprintf("delta_new_%d", i))
+		pull("")
+	}
+	behind := pull(etag)
+	if behind.Code != http.StatusOK {
+		t.Fatalf("pull from behind: %d", behind.Code)
+	}
+	var delta struct {
+		Base   string `json:"base_version"`
+		Deltas map[string]struct {
+			Upsert []struct {
+				Name string `json:"name"`
+			} `json:"upsert"`
+		} `json:"user_sets_delta"`
+	}
+	if err := json.Unmarshal(behind.Body.Bytes(), &delta); err != nil {
+		t.Fatal(err)
+	}
+	if delta.Base == "" {
+		t.Fatalf("got a full body of %d bytes, not a delta", behind.Body.Len())
+	}
+	upserts := 0
+	for _, set := range delta.Deltas {
+		upserts += len(set.Upsert)
+	}
+	if upserts != nodeConfigHistory-2 {
+		t.Errorf("delta names %d users, want the %d that changed", upserts, nodeConfigHistory-2)
+	}
+	if behind.Body.Len() >= base.Body.Len() {
+		t.Errorf("delta is %d bytes, the whole list %d", behind.Body.Len(), base.Body.Len())
 	}
 }

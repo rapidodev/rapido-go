@@ -132,6 +132,9 @@ func TestCoreSnapshotCanBePreviewedAndRestored(t *testing.T) {
 	if preview.Code != 200 {
 		t.Fatal("preview failed")
 	}
+	if _, readable := preview.Body["config"].(map[string]any); !readable {
+		t.Fatalf("preview config is not readable JSON: %T", preview.Body["config"])
+	}
 	refused := doRequest(t, r, "POST", "/api/core/config/backups/"+id+"/restore", token, map[string]any{})
 	if refused.Code != 400 {
 		t.Fatal("restore lacked confirmation")

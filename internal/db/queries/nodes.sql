@@ -81,3 +81,6 @@ FROM nodes n
 LEFT JOIN node_usages u ON u.node_id = n.id AND u.created_at >= $1 AND u.created_at <= $2
 GROUP BY n.id, n.name
 ORDER BY n.id;
+
+-- name: UpdateNodeAgentState :exec
+UPDATE nodes SET xray_version = $2, message = $3 WHERE id = $1;

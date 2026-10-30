@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/legendary1205/rapido-go/internal/controlurl"
 	"io"
 	"net/http"
 )
@@ -148,7 +149,7 @@ func (c *Client) ReportUsages(ctx context.Context, cfg Config, usages []Usage) e
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return err
+		return controlurl.RedactError(err)
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))

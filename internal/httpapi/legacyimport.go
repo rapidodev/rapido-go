@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/legendary1205/rapido-go/internal/db/generated"
 	"github.com/legendary1205/rapido-go/internal/legacyimport"
 	"github.com/legendary1205/rapido-go/internal/proxysettings"
+	"github.com/legendary1205/rapido-go/internal/txscope"
 )
 
 // openMaybeGzipped opens path and, if its first two bytes are the gzip
@@ -238,13 +240,45 @@ func (h *Handler) loadLegacyImport(ctx context.Context, data legacyimport.Import
 		return legacyImportResultDTO{}, fmt.Errorf("aborted before touching the database - could not take a safety backup first: %w", err)
 	}
 
+	// All of it or none of it: autocommitting row by row, a lost connection would
+	// report every remaining row as one more warning, over a database already
+	// emptied. A row that's simply bad still only costs that row: it gets a
+	// savepoint, since in Postgres one failed statement otherwise fails the rest.
+	tx, err := h.store.Pool.Begin(ctx)
+	if err != nil {
+		return legacyImportResultDTO{}, err
+	}
+	defer tx.Rollback(context.Background())
+	ctx = txscope.WithTransaction(ctx, tx)
+	var owns bool
+	if err := tx.QueryRow(ctx, "SELECT pg_try_advisory_xact_lock(814720033)").Scan(&owns); err != nil || !owns {
+		return legacyImportResultDTO{}, errors.New("another restore or active mutation is in progress; retry shortly")
+	}
+	var broken error
+	row := func(step func() error) error {
+		if _, err := tx.Exec(ctx, "SAVEPOINT import_row"); err != nil {
+			broken = err
+			return err
+		}
+		stepErr := step()
+		statement := "RELEASE SAVEPOINT import_row"
+		if stepErr != nil {
+			statement = "ROLLBACK TO SAVEPOINT import_row"
+		}
+		if _, err := tx.Exec(ctx, statement); err != nil {
+			broken = err
+			return err
+		}
+		return stepErr
+	}
+
 	truncate := h.store.Queries.TruncateForLegacyImport
 	if data.UsersOnly {
 		// This panel's inbounds/hosts/templates stay; only user data is replaced.
 		truncate = h.store.Queries.TruncateUsersForLegacyImport
 	}
 	if err := truncate(ctx); err != nil {
-		return legacyImportResultDTO{}, fmt.Errorf("import failed after a safety backup (%s) was already taken - restore that backup to recover: %w", safety.Filename, err)
+		return legacyImportResultDTO{}, fmt.Errorf("import failed, nothing was changed: %w", err)
 	}
 
 	warnings := append([]string{}, data.Warnings...)
@@ -260,7 +294,7 @@ func (h *Handler) loadLegacyImport(ctx context.Context, data legacyimport.Import
 		// other shape must never land here.
 		if raw, err := hex.DecodeString(data.SubscriptionSecret); err != nil || len(raw) == 0 || hex.EncodeToString(raw) != data.SubscriptionSecret {
 			warnings = append(warnings, "the source panel's subscription signing key is not lowercase hex, so it was not adopted - existing subscription links will not work")
-		} else if err := h.store.Queries.ReplaceJWTSecret(ctx, data.SubscriptionSecret); err != nil {
+		} else if err := row(func() error { return h.store.Queries.ReplaceJWTSecret(ctx, data.SubscriptionSecret) }); err != nil {
 			warnings = append(warnings, "could not adopt the source panel's subscription signing key - existing subscription links will not work: "+err.Error())
 		} else {
 			warnings = append(warnings, "adopted the source panel's subscription signing key, so existing subscription links keep working - RESTART the panel for it to take effect (rapido-go restart)")
@@ -269,16 +303,20 @@ func (h *Handler) loadLegacyImport(ctx context.Context, data legacyimport.Import
 
 	adminIDMap := make(map[int64]int32, len(data.Admins))
 	for _, a := range data.Admins {
-		created, err := h.store.Queries.ImportAdmin(ctx, generated.ImportAdminParams{
-			Username:        a.Username,
-			HashedPassword:  a.HashedPassword,
-			CreatedAt:       timestamptzFromTime(a.CreatedAt),
-			IsSudo:          a.IsSudo,
-			IsOwner:         a.IsOwner,
-			PasswordResetAt: timestamptzFromPtr(a.PasswordResetAt),
-			TelegramID:      int8FromPtr(a.TelegramID),
-			DiscordWebhook:  textFromPtr(a.DiscordWebhook),
-			UsersUsage:      a.UsersUsage,
+		var created generated.Admin
+		err := row(func() (err error) {
+			created, err = h.store.Queries.ImportAdmin(ctx, generated.ImportAdminParams{
+				Username:        a.Username,
+				HashedPassword:  a.HashedPassword,
+				CreatedAt:       timestamptzFromTime(a.CreatedAt),
+				IsSudo:          a.IsSudo,
+				IsOwner:         a.IsOwner,
+				PasswordResetAt: timestamptzFromPtr(a.PasswordResetAt),
+				TelegramID:      int8FromPtr(a.TelegramID),
+				DiscordWebhook:  textFromPtr(a.DiscordWebhook),
+				UsersUsage:      a.UsersUsage,
+			})
+			return err
 		})
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("admin %q: %v", a.Username, err))
@@ -297,11 +335,14 @@ func (h *Handler) loadLegacyImport(ctx context.Context, data legacyimport.Import
 		// default everywhere else a default proxy type is needed; the
 		// warning already appended above is what actually tells the admin
 		// this needs a real value.
-		if _, err := h.store.Queries.UpsertInbound(ctx, generated.UpsertInboundParams{
-			Tag:      ib.Tag,
-			Protocol: "vless",
-			Network:  "tcp",
-			Security: "none",
+		if err := row(func() error {
+			_, err := h.store.Queries.UpsertInbound(ctx, generated.UpsertInboundParams{
+				Tag:      ib.Tag,
+				Protocol: "vless",
+				Network:  "tcp",
+				Security: "none",
+			})
+			return err
 		}); err != nil {
 			warnings = append(warnings, fmt.Sprintf("inbound %q: %v", ib.Tag, err))
 			continue
@@ -338,12 +379,14 @@ func (h *Handler) loadLegacyImport(ctx context.Context, data legacyimport.Import
 			LastStatusChange:       timestamptzFromPtr(u.LastStatusChange),
 		}
 		var created generated.User
-		var err error
-		if data.KeepUserIDs {
-			created, err = h.store.Queries.ImportUserWithID(ctx, importUserWithIDParams(int32(u.SourceID), params))
-		} else {
-			created, err = h.store.Queries.ImportUser(ctx, params)
-		}
+		err := row(func() (err error) {
+			if data.KeepUserIDs {
+				created, err = h.store.Queries.ImportUserWithID(ctx, importUserWithIDParams(int32(u.SourceID), params))
+			} else {
+				created, err = h.store.Queries.ImportUser(ctx, params)
+			}
+			return err
+		})
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("user %q: %v", u.Username, err))
 			continue
@@ -351,23 +394,33 @@ func (h *Handler) loadLegacyImport(ctx context.Context, data legacyimport.Import
 		userIDMap[u.SourceID] = created.ID
 
 		for _, p := range u.Proxies {
-			if _, err := proxysettings.FromStored(proxysettings.ProxyType(p.Type), p.Settings); err != nil {
+			settings, err := proxysettings.FromStored(proxysettings.ProxyType(p.Type), p.Settings)
+			if err != nil {
 				warnings = append(warnings, fmt.Sprintf("user %q: proxy (%s) has invalid settings, skipped: %v", u.Username, p.Type, err))
 				continue
 			}
-			createdProxy, err := h.store.Queries.CreateProxy(ctx, generated.CreateProxyParams{
-				UserID:   pgtype.Int4{Int32: created.ID, Valid: true},
-				Type:     p.Type,
-				Settings: p.Settings,
-			})
-			if err != nil {
+			// Kept, so it can be seen and fixed; no node will be sent it until then.
+			if err := settings.Validate(); err != nil {
+				warnings = append(warnings, fmt.Sprintf("user %q: proxy (%s) was imported but no node can serve it: %v", u.Username, p.Type, err))
+			}
+			var createdProxy generated.Proxy
+			if err := row(func() (err error) {
+				createdProxy, err = h.store.Queries.CreateProxy(ctx, generated.CreateProxyParams{
+					UserID:   pgtype.Int4{Int32: created.ID, Valid: true},
+					Type:     p.Type,
+					Settings: p.Settings,
+				})
+				return err
+			}); err != nil {
 				warnings = append(warnings, fmt.Sprintf("user %q: proxy (%s): %v", u.Username, p.Type, err))
 				continue
 			}
 			if len(p.ExcludedInbounds) > 0 {
-				if err := h.store.Queries.ReplaceExcludedInbounds(ctx, generated.ReplaceExcludedInboundsParams{
-					ProxyID: createdProxy.ID,
-					Column2: p.ExcludedInbounds,
+				if err := row(func() error {
+					return h.store.Queries.ReplaceExcludedInbounds(ctx, generated.ReplaceExcludedInboundsParams{
+						ProxyID: createdProxy.ID,
+						Column2: p.ExcludedInbounds,
+					})
 				}); err != nil {
 					warnings = append(warnings, fmt.Sprintf("user %q: proxy exclusions: %v", u.Username, err))
 				}
@@ -376,38 +429,41 @@ func (h *Handler) loadLegacyImport(ctx context.Context, data legacyimport.Import
 	}
 
 	if data.KeepUserIDs {
-		if err := h.store.Queries.SyncUsersIDSequence(ctx); err != nil {
+		if err := row(func() error { return h.store.Queries.SyncUsersIDSequence(ctx) }); err != nil {
 			warnings = append(warnings, "could not move the user id sequence past the imported ids - creating a user may fail until it is fixed: "+err.Error())
 		}
 	}
 
 	hostsImported := 0
 	for i, hst := range data.Hosts {
-		if _, err := h.store.Queries.CreateHost(ctx, generated.CreateHostParams{
-			Remark:          hst.Remark,
-			Address:         hst.Address,
-			Port:            pgInt4FromPtr(hst.Port),
-			Path:            textFromPtr(hst.Path),
-			Sni:             textFromPtr(hst.SNI),
-			Host:            textFromPtr(hst.HostHeader),
-			Security:        hst.Security,
-			Alpn:            hst.ALPN,
-			Fingerprint:     hst.Fingerprint,
-			InboundTag:      hst.InboundTag,
-			Allowinsecure:   pgBoolFromPtr(hst.AllowInsecure),
-			IsDisabled:      pgBoolFromPtr(hst.IsDisabled),
-			MuxEnable:       hst.MuxEnable,
-			FragmentSetting: textFromPtr(hst.FragmentSetting),
-			NoiseSetting:    textFromPtr(hst.NoiseSetting),
-			RandomUserAgent: hst.RandomUserAgent,
-			UseSniAsHost:    hst.UseSNIAsHost,
-			// This loop runs right after TruncateForLegacyImport, so the
-			// table starts empty - the loop index alone is already a real,
-			// distinct priority per host (import order), not the shared
-			// column default every one of them would otherwise collide on
-			// (see createDefaultHost's own doc comment on exactly this
-			// class of bug).
-			Priority: int32(i),
+		if err := row(func() error {
+			_, err := h.store.Queries.CreateHost(ctx, generated.CreateHostParams{
+				Remark:          hst.Remark,
+				Address:         hst.Address,
+				Port:            pgInt4FromPtr(hst.Port),
+				Path:            textFromPtr(hst.Path),
+				Sni:             textFromPtr(hst.SNI),
+				Host:            textFromPtr(hst.HostHeader),
+				Security:        hst.Security,
+				Alpn:            hst.ALPN,
+				Fingerprint:     hst.Fingerprint,
+				InboundTag:      hst.InboundTag,
+				Allowinsecure:   pgBoolFromPtr(hst.AllowInsecure),
+				IsDisabled:      pgBoolFromPtr(hst.IsDisabled),
+				MuxEnable:       hst.MuxEnable,
+				FragmentSetting: textFromPtr(hst.FragmentSetting),
+				NoiseSetting:    textFromPtr(hst.NoiseSetting),
+				RandomUserAgent: hst.RandomUserAgent,
+				UseSniAsHost:    hst.UseSNIAsHost,
+				// This loop runs right after TruncateForLegacyImport, so the
+				// table starts empty - the loop index alone is already a real,
+				// distinct priority per host (import order), not the shared
+				// column default every one of them would otherwise collide on
+				// (see createDefaultHost's own doc comment on exactly this
+				// class of bug).
+				Priority: int32(i),
+			})
+			return err
 		}); err != nil {
 			warnings = append(warnings, fmt.Sprintf("host %q: %v", hst.Remark, err))
 			continue
@@ -416,21 +472,27 @@ func (h *Handler) loadLegacyImport(ctx context.Context, data legacyimport.Import
 	}
 
 	for _, ut := range data.UserTemplates {
-		created, err := h.store.Queries.CreateUserTemplate(ctx, generated.CreateUserTemplateParams{
-			Name:           ut.Name,
-			DataLimit:      int8FromPtr(ut.DataLimit),
-			ExpireDuration: int8FromPtr(ut.ExpireDuration),
-			UsernamePrefix: textFromPtr(ut.UsernamePrefix),
-			UsernameSuffix: textFromPtr(ut.UsernameSuffix),
+		var created generated.UserTemplate
+		err := row(func() (err error) {
+			created, err = h.store.Queries.CreateUserTemplate(ctx, generated.CreateUserTemplateParams{
+				Name:           ut.Name,
+				DataLimit:      int8FromPtr(ut.DataLimit),
+				ExpireDuration: int8FromPtr(ut.ExpireDuration),
+				UsernamePrefix: textFromPtr(ut.UsernamePrefix),
+				UsernameSuffix: textFromPtr(ut.UsernameSuffix),
+			})
+			return err
 		})
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("user template %q: %v", ut.Name, err))
 			continue
 		}
 		if len(ut.InboundTags) > 0 {
-			if err := h.store.Queries.ReplaceTemplateInbounds(ctx, generated.ReplaceTemplateInboundsParams{
-				UserTemplateID: created.ID,
-				Column2:        ut.InboundTags,
+			if err := row(func() error {
+				return h.store.Queries.ReplaceTemplateInbounds(ctx, generated.ReplaceTemplateInboundsParams{
+					UserTemplateID: created.ID,
+					Column2:        ut.InboundTags,
+				})
 			}); err != nil {
 				warnings = append(warnings, fmt.Sprintf("user template %q inbounds: %v", ut.Name, err))
 			}
@@ -443,18 +505,28 @@ func (h *Handler) loadLegacyImport(ctx context.Context, data legacyimport.Import
 			warnings = append(warnings, fmt.Sprintf("a next-plan referenced source user id %d, which wasn't imported, skipped", np.SourceUserID))
 			continue
 		}
-		if _, err := h.store.Queries.UpsertNextPlan(ctx, generated.UpsertNextPlanParams{
-			UserID:              newUserID,
-			DataLimit:           np.DataLimit,
-			Expire:              pgInt4FromPtr(np.Expire),
-			AddRemainingTraffic: np.AddRemainingTraffic,
-			FireOnEither:        np.FireOnEither,
+		if err := row(func() error {
+			_, err := h.store.Queries.UpsertNextPlan(ctx, generated.UpsertNextPlanParams{
+				UserID:              newUserID,
+				DataLimit:           np.DataLimit,
+				Expire:              pgInt4FromPtr(np.Expire),
+				AddRemainingTraffic: np.AddRemainingTraffic,
+				FireOnEither:        np.FireOnEither,
+			})
+			return err
 		}); err != nil {
 			warnings = append(warnings, fmt.Sprintf("next-plan for user id %d: %v", newUserID, err))
 		}
 	}
 
-	if err := h.store.Cache.FlushAll(ctx); err != nil {
+	if broken != nil {
+		return legacyImportResultDTO{}, fmt.Errorf("import failed, nothing was changed: %w", broken)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return legacyImportResultDTO{}, fmt.Errorf("import failed, nothing was changed: %w", err)
+	}
+
+	if err := h.store.Cache.FlushAll(context.WithoutCancel(ctx)); err != nil {
 		warnings = append(warnings, fmt.Sprintf("import completed but the cache could not be flushed - restart the panel process: %v", err))
 	}
 

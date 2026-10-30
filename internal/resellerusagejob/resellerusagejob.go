@@ -160,8 +160,14 @@ func tickDurableBatch(ctx context.Context, q Queries, b batchQueries, reporter R
 	if err := json.Unmarshal(batch.Payload, &usages); err != nil {
 		return err
 	}
-	if err := reporter.ReportUsages(resellerapi.WithReportID(ctx, batch.ID), resellerapi.Config{URL: batch.Destination, Secret: batch.Secret}, usages); err != nil {
+	// To where the bot is now: a batch that failed once and then outlived a change
+	// of URL or secret must not keep failing forever and hold up all later billing.
+	// The report id stays, so the bot still can't charge it twice.
+	if err := reporter.ReportUsages(resellerapi.WithReportID(ctx, batch.ID), cfg, usages); err != nil {
 		return err
 	}
-	return b.CompleteResellerBatch(ctx, batch.ID)
+	// The bot has charged this now: a shutdown mustn't undo the record of that.
+	completeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	return b.CompleteResellerBatch(completeCtx, batch.ID)
 }

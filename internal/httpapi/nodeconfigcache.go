@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"context"
+	"log/slog"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,6 +20,12 @@ const (
 	// data version is what normally decides freshness; this only limits the
 	// damage of a bug in that.
 	nodeConfigSafetyTTL = 60 * time.Second
+
+	// nodeConfigHistory is how many earlier payloads a profile keeps to send deltas
+	// from. A node polls every ten seconds, and while users change every second it
+	// comes back that many versions behind: with too few kept it gets the whole
+	// list again on every poll, 2.7 MB per node at 50,000 users.
+	nodeConfigHistory = 12
 
 	// nodeConfigBuildTimeout is the budget of a rebuild that several polls
 	// are waiting on. It is deliberately not the first caller's request
@@ -49,6 +57,24 @@ type nodeConfigCache struct {
 	// Counted so a test can prove a poll did not rebuild.
 	snapshotLoads atomic.Int64
 	renders       atomic.Int64
+
+	// unservable is the last list noteUnservable logged.
+	unservable string
+}
+
+// noteUnservable logs the rows a snapshot left out, once per distinct list: a
+// snapshot is rebuilt on every user change, and the same few names each time
+// would bury everything else in the log.
+func (c *nodeConfigCache) noteUnservable(logger *slog.Logger, rows []string) {
+	summary := strings.Join(rows, "; ")
+	c.mu.Lock()
+	changed := summary != c.unservable
+	c.unservable = summary
+	c.mu.Unlock()
+	if !changed || len(rows) == 0 {
+		return
+	}
+	logger.Warn("node config: users left out of every node's list", "count", len(rows), "users", rows[:min(len(rows), 20)])
 }
 
 func (c *nodeConfigCache) lookup(key string, version int64) *nodeConfigEntry {
@@ -78,8 +104,8 @@ func (c *nodeConfigCache) store(key string, e *nodeConfigEntry) {
 		if old.version < e.version || (k == key && old.etag != e.etag) {
 			if now.Sub(old.builtAt) < nodeConfigSafetyTTL {
 				history := append([]*nodeConfigEntry{old}, c.previous[k]...)
-				if len(history) > 2 {
-					history = history[:2]
+				if len(history) > nodeConfigHistory {
+					history = history[:nodeConfigHistory]
 				}
 				c.previous[k] = history
 			}
@@ -144,12 +170,12 @@ func (h *Handler) snapshotFor(ctx context.Context, version int64) (*nodeConfigSn
 }
 
 func (h *Handler) renderNodeConfigEntry(snap *nodeConfigSnapshot, p nodeProfile) (*nodeConfigEntry, error) {
-	return h.renderNodeConfigEntrySchema(snap, p, false)
+	return h.renderNodeConfigEntrySchema(snap, p, nodeConfigSchema{})
 }
 
-func (h *Handler) renderNodeConfigEntrySchema(snap *nodeConfigSnapshot, p nodeProfile, compact bool) (*nodeConfigEntry, error) {
+func (h *Handler) renderNodeConfigEntrySchema(snap *nodeConfigSnapshot, p nodeProfile, schema nodeConfigSchema) (*nodeConfigEntry, error) {
 	h.nodeConfig.renders.Add(1)
-	payload, canonical, err := snap.renderSchema(p, compact)
+	payload, canonical, err := snap.renderSchema(p, schema)
 	if err != nil {
 		return nil, err
 	}
@@ -173,10 +199,10 @@ func (h *Handler) renderNodeConfigEntrySchema(snap *nodeConfigSnapshot, p nodePr
 // next poll see a higher version and rebuild, never serve something older
 // than the version claims.
 func (h *Handler) cachedNodeConfig(ctx context.Context, p nodeProfile) (*nodeConfigEntry, error) {
-	return h.cachedNodeConfigSchema(ctx, p, false)
+	return h.cachedNodeConfigSchema(ctx, p, nodeConfigSchema{})
 }
 
-func (h *Handler) cachedNodeConfigSchema(ctx context.Context, p nodeProfile, compact bool) (*nodeConfigEntry, error) {
+func (h *Handler) cachedNodeConfigSchema(ctx context.Context, p nodeProfile, schema nodeConfigSchema) (*nodeConfigEntry, error) {
 	c := &h.nodeConfig
 	version, err := h.store.Queries.GetDataVersion(ctx, dataVersionNodeConfig)
 	if err != nil {
@@ -187,13 +213,10 @@ func (h *Handler) cachedNodeConfigSchema(ctx context.Context, p nodeProfile, com
 		if err != nil {
 			return nil, err
 		}
-		return h.renderNodeConfigEntrySchema(snap, p, compact)
+		return h.renderNodeConfigEntrySchema(snap, p, schema)
 	}
 
-	key := p.key()
-	if compact {
-		key += "/v2"
-	}
+	key := schema.cacheKey(p)
 	if e := c.lookup(key, version); e != nil {
 		return e, nil
 	}
@@ -207,7 +230,7 @@ func (h *Handler) cachedNodeConfigSchema(ctx context.Context, p nodeProfile, com
 		if err != nil {
 			return nil, err
 		}
-		e, err := h.renderNodeConfigEntrySchema(snap, p, compact)
+		e, err := h.renderNodeConfigEntrySchema(snap, p, schema)
 		if err != nil {
 			return nil, err
 		}

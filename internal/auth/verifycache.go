@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -37,6 +38,10 @@ type VerifyCache struct {
 	verify func(plain, hashed string) bool
 	now    func() time.Time
 	secret [32]byte
+	// slots bounds how many bcrypts run at once. Each one is hundreds of
+	// milliseconds of a whole core, so without it a flood of guesses, each from a
+	// fresh address, takes the CPU from everything else the panel does.
+	slots chan struct{}
 
 	mu      sync.Mutex
 	entries map[[sha256.Size]byte]verifyEntry
@@ -48,7 +53,10 @@ func NewVerifyCache() *VerifyCache {
 
 // NewVerifyCacheWith lets tests count or fake the underlying comparison.
 func NewVerifyCacheWith(verify func(plain, hashed string) bool) *VerifyCache {
-	c := &VerifyCache{verify: verify, now: time.Now, entries: map[[sha256.Size]byte]verifyEntry{}}
+	c := &VerifyCache{
+		verify: verify, now: time.Now, entries: map[[sha256.Size]byte]verifyEntry{},
+		slots: make(chan struct{}, max(2, runtime.NumCPU()/4)),
+	}
 	rand.Read(c.secret[:]) // never returns an error since Go 1.24
 	return c
 }
@@ -80,7 +88,9 @@ func (c *VerifyCache) Verify(username, plain, hashed string) bool {
 	}
 	c.mu.Unlock()
 
+	c.slots <- struct{}{}
 	ok := c.verify(plain, hashed)
+	<-c.slots
 	ttl := verifyMissTTL
 	if ok {
 		ttl = verifyHitTTL

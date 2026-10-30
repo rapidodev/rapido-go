@@ -77,16 +77,24 @@ func reviewActiveUsers(ctx context.Context, q *generated.Queries, dispatcher *re
 		limited := user.DataLimit.Valid && user.DataLimit.Int64 > 0 && user.UsedTraffic >= user.DataLimit.Int64
 		expired := user.Expire.Valid && user.Expire.Int32 != 0 && int64(user.Expire.Int32) <= now.Unix()
 
+		// A failure below costs this user this tick. Returning instead would
+		// leave everybody after them unreviewed, on every tick, until somebody
+		// fixed the one row: nobody limited, nobody expired.
 		if limited || expired {
 			plan, err := q.GetNextPlanByUserID(ctx, user.ID)
 			hasPlan := err == nil
 			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-				return err
+				logger.Error("review_users: read next plan", "username", user.Username, "error", err)
+				continue
 			}
 			if hasPlan && (plan.FireOnEither || (limited && expired)) {
 				updated, err := fireNextPlan(ctx, q, user)
+				if errors.Is(err, errPlanNoLongerDue) {
+					continue
+				}
 				if err != nil {
-					return err
+					logger.Error("review_users: fire next plan", "username", user.Username, "error", err)
+					continue
 				}
 				logger.Info("user data reset by next_plan", "username", user.Username)
 				dispatcher.UserDataResetByNext(ctx, toUserSummary(updated), lookupAdminRef(ctx, q, updated.AdminID, logger))
@@ -103,14 +111,22 @@ func reviewActiveUsers(ctx context.Context, q *generated.Queries, dispatcher *re
 		default:
 			continue
 		}
-		if err := q.UpdateUserStatusOnly(ctx, generated.UpdateUserStatusOnlyParams{ID: user.ID, Status: status}); err != nil {
-			return err
+		changed, err := q.ApplyReviewedStatus(ctx, generated.ApplyReviewedStatusParams{ID: user.ID, Status: status})
+		if err != nil {
+			logger.Error("review_users: update status", "username", user.Username, "error", err)
+			continue
+		}
+		if changed == 0 {
+			continue // renewed since it was read
 		}
 		logger.Info("user status changed", "username", user.Username, "status", status)
 		dispatcher.StatusChange(ctx, user.Username, status, lookupAdminRef(ctx, q, user.AdminID, logger))
 	}
 	return nil
 }
+
+// errPlanNoLongerDue is fireNextPlan finding the user was renewed meanwhile.
+var errPlanNoLongerDue = errors.New("next plan no longer due")
 
 // fireNextPlan mirrors crud.reset_user_by_next: log the pre-reset usage,
 // clear per-node usage history, then apply the plan's formula in one
@@ -140,6 +156,14 @@ func fireNextPlan(ctx context.Context, q *generated.Queries, user generated.User
 		}
 		if _, err = queries.GetNextPlanByUserID(scoped, user.ID); err != nil {
 			return generated.User{}, err
+		}
+		// The list this came from is seconds old, and this lock may have been
+		// waited for: a renewal in between must not also consume the plan.
+		now := time.Now().UTC().Unix()
+		stillLimited := fresh.DataLimit.Valid && fresh.DataLimit.Int64 > 0 && fresh.UsedTraffic >= fresh.DataLimit.Int64
+		stillExpired := fresh.Expire.Valid && fresh.Expire.Int32 != 0 && int64(fresh.Expire.Int32) <= now
+		if fresh.Status != "active" || (!stillLimited && !stillExpired) {
+			return generated.User{}, errPlanNoLongerDue
 		}
 		updated, err := fireNextPlan(scoped, queries, fresh)
 		if err != nil {
@@ -194,8 +218,13 @@ func reviewOnHoldUsers(ctx context.Context, q *generated.Queries, dispatcher *re
 		if !activate {
 			continue
 		}
-		if err := q.ActivateOnHoldUser(ctx, user.ID); err != nil {
-			return err
+		changed, err := q.ActivateOnHoldUser(ctx, user.ID)
+		if err != nil {
+			logger.Error("review_users: activate on-hold user", "username", user.Username, "error", err)
+			continue
+		}
+		if changed == 0 {
+			continue // changed since it was read
 		}
 		logger.Info("user status changed", "username", user.Username, "status", "active")
 		dispatcher.StatusChange(ctx, user.Username, "active", lookupAdminRef(ctx, q, user.AdminID, logger))

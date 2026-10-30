@@ -6,7 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
+	"net/url"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -97,9 +101,11 @@ type outboundDTO struct {
 
 	// ExecutablePath/DataDirectory are Tor's own fields: this outbound talks
 	// to a local `tor` process it spawns itself, not a remote server, so it
-	// has no Server/ServerPort at all. ExecutablePath empty means "find tor
-	// on PATH" - the node image does not ship one, so this type only works
-	// on a node an admin has installed Tor on by hand.
+	// has no Server/ServerPort at all. The node finds tor on PATH - it does not
+	// ship one, so this type only works on a node an admin has installed Tor on
+	// by hand. ExecutablePath is refused rather than used: the node runs it as
+	// root, which would give every sudo admin a root shell on every node.
+	// DataDirectory is a folder name under the node's state directory.
 	ExecutablePath string `json:"executable_path,omitempty"` // tor
 	DataDirectory  string `json:"data_directory,omitempty"`  // tor
 
@@ -125,6 +131,15 @@ type outboundDTO struct {
 	// the bind (a plain direct route) instead of failing. Only meaningful
 	// with BindInterface, and only on a leaf type.
 	DirectFallback bool `json:"direct_fallback,omitempty"`
+
+	// URL, Interval and Tolerance tune how a urltest group measures its
+	// members, and Default names the member a selector group starts on. A node
+	// agent that predates them ignores them and uses sing-box's own defaults,
+	// which is harmless, so unlike the rule matchers below they need no gating.
+	URL       string `json:"url,omitempty"`       // urltest
+	Interval  string `json:"interval,omitempty"`  // urltest, a Go duration such as "3m"
+	Tolerance int    `json:"tolerance,omitempty"` // urltest, milliseconds
+	Default   string `json:"default,omitempty"`   // selector
 }
 
 type routingRuleDTO struct {
@@ -150,7 +165,126 @@ type routingRuleDTO struct {
 	PortRange     []string `json:"port_range,omitempty"`
 	Network       []string `json:"network,omitempty"`
 	Protocol      []string `json:"protocol,omitempty"`
-	OutboundTag   string   `json:"outbound_tag" binding:"required"`
+
+	// Matchers an older node agent doesn't know. It would ignore them and
+	// match far more than the rule says, so a rule using any of these only
+	// goes to agents that ask for schema 4 - see ruleUsesExtendedMatchers.
+	DomainRegex       []string `json:"domain_regex,omitempty"`
+	SourceIPCIDR      []string `json:"source_ip_cidr,omitempty"`
+	SourceIPIsPrivate bool     `json:"source_ip_is_private,omitempty"`
+	SourcePort        []int    `json:"source_port,omitempty"`
+	SourcePortRange   []string `json:"source_port_range,omitempty"`
+	AuthUser          []string `json:"auth_user,omitempty"`
+
+	OutboundTag string `json:"outbound_tag" binding:"required"`
+}
+
+// ruleUsesExtendedMatchers reports whether a rule needs an agent of schema 4.
+func ruleUsesExtendedMatchers(r routingRuleDTO) bool {
+	return len(r.DomainRegex) > 0 || len(r.SourceIPCIDR) > 0 || r.SourceIPIsPrivate ||
+		len(r.SourcePort) > 0 || len(r.SourcePortRange) > 0 || len(r.AuthUser) > 0
+}
+
+// validIPOrCIDR accepts the two forms sing-box's ip_cidr matchers take. Anything
+// else would pass the panel and then make every node refuse the whole config.
+func validIPOrCIDR(s string) bool {
+	if _, err := netip.ParsePrefix(s); err == nil {
+		return true
+	}
+	_, err := netip.ParseAddr(s)
+	return err == nil
+}
+
+// validPortRange accepts "start:end" with either side open, not both.
+func validPortRange(s string) bool {
+	start, end, ok := strings.Cut(s, ":")
+	if !ok || (start == "" && end == "") {
+		return false
+	}
+	lo, hi := uint64(0), uint64(65535)
+	var err error
+	if start != "" {
+		if lo, err = strconv.ParseUint(start, 10, 16); err != nil {
+			return false
+		}
+	}
+	if end != "" {
+		if hi, err = strconv.ParseUint(end, 10, 16); err != nil {
+			return false
+		}
+	}
+	return lo <= hi
+}
+
+func validPort(p int) bool { return p >= 1 && p <= 65535 }
+
+// validateRuleMatchers checks the values the node would otherwise be the first
+// to reject: a port the uint16 conversion would wrap, an address or a range
+// sing-box can't parse, a regex that doesn't compile.
+func validateRuleMatchers(rule routingRuleDTO) string {
+	for _, list := range [][]int{rule.Port, rule.SourcePort} {
+		for _, p := range list {
+			if !validPort(p) {
+				return fmt.Sprintf("routing rule: invalid port %d (must be 1-65535)", p)
+			}
+		}
+	}
+	for _, list := range [][]string{rule.IPCIDR, rule.SourceIPCIDR} {
+		for _, ip := range list {
+			if !validIPOrCIDR(ip) {
+				return "routing rule: invalid IP or CIDR " + ip
+			}
+		}
+	}
+	for _, list := range [][]string{rule.PortRange, rule.SourcePortRange} {
+		for _, r := range list {
+			if !validPortRange(r) {
+				return "routing rule: invalid port range " + r + " (use start:end)"
+			}
+		}
+	}
+	for _, expr := range rule.DomainRegex {
+		if _, err := regexp.Compile(expr); err != nil {
+			return "routing rule: invalid domain_regex " + expr
+		}
+	}
+	for _, user := range rule.AuthUser {
+		if user == "" {
+			return "routing rule: auth_user entries must not be empty"
+		}
+	}
+	return ""
+}
+
+// validateGroupOptions checks a balancer's own settings.
+func validateGroupOptions(ob outboundDTO) string {
+	switch ob.Type {
+	case "urltest":
+		if ob.URL != "" {
+			u, err := url.Parse(ob.URL)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return "outbound " + ob.Tag + ": url must be an http(s) address"
+			}
+		}
+		if ob.Interval != "" {
+			if d, err := time.ParseDuration(ob.Interval); err != nil || d <= 0 {
+				return "outbound " + ob.Tag + ": interval must be a duration such as 3m"
+			}
+		}
+		if ob.Tolerance < 0 || ob.Tolerance > 65535 {
+			return "outbound " + ob.Tag + ": tolerance must be 0-65535"
+		}
+	case "selector":
+		if ob.Default != "" {
+			for _, member := range ob.Outbounds {
+				if member == ob.Default {
+					return ""
+				}
+			}
+			return "outbound " + ob.Tag + ": default must be one of its members"
+		}
+	}
+	return ""
 }
 
 type dnsServerDTO struct {
@@ -199,6 +333,10 @@ func (h *Handler) handleGetCoreConfig(c *gin.Context) {
 // structural validation (XRayConfig's own tag-uniqueness/non-empty checks)
 // adapted to this DTO shape - full-object replace, so everything is
 // re-checked on every PUT, same as PUT /hosts's own convention.
+// validTorDataDirectory is one folder name, kept under the node's state directory:
+// tor runs as root there, and a path could point it at anything on the machine.
+var validTorDataDirectory = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$`)
+
 func validateCoreConfig(dto coreConfigDTO) string {
 	if dto.LogLevel != "" && !validLogLevels[dto.LogLevel] {
 		return "invalid log_level"
@@ -218,6 +356,12 @@ func validateCoreConfig(dto coreConfigDTO) string {
 		if !validOutboundTypes[ob.Type] {
 			return "invalid outbound type: " + ob.Type
 		}
+		if ob.ExecutablePath != "" {
+			return "outbound " + ob.Tag + ": executable_path can't be set from the panel; a node finds tor on its own PATH"
+		}
+		if ob.DataDirectory != "" && !validTorDataDirectory.MatchString(ob.DataDirectory) {
+			return "outbound " + ob.Tag + ": data_directory must be a plain folder name"
+		}
 		needsServer := ob.Type == "socks" || ob.Type == "http" || ob.Type == "shadowsocks" ||
 			ob.Type == "vmess" || ob.Type == "trojan" || ob.Type == "vless" || ob.Type == "hysteria2" || ob.Type == "tuic" ||
 			ob.Type == "anytls" || ob.Type == "hysteria" || ob.Type == "shadowtls" ||
@@ -229,6 +373,9 @@ func validateCoreConfig(dto coreConfigDTO) string {
 		}
 		if (ob.Type == "selector" || ob.Type == "urltest") && len(ob.Outbounds) == 0 {
 			return "outbound " + ob.Tag + ": at least one member outbound is required for type " + ob.Type
+		}
+		if msg := validateGroupOptions(ob); msg != "" {
+			return msg
 		}
 		if ob.DirectFallback {
 			if ob.BindInterface == "" {
@@ -260,6 +407,9 @@ func validateCoreConfig(dto coreConfigDTO) string {
 		case "vless":
 			if ob.UUID == "" {
 				return "outbound " + ob.Tag + ": uuid is required for type vless"
+			}
+			if ob.Flow != "" && ob.Flow != "xtls-rprx-vision" {
+				return "outbound " + ob.Tag + ": unsupported flow " + ob.Flow
 			}
 		case "hysteria2":
 			if ob.Password == "" {
@@ -357,6 +507,9 @@ func validateCoreConfig(dto coreConfigDTO) string {
 				return "routing rule: invalid protocol " + p
 			}
 		}
+		if msg := validateRuleMatchers(rule); msg != "" {
+			return msg
+		}
 		if len(rule.InboundPort) > 0 {
 			if len(rule.Inbound) == 0 {
 				return "routing rule: inbound_port requires a non-empty inbound"
@@ -387,6 +540,9 @@ func validateCoreConfig(dto coreConfigDTO) string {
 		}
 		if srv.Type != "local" && srv.Address == "" {
 			return "dns server " + srv.Tag + ": address is required for type " + srv.Type
+		}
+		if srv.Port != 0 && !validPort(srv.Port) {
+			return fmt.Sprintf("dns server %s: invalid port %d (must be 1-65535)", srv.Tag, srv.Port)
 		}
 	}
 	return ""

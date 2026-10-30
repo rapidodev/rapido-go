@@ -17,7 +17,7 @@ func (h *Handler) handleSubscriptionInfo(c *gin.Context) {
 		return
 	}
 	ctx := c.Request.Context()
-	data, err := h.buildRapidoData(ctx, user)
+	data, err := h.buildRapidoData(ctx, user, c.Param("token"))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not read subscription info"})
 		return
@@ -34,6 +34,14 @@ func (h *Handler) handleSubscriptionInfo(c *gin.Context) {
 		c.JSON(http.StatusOK, data)
 		return
 	}
+	// Anyone holding the link can read this. What the admin wrote about the user
+	// and who the admin is, webhook and Telegram id included, are not theirs to see.
+	full.Admin, full.Note, full.SyncedFromPanelName = nil, nil, nil
+	// The link they came in with, not a new one: a token minted here could carry
+	// a later timestamp than a revocation made a moment afterwards, and so outlive it.
+	token := c.Param("token")
+	full.SubscriptionURL = h.subURLPrefix + "/sub/" + token
+	full.SubscriptionURLs = h.subscriptionURLs(token)
 	merged, err := mergeJSONObjects(full, data)
 	if err != nil {
 		c.JSON(http.StatusOK, data)

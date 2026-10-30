@@ -69,6 +69,9 @@ func dnatUnit(p Params) string { return "rapido-dnat-" + p.InterfaceName }
 
 // Provision builds a tunnel of p.Method between the relay and the node.
 func Provision(ctx context.Context, relay, node *sshexec.Client, p Params) error {
+	if err := p.check(); err != nil {
+		return err
+	}
 	switch m := p.method(); {
 	case m == MethodGREFRP:
 		return provisionGREFRP(ctx, relay, node, p)
@@ -85,6 +88,9 @@ func Provision(ctx context.Context, relay, node *sshexec.Client, p Params) error
 
 // Start brings an already provisioned tunnel up (the inverse of Stop).
 func Start(ctx context.Context, relay, node *sshexec.Client, p Params) error {
+	if err := p.check(); err != nil {
+		return err
+	}
 	switch m := p.method(); {
 	case m == MethodGREFRP:
 		return startGREFRP(ctx, relay, node, p)
@@ -99,6 +105,9 @@ func Start(ctx context.Context, relay, node *sshexec.Client, p Params) error {
 
 // Stop takes the tunnel down without removing any configuration.
 func Stop(ctx context.Context, relay, node *sshexec.Client, p Params) error {
+	if err := p.check(); err != nil {
+		return err
+	}
 	switch m := p.method(); {
 	case m == MethodGREFRP:
 		return stopGREFRP(ctx, relay, node, p)
@@ -113,6 +122,9 @@ func Stop(ctx context.Context, relay, node *sshexec.Client, p Params) error {
 
 // Teardown removes everything Provision created, best effort.
 func Teardown(ctx context.Context, relay, node *sshexec.Client, p Params) error {
+	if err := p.check(); err != nil {
+		return err
+	}
 	switch m := p.method(); {
 	case m == MethodGREFRP:
 		return teardownGREFRP(ctx, relay, node, p)
@@ -360,6 +372,9 @@ func waitProxiesRegistered(ctx context.Context, node *sshexec.Client, p Params) 
 // the parameters the tunnel was built with and the service restarted, so the
 // tunnel carries exactly p.Ports afterwards. Users on the tunnel reconnect.
 func UpdatePorts(ctx context.Context, relay, node *sshexec.Client, p Params) error {
+	if err := p.check(); err != nil {
+		return err
+	}
 	if len(p.Ports) == 0 {
 		return fmt.Errorf("a tunnel needs at least one port")
 	}

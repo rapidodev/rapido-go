@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -17,6 +18,10 @@ import (
 // nodeRestartTimeout bounds a restart: connect, restart, and wait for the agent
 // to come back and pull its config.
 const nodeRestartTimeout = 90 * time.Second
+
+func isNodeRestartPath(path string) bool {
+	return strings.HasPrefix(path, "/api/node/") && strings.HasSuffix(path, "/restart")
+}
 
 type nodeRestartRequest struct {
 	// Mode is "service" (restart the node agent) or "reboot" (the whole server).

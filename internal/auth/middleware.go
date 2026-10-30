@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -55,6 +56,10 @@ type Resolver interface {
 func RequireAdmin(issuer *TokenIssuer, resolver Resolver, sudoUsername string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		identity, reason, err := resolve(c, issuer, resolver, sudoUsername)
+		if errors.Is(err, errIdentityUnavailable) {
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"detail": "Could not check your session; try again"})
+			return
+		}
 		if err != nil {
 			unauthorized(c, reason)
 			return
@@ -69,12 +74,39 @@ func RequireAdmin(issuer *TokenIssuer, resolver Resolver, sudoUsername string) g
 func RequireSudo(issuer *TokenIssuer, resolver Resolver, sudoUsername string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		identity, reason, err := resolve(c, issuer, resolver, sudoUsername)
+		if errors.Is(err, errIdentityUnavailable) {
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"detail": "Could not check your session; try again"})
+			return
+		}
 		if err != nil {
 			unauthorized(c, reason)
 			return
 		}
 		if !identity.IsSudo {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"detail": "You're not allowed"})
+			return
+		}
+		c.Set(contextIdentityKey, identity)
+		c.Next()
+	}
+}
+
+// RequireOwner additionally rejects anyone below the owner tier: for what holds
+// the keys to every other tier. A database backup carries the secret that signs
+// tokens, so whoever can download one or load one can be anybody.
+func RequireOwner(issuer *TokenIssuer, resolver Resolver, sudoUsername string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		identity, reason, err := resolve(c, issuer, resolver, sudoUsername)
+		if errors.Is(err, errIdentityUnavailable) {
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"detail": "Could not check your session; try again"})
+			return
+		}
+		if err != nil {
+			unauthorized(c, reason)
+			return
+		}
+		if !identity.IsOwner {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"detail": "Only an owner can do this"})
 			return
 		}
 		c.Set(contextIdentityKey, identity)
@@ -96,6 +128,11 @@ const (
 	reasonPasswordReset = "token-predates-password-change"
 )
 
+// errIdentityUnavailable is a lookup that failed, as opposed to one that found the
+// token no good. A 401 tells the dashboard the session is over and logs the admin
+// out, and a database hiccup must not do that to everybody at once.
+var errIdentityUnavailable = errors.New("auth: could not look up the admin")
+
 func resolve(c *gin.Context, issuer *TokenIssuer, resolver Resolver, sudoUsername string) (*Identity, string, error) {
 	header := c.GetHeader("Authorization")
 	const prefix = "Bearer "
@@ -116,7 +153,10 @@ func resolve(c *gin.Context, issuer *TokenIssuer, resolver Resolver, sudoUsernam
 	}
 
 	adminID, isSudo, isOwner, passwordResetAt, found, err := resolver.ResolveAdmin(c.Request.Context(), claims.Username)
-	if err != nil || !found {
+	if err != nil {
+		return nil, "", errIdentityUnavailable
+	}
+	if !found {
 		return nil, reasonUnknownAdmin, ErrInvalidToken
 	}
 	if passwordResetAt != nil {

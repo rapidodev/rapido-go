@@ -327,6 +327,10 @@ func (h *Handler) handleCreateTunnel(c *gin.Context) {
 			return
 		}
 	}
+	if !tunnelprovision.ValidHost(req.RelayHost) {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": "relay_host must be an IP address or host name"})
+		return
+	}
 	if req.Method == "" {
 		req.Method = tunnelprovision.MethodFRPDirect
 	}
@@ -338,7 +342,7 @@ func (h *Handler) handleCreateTunnel(c *gin.Context) {
 		if a == "" {
 			continue
 		}
-		if _, err := netip.ParseAddr(a); err != nil {
+		if addr, err := netip.ParseAddr(a); err != nil || addr.Zone() != "" {
 			c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": label + " must be an IP address"})
 			return
 		}

@@ -325,6 +325,10 @@ func (h *Handler) handlePatchTunnel(c *gin.Context) {
 	}
 	if req.RelayHost != nil && strings.TrimSpace(*req.RelayHost) != "" {
 		p.RelayHost = strings.TrimSpace(*req.RelayHost)
+		if !tunnelprovision.ValidHost(p.RelayHost) {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": "relay_host must be an IP address or host name"})
+			return
+		}
 	}
 	if req.RelaySSHPort != nil && *req.RelaySSHPort > 0 {
 		p.RelaySshPort = *req.RelaySSHPort

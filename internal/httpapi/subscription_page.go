@@ -11,7 +11,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/legendary1205/rapido-go/internal/db/generated"
-	"github.com/legendary1205/rapido-go/internal/subscription"
 )
 
 //go:embed templates/subscription_page.html
@@ -39,7 +38,7 @@ type rapidoData struct {
 
 // buildRapidoData assembles rapidoData for one user - shared by the HTML
 // page's initial load and its /info poll endpoint.
-func (h *Handler) buildRapidoData(ctx context.Context, user generated.User) (rapidoData, error) {
+func (h *Handler) buildRapidoData(ctx context.Context, user generated.User, token string) (rapidoData, error) {
 	links, err := h.buildUserLinks(ctx, user)
 	if err != nil {
 		return rapidoData{}, err
@@ -68,7 +67,7 @@ func (h *Handler) buildRapidoData(ctx context.Context, user generated.User) (rap
 		s := user.OnlineAt.Time.UTC().Format(time.RFC3339)
 		data.OnlineAt = &s
 	}
-	data.SubURL = h.subURLPrefix + "/sub/" + subscription.CreateToken(user.Username, h.signingSecret())
+	data.SubURL = h.subURLPrefix + "/sub/" + token
 	return data, nil
 }
 
@@ -99,7 +98,7 @@ func setSubscriptionPageHeaders(c *gin.Context) {
 // recordSubUserAgent - loading the browser page must not bump
 // sub_updated_at/sub_last_user_agent, matching the Python HTML branch.
 func (h *Handler) handleSubscriptionPage(c *gin.Context, user generated.User) {
-	data, err := h.buildRapidoData(c.Request.Context(), user)
+	data, err := h.buildRapidoData(c.Request.Context(), user, c.Param("token"))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not read subscription info"})
 		return

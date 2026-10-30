@@ -36,9 +36,28 @@ SELECT inbound_tag FROM exclude_inbounds_association WHERE proxy_id = $1 ORDER B
 SELECT proxy_id, inbound_tag FROM exclude_inbounds_association
 WHERE proxy_id = ANY($1::int[]) ORDER BY proxy_id, inbound_tag;
 
+-- name: ProxyCredentialInUse :one
+-- Whether another user holds this credential, whatever that user's status: a
+-- disabled account can be enabled again. Asked only about a credential a client
+-- supplied, so the scan is paid for rarely. A UUID is stored lowercase since
+-- writes canonicalize it, but rows from before that may not be.
+SELECT EXISTS (
+    SELECT 1 FROM proxies
+    WHERE type = sqlc.arg(type)
+      AND user_id IS DISTINCT FROM sqlc.arg(user_id)::int
+      AND (settings ->> sqlc.arg(field)::text = sqlc.arg(value)::text
+           OR (sqlc.arg(field)::text = 'id' AND lower(settings ->> sqlc.arg(field)::text) = sqlc.arg(value)::text))
+);
+
 -- name: UpdateProxySettings :one
 UPDATE proxies SET settings = $2 WHERE id = $1
 RETURNING *;
+
+-- name: CountProxiesOutsideProtocols :many
+-- How many users would lose a credential if only these protocols had inbounds.
+SELECT type, count(*) AS users FROM proxies
+WHERE type <> ALL(sqlc.arg(protocols)::text[])
+GROUP BY type ORDER BY type;
 
 -- name: PruneOrphanedProxies :many
 -- Deletes every proxy whose protocol has no inbound left at all - called

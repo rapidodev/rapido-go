@@ -262,7 +262,7 @@ func gzippedPgDumpFixture(t *testing.T, body string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
-	if _, err := gz.Write([]byte(pgDumpHeader + "\n" + body)); err != nil {
+	if _, err := gz.Write([]byte(pgDumpHeader + "\n" + body + "\n" + pgDumpTrailer + "\n")); err != nil {
 		t.Fatalf("write gzip fixture: %v", err)
 	}
 	if err := gz.Close(); err != nil {
@@ -365,7 +365,7 @@ func TestRestoreBackupNotFound(t *testing.T) {
 
 func TestRestoreBackupTakesSafetyBackupAndCallsRestoreDatabase(t *testing.T) {
 	router, token, handler := newTestRouterAndHandler(t)
-	handler.dumpDatabase = fakeDump("-- current state\n")
+	handler.dumpDatabase = fakeDump("-- current state\n" + pgDumpTrailer + "\n")
 	createResp := doRequest(t, router, "POST", "/api/settings/backup", token, nil)
 	var toRestore backupInfo
 	json.Unmarshal(createResp.Raw, &toRestore)
@@ -384,7 +384,7 @@ func TestRestoreBackupTakesSafetyBackupAndCallsRestoreDatabase(t *testing.T) {
 	if result.SafetyBackup.Filename == "" || result.SafetyBackup.Filename == toRestore.Filename {
 		t.Errorf("safety backup filename = %q, want a new, distinct filename", result.SafetyBackup.Filename)
 	}
-	if string(*received) != "-- current state\n" {
+	if string(*received) != "-- current state\n"+pgDumpTrailer+"\n" {
 		t.Errorf("restoreDatabase received %q, want the exact backup content", *received)
 	}
 
@@ -486,7 +486,7 @@ func TestRestoreUploadRejectsNonPostgresFormat(t *testing.T) {
 
 func TestRestoreUploadAcceptsValidPgDumpAndCallsRestoreDatabase(t *testing.T) {
 	router, token, handler := newTestRouterAndHandler(t)
-	handler.dumpDatabase = fakeDump("-- current state before upload-restore\n")
+	handler.dumpDatabase = fakeDump("-- current state before upload-restore\n" + pgDumpTrailer + "\n")
 
 	restoreFn, received := fakeRestore(t, nil)
 	handler.restoreDatabase = restoreFn

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/legendary1205/rapido-go/internal/tunnelprovision"
 	"math"
 	"net/http"
 
@@ -239,6 +240,11 @@ func (h *Handler) handleCreateNode(c *gin.Context) {
 		return
 	}
 
+	if !tunnelprovision.ValidHost(req.Address) {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": "address must be an IP address or host name"})
+		return
+	}
+
 	ca, err := h.store.Queries.GetTLS(ctx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not load the Rapido CA"})
@@ -400,6 +406,10 @@ func (h *Handler) handleUpdateNode(c *gin.Context) {
 	}
 	if req.Address != nil {
 		address = *req.Address
+		if !tunnelprovision.ValidHost(address) {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": "address must be an IP address or host name"})
+			return
+		}
 	}
 	if req.Port != nil {
 		port = *req.Port

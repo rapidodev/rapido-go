@@ -17,6 +17,11 @@ const (
 
 var ErrInvalidToken = errors.New("auth: invalid or expired token")
 
+// Tokens carry sub-second times. Whole seconds can't tell a token issued just
+// after a password change from one issued just before it, and a login right after
+// a change got a token that was already too old to use.
+func init() { jwt.TimePrecision = time.Microsecond }
+
 type Claims struct {
 	Username  string `json:"sub"`
 	Access    string `json:"access"`
@@ -29,7 +34,10 @@ func (c Claims) IsSudo() bool { return c.Access == AccessSudo }
 type TokenIssuer struct {
 	mu     sync.RWMutex
 	secret []byte
-	ttl    time.Duration // <= 0 means tokens never expire, matching JWT_ACCESS_TOKEN_EXPIRE_MINUTES <= 0
+	// retired is the key that signed tokens until retiredAt. See AcceptRetiredKey.
+	retired   []byte
+	retiredAt time.Time
+	ttl       time.Duration // <= 0 means tokens never expire, matching JWT_ACCESS_TOKEN_EXPIRE_MINUTES <= 0
 }
 
 func NewTokenIssuer(secret []byte, ttl time.Duration) *TokenIssuer {
@@ -64,13 +72,42 @@ func (i *TokenIssuer) issue(username string, isSudo, bootstrap bool) (string, er
 	return token.SignedString(i.Secret())
 }
 
+// AcceptRetiredKey keeps tokens signed with an earlier key working until they
+// would have expired anyway: only tokens issued before the change, and only for
+// one token lifetime after it, so that a change of key logs nobody out and breaks
+// no bot holding a token, and is complete a day later.
+func (i *TokenIssuer) AcceptRetiredKey(key []byte, retiredAt time.Time) {
+	i.mu.Lock()
+	i.retired = append([]byte(nil), key...)
+	i.retiredAt = retiredAt
+	i.mu.Unlock()
+}
+
 func (i *TokenIssuer) Verify(tokenString string) (*Claims, error) {
+	claims, err := parseToken(tokenString, i.Secret())
+	if err == nil {
+		return claims, nil
+	}
+	i.mu.RLock()
+	retired, retiredAt := i.retired, i.retiredAt
+	i.mu.RUnlock()
+	if len(retired) == 0 || i.ttl <= 0 || time.Now().After(retiredAt.Add(i.ttl)) {
+		return nil, ErrInvalidToken
+	}
+	claims, err = parseToken(tokenString, retired)
+	if err != nil || claims.IssuedAt == nil || !claims.IssuedAt.Time.Before(retiredAt) {
+		return nil, ErrInvalidToken
+	}
+	return claims, nil
+}
+
+func parseToken(tokenString string, key []byte) (*Claims, error) {
 	claims := &Claims{}
 	token, err := jwt.ParseWithClaims(tokenString, claims, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, ErrInvalidToken
 		}
-		return i.Secret(), nil
+		return key, nil
 	})
 	if err != nil || !token.Valid {
 		return nil, ErrInvalidToken

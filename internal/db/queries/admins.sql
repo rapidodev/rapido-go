@@ -1,6 +1,8 @@
 -- name: CreateAdmin :one
-INSERT INTO admins (username, hashed_password, is_sudo, telegram_id, discord_webhook)
-VALUES ($1, $2, $3, $4, $5)
+-- password_reset_at from the start: a token still around from a deleted admin of
+-- the same name must not work for this one.
+INSERT INTO admins (username, hashed_password, is_sudo, telegram_id, discord_webhook, password_reset_at)
+VALUES ($1, $2, $3, $4, $5, now())
 RETURNING *;
 
 -- name: GetAdminByUsername :one

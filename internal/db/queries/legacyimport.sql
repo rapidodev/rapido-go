@@ -9,6 +9,8 @@ RETURNING *;
 
 -- name: ImportUser :one
 -- Like CreateUser, but also sets every historical/runtime field a fresh
+-- A periodic reset counts from the import, or everyone on a reset strategy would
+-- have their imported usage wiped on the job's next pass.
 -- user creation never has (used_traffic, created_at, sub_revoked_at,
 -- sub_updated_at, sub_last_user_agent, online_at, edit_at,
 -- last_status_change) - same rationale as ImportAdmin.
@@ -16,8 +18,8 @@ INSERT INTO users (
     username, status, used_traffic, data_limit, expire, created_at, admin_id,
     data_limit_reset_strategy, sub_revoked_at, note, sub_updated_at,
     sub_last_user_agent, online_at, edit_at, on_hold_timeout,
-    on_hold_expire_duration, auto_delete_in_days, last_status_change
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+    on_hold_expire_duration, auto_delete_in_days, last_status_change, last_usage_reset_at
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, now())
 RETURNING *;
 
 -- name: ImportUserWithID :one
@@ -30,8 +32,8 @@ INSERT INTO users (
     id, username, status, used_traffic, data_limit, expire, created_at, admin_id,
     data_limit_reset_strategy, sub_revoked_at, note, sub_updated_at,
     sub_last_user_agent, online_at, edit_at, on_hold_timeout,
-    on_hold_expire_duration, auto_delete_in_days, last_status_change
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+    on_hold_expire_duration, auto_delete_in_days, last_status_change, last_usage_reset_at
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, now())
 RETURNING *;
 
 -- name: SyncUsersIDSequence :exec

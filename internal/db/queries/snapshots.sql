@@ -28,16 +28,23 @@ DELETE FROM hosts;
 -- name: RestoreFleetHosts :exec
 INSERT INTO hosts(remark,address,port,path,sni,host,security,alpn,fingerprint,inbound_tag,allowinsecure,is_disabled,mux_enable,fragment_setting,noise_setting,random_user_agent,use_sni_as_host,priority) SELECT remark,address,port,path,sni,host,security,alpn,fingerprint,inbound_tag,allowinsecure,is_disabled,mux_enable,fragment_setting,noise_setting,random_user_agent,use_sni_as_host,priority FROM jsonb_populate_recordset(NULL::hosts,sqlc.arg('config')::jsonb->'hosts');
 
--- name: ClearFleetExclusions :exec
-DELETE FROM exclude_inbounds_association;
 -- name: RestoreFleetExclusions :exec
+-- Only for inbounds this restore brought back, whose exclusions went with them
+-- when they were deleted. Those of an inbound that stayed are the users' current
+-- assignments: clearing them would put every user created or changed since the
+-- snapshot on inbounds they were kept off.
 INSERT INTO exclude_inbounds_association(proxy_id,inbound_tag)
-SELECT e.proxy_id,e.inbound_tag FROM jsonb_populate_recordset(NULL::exclude_inbounds_association,sqlc.arg('config')::jsonb->'exclusions') e JOIN proxies p ON p.id=e.proxy_id JOIN inbounds i ON i.tag=e.inbound_tag;
--- name: ClearFleetTemplateInbounds :exec
-DELETE FROM template_inbounds_association;
+SELECT e.proxy_id,e.inbound_tag FROM jsonb_populate_recordset(NULL::exclude_inbounds_association,sqlc.arg('config')::jsonb->'exclusions') e
+JOIN proxies p ON p.id=e.proxy_id JOIN inbounds i ON i.tag=e.inbound_tag
+WHERE NOT e.inbound_tag = ANY(sqlc.arg('kept_tags')::text[])
+ON CONFLICT DO NOTHING;
 -- name: RestoreFleetTemplateInbounds :exec
+-- Same reasoning as RestoreFleetExclusions.
 INSERT INTO template_inbounds_association(user_template_id,inbound_tag)
-SELECT e.user_template_id,e.inbound_tag FROM jsonb_populate_recordset(NULL::template_inbounds_association,sqlc.arg('config')::jsonb->'templates') e JOIN user_templates t ON t.id=e.user_template_id JOIN inbounds i ON i.tag=e.inbound_tag;
+SELECT e.user_template_id,e.inbound_tag FROM jsonb_populate_recordset(NULL::template_inbounds_association,sqlc.arg('config')::jsonb->'templates') e
+JOIN user_templates t ON t.id=e.user_template_id JOIN inbounds i ON i.tag=e.inbound_tag
+WHERE NOT e.inbound_tag = ANY(sqlc.arg('kept_tags')::text[])
+ON CONFLICT DO NOTHING;
 -- name: RestoreFleetNodeProfiles :exec
 UPDATE nodes n SET inbound_tags=s.inbound_tags,listen_ports=s.listen_ports,core_overrides=s.core_overrides
 FROM jsonb_populate_recordset(NULL::nodes,sqlc.arg('config')::jsonb->'nodes') s WHERE n.id=s.id;

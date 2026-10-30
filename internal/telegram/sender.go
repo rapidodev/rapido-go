@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/legendary1205/rapido-go/internal/controlurl"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -124,7 +125,7 @@ func (s *Sender) send(ctx context.Context, cfg Config, chatID int64, text string
 
 	resp, err := client.Do(req)
 	if err != nil {
-		logger.Warn("telegram: sendMessage failed", "chat_id", chatID, "error", err)
+		logger.Warn("telegram: sendMessage failed", "chat_id", chatID, "error", controlurl.RedactError(err))
 		return
 	}
 	defer resp.Body.Close()
@@ -173,7 +174,7 @@ func (s *Sender) CreateForumTopic(ctx context.Context, cfg Config, chatID int64,
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("createForumTopic: %w", err)
+		return 0, fmt.Errorf("createForumTopic: %w", controlurl.RedactError(err))
 	}
 	defer resp.Body.Close()
 

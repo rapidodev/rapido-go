@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strconv"
@@ -144,7 +145,14 @@ func (h *Handler) handleGetCoreConfigBackup(c *gin.Context) {
 		c.JSON(404, gin.H{"detail": "Backup not found"})
 		return
 	}
-	c.JSON(200, row)
+	c.JSON(200, coreSnapshotPreview(row))
+}
+
+// coreSnapshotPreview sends the snapshot's config as the JSON it is: the
+// generated row holds it as []byte, which encoding/json would turn into a
+// base64 string no admin can read before deciding to restore it.
+func coreSnapshotPreview(row generated.CoreConfigSnapshot) gin.H {
+	return gin.H{"id": row.ID, "created_at": row.CreatedAt, "reason": row.Reason, "config": json.RawMessage(row.Config)}
 }
 func (h *Handler) handleRestoreCoreConfigBackup(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)

@@ -165,10 +165,14 @@ func (h *Handler) handleGetSystemStats(c *gin.Context) {
 	}
 
 	stats := systemStatsDTO{Version: compatAPIVersion, TotalUser: total, OnlineUsers: online}
-	h.fillHostResources(c, &stats)
-	if sys, err := h.store.Queries.GetSystem(ctx); err == nil {
-		stats.IncomingBandwidth = pgInt8ToInt64(sys.Uplink)
-		stats.OutgoingBandwidth = pgInt8ToInt64(sys.Downlink)
+	// The server's load and the whole panel's traffic are not a reseller's business:
+	// the counts above are already scoped to their own users.
+	if identity.IsSudo {
+		h.fillHostResources(c, &stats)
+		if sys, err := h.store.Queries.GetSystem(ctx); err == nil {
+			stats.IncomingBandwidth = pgInt8ToInt64(sys.Uplink)
+			stats.OutgoingBandwidth = pgInt8ToInt64(sys.Downlink)
+		}
 	}
 	for _, row := range byStatus {
 		switch row.Status {
@@ -208,10 +212,13 @@ func (h *Handler) handleGetSystemUsageHistory(c *gin.Context) {
 	start := now.AddDate(0, 0, -(days - 1))
 
 	byDay := make(map[string]int64, days)
-	rows, err := h.store.Queries.GetDailyUsageHistory(c.Request.Context(), timestamptzFromTime(start.Truncate(24*time.Hour)))
-	if err == nil {
-		for _, r := range rows {
-			byDay[r.Day.Time.Format("2006-01-02")] = r.Usage
+	// Fleet-wide traffic: a reseller gets the empty series, not everybody's total.
+	if identity := auth.CurrentIdentity(c); identity != nil && identity.IsSudo {
+		rows, err := h.store.Queries.GetDailyUsageHistory(c.Request.Context(), timestamptzFromTime(start.Truncate(24*time.Hour)))
+		if err == nil {
+			for _, r := range rows {
+				byDay[r.Day.Time.Format("2006-01-02")] = r.Usage
+			}
 		}
 	}
 

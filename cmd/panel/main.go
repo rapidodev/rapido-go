@@ -118,7 +118,12 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	issuer := auth.NewTokenIssuer(secret, cfg.JWTAccessTTL)
+	adminKey, adminKeySince, err := loadAdminTokenKey(ctx, queries)
+	if err != nil {
+		return err
+	}
+	issuer := auth.NewTokenIssuer(adminKey, cfg.JWTAccessTTL)
+	issuer.AcceptRetiredKey(secret, adminKeySince)
 
 	if err := ensureTLS(ctx, queries, logger); err != nil {
 		return err
@@ -177,15 +182,28 @@ func run(logger *slog.Logger) error {
 		envDefaults, dispatcher, resellerAPIClient, cfg.LoginNotifyWhitelist, hostMetricsTracker,
 		cfg.DatabaseURL, cfg.BackupDir, cfg.BackupKeep, logger).WithSubscriptionURLPrefixes(cfg.SubscriptionURLPrefixes).WithNodeBinDir(cfg.NodeBinDir).
 		WithConfigLoad(cfg.ConfigLoadIndicator, cfg.ConfigLoadCapacity, cfg.ConfigSortByLoad)
-	handler.WithSigningKeyLoader(func(ctx context.Context) ([]byte, error) {
+	handler.WithSigningKeyLoader(func(ctx context.Context) (httpapi.SigningKeys, error) {
 		row, err := queries.GetJWTSecret(ctx)
 		if err != nil {
-			return nil, err
+			return httpapi.SigningKeys{}, err
 		}
-		return hex.DecodeString(row.SecretKey)
+		subscriptionKey, err := hex.DecodeString(row.SecretKey)
+		if err != nil {
+			return httpapi.SigningKeys{}, err
+		}
+		// A backup from before admin tokens had a key of their own has none.
+		if !row.AdminTokenKey.Valid {
+			adminKey, since, err := loadAdminTokenKey(ctx, queries)
+			return httpapi.SigningKeys{Subscription: subscriptionKey, Admin: adminKey, AdminSince: since}, err
+		}
+		adminKey, err := hex.DecodeString(row.AdminTokenKey.String)
+		return httpapi.SigningKeys{Subscription: subscriptionKey, Admin: adminKey, AdminSince: row.AdminTokenKeySince.Time}, err
 	})
 	handler.WithAfterRestore(func(ctx context.Context) error {
-		return exec.CommandContext(ctx, "goose", "-dir", "internal/db/migrations", "postgres", cfg.DatabaseURL, "up").Run()
+		// In the environment: as an argument the password would be in `ps` on the host.
+		cmd := exec.CommandContext(ctx, "goose", "-dir", "internal/db/migrations", "postgres", "up")
+		cmd.Env = append(os.Environ(), "GOOSE_DBSTRING="+cfg.DatabaseURL)
+		return cmd.Run()
 	})
 	dispatcher.SetWebhookSink(store.EnqueueWebhook)
 	dispatcher.OnUserChanged(handler.SyncUserByName)
@@ -207,7 +225,9 @@ func run(logger *slog.Logger) error {
 		IdleTimeout:       time.Minute,
 	}
 
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -221,6 +241,10 @@ func run(logger *slog.Logger) error {
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
+	// ListenAndServe returns as soon as Shutdown starts. Requests still running
+	// need Redis and the database, whose deferred closes are next: a user change
+	// committed now would otherwise leave its cache entry stale for hours.
+	<-shutdownDone
 	return nil
 }
 
@@ -280,13 +304,21 @@ func runAsBackendSingleton(ctx context.Context, databaseURL string, queries *gen
 				case <-jobsCtx.Done():
 					return
 				case <-ticker.C:
-					check, cancel := context.WithTimeout(jobsCtx, 2*time.Second)
+					// Long enough that a slow moment isn't mistaken for a lost
+					// connection: a timed-out ping closes the connection, and
+					// the lock with it.
+					check, cancel := context.WithTimeout(jobsCtx, 15*time.Second)
 					err := conn.Ping(check)
 					cancel()
-					if err != nil {
-						logger.Error("lost singleton connection; stopping every backend job", "error", err)
-						cancelJobs()
-						return
+					if err != nil && jobsCtx.Err() == nil {
+						// Another backend may hold the lock already, and the jobs
+						// can't all be stopped and waited for from here. Leaving
+						// is the one way that's certain, and the restart that
+						// follows is what tries for the lock again; carrying on
+						// without one would stop enforcement, the outbox and
+						// billing until somebody restarted this by hand.
+						logger.Error("lost the backend singleton lock; exiting", "error", err)
+						os.Exit(1)
 					}
 				}
 			}
@@ -413,13 +445,14 @@ func runAsBackendSingleton(ctx context.Context, databaseURL string, queries *gen
 		go resellerusagejob.Run(ctx, queries, usageReporter, settingsFn, redisClient, logger, 10*time.Second)
 		// Prunes node_user_usages hourly (USAGE_RETENTION_DAYS, 0 = keep all).
 		go usagejob.Run(ctx, queries, redisClient, usageRetentionDays, logger, time.Hour)
+		go usagejob.RunHousekeeping(ctx, queries, redisClient, logger, time.Hour)
 		// Long polling: two pollers on one bot token fight, so it lives here.
 		// Dormant until a Telegram bot token is configured.
 		go runConsole(ctx)
 		reviewjob.Run(ctx, queries, dispatcher, redisClient, logger, 10*time.Second)
 
-		// reviewjob.Run only returns once ctx is canceled (process shutdown) -
-		// release the lock and let the deferred loop exit via ctx.Done() above.
+		// reviewjob.Run only returns once ctx is canceled, which is process
+		// shutdown: losing the lock ends the process above.
 		cancelJobs()
 		<-monitorDone
 		conn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", cache.AdvisoryLockBackendSingleton)
@@ -510,6 +543,21 @@ func ensureJWTSecret(ctx context.Context, q *generated.Queries) ([]byte, error) 
 		return nil, err
 	}
 	return hex.DecodeString(created.SecretKey)
+}
+
+// loadAdminTokenKey returns the key admin tokens are signed with, generating it
+// the first time. It must follow ensureJWTSecret: it fills in the row that makes.
+func loadAdminTokenKey(ctx context.Context, q *generated.Queries) ([]byte, time.Time, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return nil, time.Time{}, err
+	}
+	stored, err := q.EnsureAdminTokenKey(ctx, pgtype.Text{String: hex.EncodeToString(raw), Valid: true})
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	key, err := hex.DecodeString(stored.AdminTokenKey.String)
+	return key, stored.AdminTokenKeySince.Time, err
 }
 
 // ensureTLS returns the singleton tls row, generating the Rapido-branded

@@ -29,6 +29,40 @@ type xrayConfigDTO struct {
 	UpdatedAt    *time.Time         `json:"updated_at,omitempty"`
 }
 
+// inboundSyncEntryFromDetail carries every setting of an inbound from the
+// document into the upsert. syncInboundEntries overwrites whatever it isn't
+// given, so a field left out here is wiped by the next Apply - and for
+// snell, shadowtls and hysteria, whose required fields it validates, every
+// Apply on a panel holding such an inbound is refused outright.
+func inboundSyncEntryFromDetail(in inboundDetailDTO) inboundSyncEntry {
+	return inboundSyncEntry{
+		Tag: in.Tag, Protocol: in.Protocol, Network: in.Network, HeaderType: in.HeaderType,
+		Security: in.Security, RealityPrivateKey: in.RealityPrivateKey, RealityShortIDs: in.RealityShortIDs,
+		RealityServerName: in.RealityServerName, RealityServerPort: in.RealityServerPort,
+		TLSCertificate: in.TLSCertificate, TLSKey: in.TLSKey, TLSServerName: in.TLSServerName,
+		Hysteria2ObfsPassword: in.Hysteria2ObfsPassword, UpMbps: in.UpMbps, DownMbps: in.DownMbps,
+		CongestionControl: in.CongestionControl, ZeroRTTHandshake: in.ZeroRTTHandshake,
+		SnellPSK: in.SnellPSK, SnellV6Mode: in.SnellV6Mode, HysteriaObfsPassword: in.HysteriaObfsPassword,
+		ShadowTLSInnerMethod: in.ShadowTLSInnerMethod, ShadowTLSInnerPassword: in.ShadowTLSInnerPassword,
+	}
+}
+
+// validateInboundTags refuses what an upsert by tag would otherwise quietly
+// accept: an inbound with no name, or two entries overwriting each other.
+func validateInboundTags(inbounds []inboundDetailDTO) string {
+	seen := make(map[string]bool, len(inbounds))
+	for _, in := range inbounds {
+		if in.Tag == "" {
+			return "inbound tag is required"
+		}
+		if seen[in.Tag] {
+			return "duplicate inbound tag: " + in.Tag
+		}
+		seen[in.Tag] = true
+	}
+	return ""
+}
+
 // handleGetXrayConfig implements GET /api/settings/xray-config (sudo only).
 func (h *Handler) handleGetXrayConfig(c *gin.Context) {
 	ctx := c.Request.Context()
@@ -90,6 +124,10 @@ func (h *Handler) handleUpdateXrayConfig(c *gin.Context) {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": msg})
 		return
 	}
+	if msg := validateInboundTags(dto.Inbounds); msg != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": msg})
+		return
+	}
 
 	ctx := c.Request.Context()
 
@@ -112,14 +150,20 @@ func (h *Handler) handleUpdateXrayConfig(c *gin.Context) {
 
 	entries := make([]inboundSyncEntry, 0, len(dto.Inbounds))
 	submittedTags := make(map[string]bool, len(dto.Inbounds))
+	remainingProtocols := make([]string, 0, len(dto.Inbounds))
 	for _, in := range dto.Inbounds {
-		entries = append(entries, inboundSyncEntry{
-			Tag: in.Tag, Protocol: in.Protocol, Network: in.Network, HeaderType: in.HeaderType,
-			Security: in.Security, RealityPrivateKey: in.RealityPrivateKey, RealityShortIDs: in.RealityShortIDs,
-			RealityServerName: in.RealityServerName, RealityServerPort: in.RealityServerPort,
-			TLSCertificate: in.TLSCertificate, TLSKey: in.TLSKey, TLSServerName: in.TLSServerName,
-		})
+		entries = append(entries, inboundSyncEntryFromDetail(in))
 		submittedTags[in.Tag] = true
+		remainingProtocols = append(remainingProtocols, in.Protocol)
+	}
+	// Only a removal prunes anything: proxies already left without an inbound since
+	// long ago are no reason to stop an apply that removes nothing.
+	removesInbound := false
+	for _, tag := range previousTags {
+		removesInbound = removesInbound || !submittedTags[tag]
+	}
+	if removesInbound && !h.droppingCredentialsConfirmed(c, remainingProtocols) {
+		return
 	}
 	if _, err := h.syncInboundEntries(ctx, entries); err != nil {
 		var verr *inboundValidationError

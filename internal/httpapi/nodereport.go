@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/legendary1205/rapido-go/internal/db/generated"
@@ -37,8 +38,15 @@ func (h *Handler) requireNodeSecret(c *gin.Context) {
 	}
 	secret := strings.TrimPrefix(header, prefix)
 	node, err := h.store.Queries.GetNodeByReportSecret(c.Request.Context(), pgtype.Text{String: secret, Valid: true})
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"detail": "Invalid node report secret"})
+		return
+	}
+	if err != nil {
+		// Not a verdict on the secret: a node takes a 401 to mean it was removed
+		// from this panel, and a database hiccup must not read as that.
+		h.logger.Error("node secret lookup failed", "error", err)
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"detail": "Could not check the node secret; retry"})
 		return
 	}
 	c.Set(nodeIDContextKey, node.ID)
@@ -56,6 +64,11 @@ type nodeReportRequest struct {
 	ReportID string                `json:"report_id"`
 	Users    []nodeReportUserUsage `json:"users"`
 	Host     hostmetrics.Sample    `json:"host"`
+	// AgentVersion and ConfigError are absent from an agent older than them,
+	// which AgentVersion being empty tells apart from an agent with nothing to
+	// complain about.
+	AgentVersion string `json:"agent_version"`
+	ConfigError  string `json:"config_error"`
 }
 
 // handleNodeReport implements POST /api/internal/node-report - the
@@ -93,8 +106,41 @@ func (h *Handler) handleNodeReport(c *gin.Context) {
 	if err := h.store.Queries.MarkNodeConnectedIfNotDisabled(ctx, nodeID); err != nil {
 		h.logger.Error("node report: mark node connected", "error", err)
 	}
+	h.recordNodeAgentState(ctx, c, req)
 
 	c.JSON(http.StatusOK, gin.H{"detail": "recorded", "report_id": req.ReportID})
+}
+
+// maxNodeMessageLen bounds what an agent can leave on the Nodes page.
+const maxNodeMessageLen = 500
+
+// recordNodeAgentState keeps what the agent runs and why it can't run the
+// current config, the one thing otherwise known only on the node. Written only
+// when it changed: this runs on every report of every node.
+func (h *Handler) recordNodeAgentState(ctx context.Context, c *gin.Context, req nodeReportRequest) {
+	if req.AgentVersion == "" {
+		return
+	}
+	node, ok := c.Get(nodeRowContextKey)
+	if !ok {
+		return
+	}
+	row := node.(generated.Node)
+	version := pgtype.Text{String: req.AgentVersion, Valid: true}
+	message := pgtype.Text{}
+	if req.ConfigError != "" {
+		text := req.ConfigError
+		if len(text) > maxNodeMessageLen {
+			text = strings.ToValidUTF8(text[:maxNodeMessageLen], "")
+		}
+		message = pgtype.Text{String: text, Valid: true}
+	}
+	if row.XrayVersion == version && row.Message == message {
+		return
+	}
+	if err := h.store.Queries.UpdateNodeAgentState(ctx, generated.UpdateNodeAgentStateParams{ID: row.ID, XrayVersion: version, Message: message}); err != nil {
+		h.logger.Error("node report: store agent state", "error", err)
+	}
 }
 
 func nodeKey(nodeID int32) string {

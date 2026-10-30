@@ -9,6 +9,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -49,9 +52,11 @@ const (
 type ShadowsocksMethod string
 
 const (
-	AES128GCM        ShadowsocksMethod = "aes-128-gcm"
-	AES256GCM        ShadowsocksMethod = "aes-256-gcm"
-	Chacha20Poly1305 ShadowsocksMethod = "chacha20-ietf-poly1305"
+	AES128GCM         ShadowsocksMethod = "aes-128-gcm"
+	AES192GCM         ShadowsocksMethod = "aes-192-gcm"
+	AES256GCM         ShadowsocksMethod = "aes-256-gcm"
+	Chacha20Poly1305  ShadowsocksMethod = "chacha20-ietf-poly1305"
+	XChacha20Poly1305 ShadowsocksMethod = "xchacha20-ietf-poly1305"
 )
 
 // Settings is the per-protocol settings payload stored as proxies.settings
@@ -175,12 +180,162 @@ func hasSettings(raw json.RawMessage) bool {
 	return !bytes.Equal(bytes.TrimSpace(raw), []byte("[]"))
 }
 
+// IsEmpty reports whether a payload names no settings at all.
+func IsEmpty(raw json.RawMessage) bool { return !hasSettings(raw) }
+
 // FromWire builds a Settings from a client-supplied JSON payload for the
 // given protocol, applying the same defaulting rules as the Python
 // ProxySettings subclasses: a missing/empty id or password is generated,
 // never left blank.
+//
+// What comes back is safe to hand to a node: a credential a client spelled in
+// some other form is rewritten to the one the panel compares, and one no core
+// can serve is an error here rather than a refused user list later.
 func FromWire(proxyType ProxyType, raw json.RawMessage) (Settings, error) {
-	return parse(proxyType, raw, true)
+	s, err := parse(proxyType, raw, true)
+	if err != nil {
+		return Settings{}, err
+	}
+	s.canonicalize()
+	if err := s.Validate(); err != nil {
+		return Settings{}, err
+	}
+	if s.Type == Trojan {
+		if err := checkFlow(s.Trojan.Flow); err != nil {
+			return Settings{}, err
+		}
+	}
+	return s, nil
+}
+
+// canonicalize rewrites what clients may spell several ways into one spelling.
+// A core parses "ABC..." and "abc..." to the same user, so stored forms that
+// differ only by case would hide a duplicate from every comparison.
+func (s *Settings) canonicalize() {
+	canon := func(id *string) {
+		if parsed, err := uuid.Parse(*id); err == nil {
+			*id = parsed.String()
+		}
+	}
+	switch s.Type {
+	case VMess:
+		canon(&s.VMess.ID)
+	case VLESS:
+		canon(&s.VLESS.ID)
+	case TUIC:
+		canon(&s.TUIC.ID)
+	}
+}
+
+// maxSecretLength bounds a password-like credential. Generated ones are 22
+// characters; a sane client never comes near this.
+const maxSecretLength = 256
+
+func checkUUID(protocol, id string) error {
+	if _, err := uuid.Parse(id); err != nil {
+		return fmt.Errorf("invalid %s id: must be a UUID", protocol)
+	}
+	return nil
+}
+
+func checkSecret(protocol, secret string) error {
+	if secret == "" || len(secret) > maxSecretLength || !utf8.ValidString(secret) {
+		return fmt.Errorf("invalid %s password: must be 1 to %d characters", protocol, maxSecretLength)
+	}
+	for _, r := range secret {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("invalid %s password: control characters are not allowed", protocol)
+		}
+	}
+	return nil
+}
+
+func checkFlow(flow XTLSFlow) error {
+	if flow != FlowNone && flow != FlowVision {
+		return fmt.Errorf("invalid flow %q: must be empty or %q", flow, FlowVision)
+	}
+	return nil
+}
+
+// ShadowsocksMethods is every cipher a node can run for a multi-user inbound.
+// A 2022 cipher is deliberately missing: it needs a server key that isn't
+// per-user, and a node refuses a config naming one.
+var ShadowsocksMethods = []ShadowsocksMethod{AES128GCM, AES192GCM, AES256GCM, Chacha20Poly1305, XChacha20Poly1305}
+
+// Validate reports why these settings can't be served. A core refuses a whole
+// user list over one bad entry, so this guards both ways in: every write, and
+// every read that builds a node's config from rows already stored.
+func (s Settings) Validate() error {
+	switch s.Type {
+	case VMess:
+		return checkUUID("vmess", s.VMess.ID)
+	case VLESS:
+		if err := checkUUID("vless", s.VLESS.ID); err != nil {
+			return err
+		}
+		return checkFlow(s.VLESS.Flow)
+	case Trojan:
+		return checkSecret("trojan", s.Trojan.Password)
+	case Shadowsocks:
+		if !slices.Contains(ShadowsocksMethods, s.Shadowsocks.Method) {
+			return fmt.Errorf("invalid shadowsocks method %q", s.Shadowsocks.Method)
+		}
+		return checkSecret("shadowsocks", s.Shadowsocks.Password)
+	case Hysteria2:
+		return checkSecret("hysteria2", s.Hysteria2.Password)
+	case TUIC:
+		if err := checkUUID("tuic", s.TUIC.ID); err != nil {
+			return err
+		}
+		return checkSecret("tuic", s.TUIC.Password)
+	case Snell:
+		return checkSecret("snell", s.Snell.UserKey)
+	case AnyTLS:
+		return checkSecret("anytls", s.AnyTLS.Password)
+	case Hysteria:
+		return checkSecret("hysteria", s.Hysteria.AuthString)
+	case Naive:
+		return checkSecret("naive", s.Naive.Password)
+	case ShadowTLS:
+		return checkSecret("shadowtls", s.ShadowTLS.Password)
+	}
+	return fmt.Errorf("proxysettings: unknown proxy type %q", s.Type)
+}
+
+// Credential is what a core tells this protocol's users apart by, and the JSON
+// field it is stored under. Two users sharing one are a single user to the
+// core, so a node's list must not carry both. Naive identifies users by name
+// and has no such value.
+func (s Settings) Credential() (field, value string) {
+	canon := func(id string) string {
+		if parsed, err := uuid.Parse(id); err == nil {
+			return parsed.String()
+		}
+		return id
+	}
+	switch s.Type {
+	case VMess:
+		return "id", canon(s.VMess.ID)
+	case VLESS:
+		return "id", canon(s.VLESS.ID)
+	case Trojan:
+		return "password", s.Trojan.Password
+	case Shadowsocks:
+		return "password", s.Shadowsocks.Password
+	case Hysteria2:
+		return "password", s.Hysteria2.Password
+	case TUIC:
+		return "id", canon(s.TUIC.ID)
+	case Snell:
+		return "user_key", s.Snell.UserKey
+	case AnyTLS:
+		return "password", s.AnyTLS.Password
+	case Hysteria:
+		return "auth_str", s.Hysteria.AuthString
+	case ShadowTLS:
+		return "password", s.ShadowTLS.Password
+	}
+	return "", ""
 }
 
 // parse does the work for both entry points. coerceVisionFlow separates

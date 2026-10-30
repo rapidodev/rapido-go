@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"time"
 
@@ -76,7 +77,25 @@ type userWriteRequest struct {
 	OnHoldExpireDuration   *int64                     `json:"on_hold_expire_duration"`
 	OnHoldTimeout          *time.Time                 `json:"on_hold_timeout"`
 	AutoDeleteInDays       *int32                     `json:"auto_delete_in_days"`
-	NextPlan               *nextPlanDTO               `json:"next_plan"`
+	NextPlan               optionalNextPlan           `json:"next_plan"`
+}
+
+// optionalNextPlan tells apart the three things a request can say about a next
+// plan: nothing (leave it), null (remove it), or a plan (replace it). Absent and
+// null decoding alike would make every partial edit discard a plan a bot sold.
+type optionalNextPlan struct {
+	present bool
+	plan    *nextPlanDTO
+}
+
+func (o *optionalNextPlan) UnmarshalJSON(raw []byte) error {
+	o.present = true
+	if isJSONNull(raw) {
+		o.plan = nil
+		return nil
+	}
+	o.plan = new(nextPlanDTO)
+	return json.Unmarshal(raw, o.plan)
 }
 
 type userCreateRequest struct {
@@ -203,6 +222,10 @@ func (h *Handler) handleCreateUser(c *gin.Context) {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": expireOutOfRangeDetail})
 		return
 	}
+	if detail := checkDurations(req); detail != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": detail})
+		return
+	}
 
 	ctx := c.Request.Context()
 	// A create has nothing to remove yet, so the second return (explicit
@@ -212,6 +235,22 @@ func (h *Handler) handleCreateUser(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": err.Error()})
 		return
+	}
+	if !h.credentialsAreFree(c, 0, req.Proxies, settingsByType, nil) {
+		return
+	}
+
+	if !identity.IsSudo {
+		protocols := make([]string, 0, len(settingsByType))
+		for protocol := range settingsByType {
+			protocols = append(protocols, protocol)
+		}
+		if req.Inbounds == nil {
+			req.Inbounds = map[string][]string{}
+		}
+		if !h.limitInboundsToResellerScope(c, identity, protocols, req.Inbounds) {
+			return
+		}
 	}
 
 	// UserCreate.validate_inbounds: unknown protocols in `inbounds` are
@@ -271,10 +310,10 @@ func (h *Handler) handleCreateUser(c *gin.Context) {
 		}
 	}
 
-	if req.NextPlan != nil {
+	if plan := req.NextPlan.plan; plan != nil {
 		if _, err := h.store.Queries.UpsertNextPlan(ctx, generated.UpsertNextPlanParams{
-			UserID: dbuser.ID, DataLimit: req.NextPlan.DataLimit, Expire: pgInt4FromInt(int(req.NextPlan.Expire)),
-			AddRemainingTraffic: req.NextPlan.AddRemainingTraffic, FireOnEither: req.NextPlan.FireOnEither,
+			UserID: dbuser.ID, DataLimit: plan.DataLimit, Expire: pgInt4FromInt(int(plan.Expire)),
+			AddRemainingTraffic: plan.AddRemainingTraffic, FireOnEither: plan.FireOnEither,
 		}); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not create next_plan"})
 			return
@@ -352,6 +391,117 @@ func resolveProxySettings(raw map[string]json.RawMessage) (wanted map[string]pro
 // real value.
 func isJSONNull(raw json.RawMessage) bool {
 	return string(bytes.TrimSpace(raw)) == "null"
+}
+
+// maxPlanSeconds bounds a duration the review job adds to now() in an int4
+// column. A value past it - an absolute timestamp sent where a duration belongs
+// is the usual way - would fail that statement on every tick.
+const maxPlanSeconds = 20 * 365 * 24 * 60 * 60
+
+// checkDurations returns why a request's durations can't be stored, or "".
+func checkDurations(req userWriteRequest) string {
+	if d := req.OnHoldExpireDuration; d != nil && (*d < 0 || *d > maxPlanSeconds) {
+		return "on_hold_expire_duration must be between 0 and 20 years, in seconds"
+	}
+	if plan := req.NextPlan.plan; plan != nil {
+		if plan.Expire < 0 || plan.Expire > maxPlanSeconds {
+			return "next_plan.expire must be a duration between 0 and 20 years, in seconds"
+		}
+		if plan.DataLimit < 0 {
+			return "next_plan.data_limit cannot be negative"
+		}
+	}
+	return ""
+}
+
+// keepStoredProxySettings makes a proxies entry on PUT the partial update the
+// rest of that endpoint is: for a protocol the user already has, only what the
+// entry names changes. An empty entry leaves the credential alone rather than
+// generating a new one, which would cut off every client still holding the old
+// one until it refreshed its subscription; rotating is what revoke_sub is for.
+// An entry that changes nothing is dropped, so it costs no write either.
+func keepStoredProxySettings(raw map[string]json.RawMessage, stored []generated.Proxy) map[string]json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	out := make(map[string]json.RawMessage, len(raw))
+	for protocol, payload := range raw {
+		out[protocol] = payload
+	}
+	for _, p := range stored {
+		payload, sent := out[p.Type]
+		if !sent || isJSONNull(payload) {
+			continue
+		}
+		var current, changes map[string]json.RawMessage
+		if err := json.Unmarshal(p.Settings, &current); err != nil {
+			continue
+		}
+		if !proxysettings.IsEmpty(payload) {
+			if err := json.Unmarshal(payload, &changes); err != nil {
+				continue // not an object: FromWire says so
+			}
+		}
+		changed := false
+		for field, value := range changes {
+			// An empty credential means "none given", as it does on create.
+			if field != "flow" && string(bytes.TrimSpace(value)) == `""` {
+				continue
+			}
+			if string(current[field]) != string(bytes.TrimSpace(value)) {
+				current[field] = value
+				changed = true
+			}
+		}
+		if !changed {
+			delete(out, p.Type)
+			continue
+		}
+		if merged, err := json.Marshal(current); err == nil {
+			out[p.Type] = merged
+		}
+	}
+	return out
+}
+
+// credentialsAreFree answers 409 and returns false when a request hands a user
+// a credential another user holds: to a core those are one account, whichever
+// connects, and a node's list can only carry one of them. Generated credentials
+// can't collide, so only one a client supplied pays for the lookup.
+func (h *Handler) credentialsAreFree(c *gin.Context, userID int32, raw map[string]json.RawMessage, wanted map[string]proxysettings.Settings, stored []generated.Proxy) bool {
+	current := make(map[string]string, len(stored))
+	for _, p := range stored {
+		if s, err := proxysettings.FromStored(proxysettings.ProxyType(p.Type), p.Settings); err == nil {
+			_, current[p.Type] = s.Credential()
+		}
+	}
+	for protocol, settings := range wanted {
+		field, value := settings.Credential()
+		if field == "" || value == current[protocol] || !suppliesField(raw[protocol], field) {
+			continue
+		}
+		taken, err := h.store.Queries.ProxyCredentialInUse(c.Request.Context(), generated.ProxyCredentialInUseParams{
+			Type: protocol, Field: field, Value: value, UserID: userID,
+		})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"detail": "could not check the credential"})
+			return false
+		}
+		if taken {
+			c.JSON(http.StatusConflict, gin.H{"detail": fmt.Sprintf("This %s credential is already used by another user", protocol)})
+			return false
+		}
+	}
+	return true
+}
+
+func suppliesField(payload json.RawMessage, field string) bool {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return false
+	}
+	value, ok := fields[field]
+	return ok && string(value) != `""` && string(value) != "null"
 }
 
 // handleGetUser implements GET /api/user/:username.
@@ -471,6 +621,10 @@ func (h *Handler) handleModifyUser(c *gin.Context) {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": expireOutOfRangeDetail})
 		return
 	}
+	if detail := checkDurations(req); detail != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": detail})
+		return
+	}
 
 	ctx := c.Request.Context()
 
@@ -484,10 +638,41 @@ func (h *Handler) handleModifyUser(c *gin.Context) {
 		}
 	}
 
+	storedProxies, err := h.store.Queries.ListProxiesByUserID(ctx, pgInt4FromInt(int(dbuser.ID)))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "could not read proxies"})
+		return
+	}
+	req.Proxies = keepStoredProxySettings(req.Proxies, storedProxies)
 	settingsByType, removeTypes, err := resolveProxySettings(req.Proxies)
 	if err != nil {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": err.Error()})
 		return
+	}
+	if !h.credentialsAreFree(c, dbuser.ID, req.Proxies, settingsByType, storedProxies) {
+		return
+	}
+	if !identity.IsSudo {
+		owned := make(map[string]bool, len(storedProxies))
+		for _, p := range storedProxies {
+			owned[p.Type] = true
+		}
+		var newProtocols []string
+		for protocol := range settingsByType {
+			if !owned[protocol] {
+				newProtocols = append(newProtocols, protocol)
+			}
+		}
+		// Asked only when this edit picks inbounds: the bot isn't called for a
+		// plain change of limit or expiry.
+		if len(req.Inbounds) > 0 || len(newProtocols) > 0 {
+			if req.Inbounds == nil {
+				req.Inbounds = map[string][]string{}
+			}
+			if !h.limitInboundsToResellerScope(c, identity, newProtocols, req.Inbounds) {
+				return
+			}
+		}
 	}
 	for _, tags := range req.Inbounds {
 		for _, tag := range tags {
@@ -580,18 +765,17 @@ func (h *Handler) handleModifyUser(c *gin.Context) {
 		return
 	}
 
-	// next_plan: present -> upsert, absent (including explicit null, which
-	// is indistinguishable from omitted in the current Python model too) ->
-	// delete. Matches crud.update_user's if/elif exactly.
-	if req.NextPlan != nil {
+	// next_plan: a plan replaces, an explicit null removes, and leaving it out
+	// leaves it, as with every other field of this partial update.
+	if plan := req.NextPlan.plan; plan != nil {
 		if _, err := h.store.Queries.UpsertNextPlan(ctx, generated.UpsertNextPlanParams{
-			UserID: updated.ID, DataLimit: req.NextPlan.DataLimit, Expire: pgInt4FromInt(int(req.NextPlan.Expire)),
-			AddRemainingTraffic: req.NextPlan.AddRemainingTraffic, FireOnEither: req.NextPlan.FireOnEither,
+			UserID: updated.ID, DataLimit: plan.DataLimit, Expire: pgInt4FromInt(int(plan.Expire)),
+			AddRemainingTraffic: plan.AddRemainingTraffic, FireOnEither: plan.FireOnEither,
 		}); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not update next_plan"})
 			return
 		}
-	} else {
+	} else if req.NextPlan.present {
 		if err := h.store.Queries.DeleteNextPlanByUserID(ctx, updated.ID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not clear next_plan"})
 			return
@@ -783,8 +967,10 @@ func (h *Handler) resetUsageCore(ctx context.Context, dbuser generated.User, byU
 	}); err != nil {
 		return generated.User{}, errors.New("Could not log usage reset")
 	}
+	// Only a limited user comes back. An on-hold user's expiry starts on first use,
+	// so making one active here would leave them active with no expiry at all.
 	newStatus := dbuser.Status
-	if newStatus != statusExpired && newStatus != statusDisabled {
+	if newStatus == statusLimited {
 		newStatus = statusActive
 	}
 	updated, err := h.store.Queries.ResetUserTraffic(ctx, generated.ResetUserTrafficParams{ID: dbuser.ID, Status: newStatus})
@@ -1231,6 +1417,89 @@ func (h *Handler) enforceResellerAPIUserLimit(c *gin.Context, adminUsername stri
 	if count >= int64(*limit) {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "User limit reached. Please contact your administrator."})
 		return false
+	}
+	return true
+}
+
+// resellerInboundScope is which inbounds the reseller API lets this admin use: one
+// entry for every protocol this panel has an inbound of, holding the tags allowed.
+// nil means no restriction is known: a sudo admin, no reseller API, one that can't
+// be reached, or one whose answer names no inbound that exists. That API is
+// advisory, and a bot answering nothing useful must not stop users being created.
+func (h *Handler) resellerInboundScope(c *gin.Context, identity *auth.Identity) map[string][]string {
+	if identity.IsSudo {
+		return nil
+	}
+	ctx := c.Request.Context()
+	settings, _, err := h.resolveIntegrationSettings(c)
+	if err != nil {
+		return nil
+	}
+	rows, err := h.store.Queries.ListInbounds(ctx)
+	if err != nil {
+		return nil
+	}
+	// With one inbound any answer comes to the same, so the bot, which may well be
+	// in the middle of this very request, isn't asked.
+	if len(rows) <= 1 {
+		return nil
+	}
+	known := map[string][]string{}
+	for _, r := range rows {
+		known[r.Protocol] = append(known[r.Protocol], r.Tag)
+	}
+	answer := h.resellerapi.GetConfigs(ctx, resellerapi.Config{Secret: settings.ResellerApiSecret, URL: settings.ResellerApiUrl}, identity.Username, known)
+	scope := make(map[string][]string, len(known))
+	restricted := false
+	for protocol, tags := range known {
+		allowed := []string{}
+		for _, tag := range answer[protocol] {
+			if slices.Contains(tags, tag) {
+				allowed = append(allowed, tag)
+				restricted = true
+			}
+		}
+		scope[protocol] = allowed
+	}
+	if !restricted {
+		return nil
+	}
+	return scope
+}
+
+// limitInboundsToResellerScope holds a write to what GET /api/inbounds shows this
+// admin: hiding an inbound from the picker keeps nobody off it who simply sends
+// its tag. A protocol that names no inbounds would otherwise get all of them, so
+// it gets what's allowed instead, written into wanted. Answers 403 and returns
+// false for what's out of bounds. A protocol this panel has no inbound of has
+// nothing to protect, and stays as it was.
+func (h *Handler) limitInboundsToResellerScope(c *gin.Context, identity *auth.Identity, protocols []string, wanted map[string][]string) bool {
+	scope := h.resellerInboundScope(c, identity)
+	if scope == nil {
+		return true
+	}
+	for _, protocol := range protocols {
+		allowed, exists := scope[protocol]
+		if !exists || len(wanted[protocol]) > 0 {
+			continue
+		}
+		if len(allowed) == 0 {
+			c.JSON(http.StatusForbidden, gin.H{"detail": fmt.Sprintf("No %s inbound is available to you", protocol)})
+			return false
+		}
+		wanted[protocol] = allowed
+	}
+	for protocol, tags := range wanted {
+		allowed, exists := scope[protocol]
+		if !exists {
+			continue
+		}
+		for _, tag := range tags {
+			if !slices.Contains(allowed, tag) {
+				c.JSON(http.StatusForbidden, gin.H{"detail": fmt.Sprintf("Inbound %s is not available to you", tag)})
+				return false
+			}
+		}
 	}
 	return true
 }

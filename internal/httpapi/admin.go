@@ -2,14 +2,20 @@ package httpapi
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/legendary1205/rapido-go/internal/auth"
@@ -91,39 +97,62 @@ func validateDiscordWebhook(v *string) error {
 const (
 	loginRateLimitWindow = time.Minute
 	loginRateLimitMax    = 20
+	// loginRateLimitAddress is for one address across every account. Well above a
+	// single account's limit: several resellers' bots can share a server, and one of
+	// them with a stale password must not lock the others out.
+	loginRateLimitAddress = 100
 )
 
-// tooManyFailedLogins peeks the per-IP failure counter without bumping it -
-// call recordFailedLogin separately, only once a login has actually been
-// confirmed wrong. Fails OPEN (never blocks) if Redis itself is unreachable
-// or the key doesn't exist yet - availability of the login path matters
-// more than this specific defense-in-depth layer.
-func (h *Handler) tooManyFailedLogins(ctx context.Context, ip string) bool {
-	val, err := h.store.Cache.Get(ctx, cache.LoginAttemptsKey(ip))
-	if err != nil {
-		return false
+// tooManyFailedLogins peeks the failure counters without bumping them - call
+// recordFailedLogin separately, only once a login has actually been confirmed
+// wrong. Fails OPEN (never blocks) if Redis itself is unreachable or the key
+// doesn't exist yet - availability of the login path matters more than this
+// specific defense-in-depth layer.
+func (h *Handler) tooManyFailedLogins(ctx context.Context, ip, username string) bool {
+	over := func(key string, limit int) bool {
+		val, err := h.store.Cache.Get(ctx, key)
+		if err != nil {
+			return false
+		}
+		n, err := strconv.Atoi(val)
+		return err == nil && n >= limit
 	}
-	n, err := strconv.Atoi(val)
-	if err != nil {
-		return false
-	}
-	return n >= loginRateLimitMax
+	return over(cache.LoginAttemptsKey(ip), loginRateLimitAddress) || over(accountLoginKey(ip, username), loginRateLimitMax)
 }
 
-func (h *Handler) recordFailedLogin(ctx context.Context, ip string) {
-	if _, err := h.store.Cache.Incr(ctx, cache.LoginAttemptsKey(ip), loginRateLimitWindow); err != nil {
-		h.logger.Warn("record failed login", "error", err)
+func accountLoginKey(ip, username string) string {
+	return cache.LoginAttemptsKey(ip + "/" + username)
+}
+
+func (h *Handler) recordFailedLogin(ctx context.Context, ip, username string) {
+	for _, key := range []string{cache.LoginAttemptsKey(ip), accountLoginKey(ip, username)} {
+		if _, err := h.store.Cache.Incr(ctx, key, loginRateLimitWindow); err != nil {
+			h.logger.Warn("record failed login", "error", err)
+		}
 	}
 }
 
-// clearFailedLogins runs on every successful login so a real admin who
-// mistypes a password a few times before getting it right isn't left
-// sitting close to the limit for the rest of the window.
-func (h *Handler) clearFailedLogins(ctx context.Context, ip string) {
-	if err := h.store.Cache.Del(ctx, cache.LoginAttemptsKey(ip)); err != nil {
+// clearFailedLogins runs on a successful login, for that account only, so a real
+// admin who mistypes a password a few times isn't left sitting close to the limit.
+// If it cleared the address too, anyone with one working login could guess at every
+// other admin's password forever, resetting the counter as they went.
+func (h *Handler) clearFailedLogins(ctx context.Context, ip, username string) {
+	if err := h.store.Cache.Del(ctx, accountLoginKey(ip, username)); err != nil {
 		h.logger.Warn("clear failed logins", "error", err)
 	}
 }
+
+// unknownAdminHash is what a login for an admin who doesn't exist is checked
+// against. Nothing can match it: the password behind it is random and never kept.
+var unknownAdminHash = sync.OnceValue(func() string {
+	secret := make([]byte, 32)
+	_, _ = rand.Read(secret)
+	hash, err := auth.HashPassword(hex.EncodeToString(secret))
+	if err != nil {
+		return ""
+	}
+	return hash
+})
 
 // handleLogin implements POST /api/admin/token, matching the current
 // OAuth2PasswordRequestForm contract (form-encoded username/password).
@@ -137,7 +166,7 @@ func (h *Handler) handleLogin(c *gin.Context) {
 	ctx := c.Request.Context()
 	c.Set(contextLoginUsernameKey, username)
 
-	if h.tooManyFailedLogins(ctx, ip) {
+	if h.tooManyFailedLogins(ctx, ip, username) {
 		c.Set(contextLoginErrorKey, "rate-limited")
 		c.JSON(http.StatusTooManyRequests, gin.H{"detail": "Too many login attempts, please try again later"})
 		return
@@ -145,11 +174,12 @@ func (h *Handler) handleLogin(c *gin.Context) {
 
 	var isSudo, bootstrap bool
 	switch {
-	case h.sudoUsername != "" && username == h.sudoUsername && password == h.sudoPassword:
+	case h.sudoUsername != "" && h.sudoPassword != "" && username == h.sudoUsername &&
+		subtle.ConstantTimeCompare([]byte(password), []byte(h.sudoPassword)) == 1:
 		isSudo, bootstrap = true, true
 	default:
 		if h.sudoUsername != "" && username == h.sudoUsername {
-			h.recordFailedLogin(ctx, ip)
+			h.recordFailedLogin(ctx, ip, username)
 			h.reports.Login(ctx, username, ip, loginStatusFailed)
 			c.JSON(http.StatusUnauthorized, gin.H{"detail": "Incorrect username or password"})
 			return
@@ -163,7 +193,10 @@ func (h *Handler) handleLogin(c *gin.Context) {
 			// hand; with it, "which account is actually failing" is one
 			// grep away.
 			c.Set(contextLoginErrorKey, "no such admin")
-			h.recordFailedLogin(ctx, ip)
+			// As slow as a wrong password, so the answer's timing doesn't tell
+			// which usernames exist.
+			h.loginVerifier.Verify(username, password, unknownAdminHash())
+			h.recordFailedLogin(ctx, ip, username)
 			h.reports.Login(ctx, username, ip, loginStatusFailed)
 			c.JSON(http.StatusUnauthorized, gin.H{"detail": "Incorrect username or password"})
 			return
@@ -175,7 +208,7 @@ func (h *Handler) handleLogin(c *gin.Context) {
 		// in the failure limiter and the login report below.
 		if !h.loginVerifier.Verify(username, password, admin.HashedPassword) {
 			c.Set(contextLoginErrorKey, "wrong password")
-			h.recordFailedLogin(ctx, ip)
+			h.recordFailedLogin(ctx, ip, username)
 			h.reports.Login(ctx, username, ip, loginStatusFailed)
 			c.JSON(http.StatusUnauthorized, gin.H{"detail": "Incorrect username or password"})
 			return
@@ -191,7 +224,7 @@ func (h *Handler) handleLogin(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not issue token"})
 		return
 	}
-	h.clearFailedLogins(ctx, ip)
+	h.clearFailedLogins(ctx, ip, username)
 	if !contains(h.loginNotifyWhitelist, ip) {
 		h.reports.Login(ctx, username, ip, loginStatusSuccess)
 	}
@@ -233,8 +266,12 @@ func (h *Handler) handleGetCurrentAdmin(c *gin.Context) {
 		return
 	}
 	admin, err := h.store.CachedGetAdminByUsername(c.Request.Context(), identity.Username)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		c.JSON(http.StatusUnauthorized, gin.H{"detail": "Could not validate credentials"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"detail": "Could not check your session; try again"})
 		return
 	}
 	c.JSON(http.StatusOK, toAdminDTO(admin))
@@ -439,6 +476,15 @@ func (h *Handler) handleDeleteAdmin(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"detail": "You're not allowed to delete sudo accounts. Use rapido-cli instead."})
 		return
 	}
+	owned, err := h.store.Queries.CountUsers(c.Request.Context(), generated.CountUsersParams{AdminID: pgInt4FromInt(int(admin.ID))})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not delete admin"})
+		return
+	}
+	if owned > 0 {
+		c.JSON(http.StatusConflict, gin.H{"detail": fmt.Sprintf("This admin still owns %d users. Delete them or move them to another admin first.", owned)})
+		return
+	}
 	if err := h.store.Queries.DeleteAdmin(c.Request.Context(), admin.ID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not delete admin"})
 		return
@@ -466,6 +512,7 @@ func (h *Handler) handleDisableAdminUsers(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not disable this admin's users"})
 		return
 	}
+	h.dispatchGatewayUsersSync(c.Request.Context(), users)
 	c.JSON(http.StatusOK, gin.H{"detail": "Users successfully disabled", "users_affected": len(users)})
 }
 
@@ -483,6 +530,7 @@ func (h *Handler) handleActivateAdminUsers(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not activate this admin's users"})
 		return
 	}
+	h.dispatchGatewayUsersSync(c.Request.Context(), users)
 	c.JSON(http.StatusOK, gin.H{"detail": "Users successfully activated", "users_affected": len(users)})
 }
 
@@ -575,6 +623,9 @@ func (h *Handler) handleDeleteInactiveAdmins(c *gin.Context) {
 		if err := h.store.InvalidateAdmin(c.Request.Context(), r.ID, r.Username); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not invalidate admin cache"})
 			return
+		}
+		for _, user := range users {
+			h.dispatchGatewayUserDelete(c.Request.Context(), user)
 		}
 		usersRemoved += len(users)
 		removed = append(removed, inactiveAdminDTO{

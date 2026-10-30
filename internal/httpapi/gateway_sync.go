@@ -190,6 +190,18 @@ func (h *Handler) dispatchGatewayUserSync(ctx context.Context, user generated.Us
 	h.dispatchGatewayPush(ctx, payload)
 }
 
+// dispatchGatewayUsersSync is dispatchGatewayUserSync for a bulk action. On a panel
+// with no peers that's nothing at all, rather than two queries per user inside the
+// action's transaction.
+func (h *Handler) dispatchGatewayUsersSync(ctx context.Context, users []generated.User) {
+	if peers, err := h.store.Queries.ListGatewayPeers(ctx); err == nil && len(peers) == 0 {
+		return
+	}
+	for _, user := range users {
+		h.dispatchGatewayUserSync(ctx, user)
+	}
+}
+
 // dispatchGatewayUserDelete mirrors dispatchGatewayUserSync for a LOCAL
 // user's deletion - same replica guard, same fire-and-forget shape.
 func (h *Handler) dispatchGatewayUserDelete(ctx context.Context, user generated.User) {

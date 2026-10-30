@@ -16,6 +16,9 @@ func requestBudget() gin.HandlerFunc {
 			limit = 512 << 20
 			duration = 10 * time.Minute
 		}
+		if isNodeRestartPath(c.Request.URL.Path) {
+			duration = nodeRestartTimeout + 15*time.Second
+		}
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, limit)
 		ctx, cancel := context.WithTimeout(c.Request.Context(), duration)
 		defer cancel()

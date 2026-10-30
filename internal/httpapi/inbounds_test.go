@@ -477,7 +477,7 @@ func TestDeletingLastInboundOfAProtocolPrunesThatProtocolsProxies(t *testing.T) 
 		t.Fatalf("user should start with both vless and vmess proxies, got %v", got)
 	}
 
-	del := doRequest(t, router, "DELETE", "/api/inbounds/VMess-only", token, nil)
+	del := doRequest(t, router, "DELETE", "/api/inbounds/VMess-only?confirm_drop_credentials=true", token, nil)
 	if del.Code != 200 {
 		t.Fatalf("delete VMess-only: %d %v", del.Code, del.Body)
 	}

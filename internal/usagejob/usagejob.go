@@ -99,3 +99,46 @@ func Sweep(ctx context.Context, q Queries, cutoff time.Time, batchSize int, paus
 		}
 	}
 }
+
+// HousekeepingQueries is what RunHousekeeping uses.
+type HousekeepingQueries interface {
+	PruneNodeReportReceipts(ctx context.Context) (int64, error)
+	PruneCoreConfigSnapshots(ctx context.Context) (int64, error)
+	PruneResellerBatches(ctx context.Context) (int64, error)
+	PruneStaleNotifications(ctx context.Context) (int64, error)
+	FailInterruptedTunnelProvisioning(ctx context.Context) (int64, error)
+}
+
+// RunHousekeeping clears what other tables only ever add to, every interval
+// until ctx is canceled. None of it depends on usage retention being on.
+func RunHousekeeping(ctx context.Context, q HousekeepingQueries, maintenance Maintenance, logger *slog.Logger, interval time.Duration) {
+	timer := time.NewTimer(firstSweepDelay)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		timer.Reset(interval)
+		if maintenance != nil {
+			if on, err := maintenance.IsMaintenanceMode(ctx); err != nil || on {
+				continue
+			}
+		}
+		for name, step := range map[string]func(context.Context) (int64, error){
+			"node report receipts":  q.PruneNodeReportReceipts,
+			"core config snapshots": q.PruneCoreConfigSnapshots,
+			"reseller batches":      q.PruneResellerBatches,
+			"stale notifications":   q.PruneStaleNotifications,
+			"interrupted tunnels":   q.FailInterruptedTunnelProvisioning,
+		} {
+			n, err := step(ctx)
+			if err != nil {
+				logger.Error("housekeeping failed", "step", name, "error", err)
+			} else if n > 0 {
+				logger.Info("housekeeping", "step", name, "rows", n)
+			}
+		}
+	}
+}

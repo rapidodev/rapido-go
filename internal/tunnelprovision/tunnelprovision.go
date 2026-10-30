@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"regexp"
 	"strings"
 	"time"
 
@@ -49,6 +50,38 @@ type Params struct {
 	// address family (IPv4) while the tunnel runs over another (IPv6).
 	NodeTunnelAddr  string
 	RelayTunnelAddr string
+}
+
+var (
+	validHostName = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$`)
+	validIfName   = regexp.MustCompile(`^[A-Za-z0-9._-]{1,15}$`)
+)
+
+// ValidHost reports whether s is an IP address or a host name and nothing else.
+// These end up inside shell commands and unit files on a remote root account, and
+// an IPv6 zone is free text as far as netip.ParseAddr cares, so it has to be gone too.
+func ValidHost(s string) bool {
+	if addr, err := netip.ParseAddr(s); err == nil {
+		return addr.Zone() == ""
+	}
+	return validHostName.MatchString(s) && !strings.Contains(s, "..")
+}
+
+// check refuses what must never get as far as a remote shell. Every entry point
+// runs it, including for rows already stored, which were not always checked.
+func (p Params) check() error {
+	for label, host := range map[string]string{
+		"node address": p.NodeAddress, "relay host": p.RelayHost,
+		"node tunnel address": p.NodeTunnelAddr, "relay tunnel address": p.RelayTunnelAddr,
+	} {
+		if host != "" && !ValidHost(host) {
+			return fmt.Errorf("%s %q is not an IP address or host name", label, host)
+		}
+	}
+	if !validIfName.MatchString(p.InterfaceName) {
+		return fmt.Errorf("interface name %q is not valid", p.InterfaceName)
+	}
+	return nil
 }
 
 func (p Params) method() string {

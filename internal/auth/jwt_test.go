@@ -95,3 +95,49 @@ func TestVerifyRejectsGarbage(t *testing.T) {
 		t.Error("Verify of garbage token succeeded, want error")
 	}
 }
+
+func TestTokensFromBeforeAKeyChangeWorkUntilTheyWouldHaveExpired(t *testing.T) {
+	oldKey, newKey := []byte("test-only-old-key"), []byte("test-only-new-key")
+	ttl := time.Hour
+	old := NewTokenIssuer(oldKey, ttl)
+	issued, err := old.Issue("alice", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+
+	issuer := NewTokenIssuer(newKey, ttl)
+	if _, err := issuer.Verify(issued); err == nil {
+		t.Fatal("a token signed with another key passed with no retired key set")
+	}
+
+	issuer.AcceptRetiredKey(oldKey, time.Now())
+	claims, err := issuer.Verify(issued)
+	if err != nil || claims.Username != "alice" {
+		t.Errorf("a token from before the change: %v, %v", claims, err)
+	}
+
+	// Signed with the retired key after it was retired: that's a forgery.
+	time.Sleep(2 * time.Millisecond)
+	forged, err := old.Issue("mallory", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := issuer.Verify(forged); err == nil {
+		t.Error("a token issued after the change, with the retired key, was accepted")
+	}
+
+	// A token lifetime later the old key is simply no longer accepted.
+	issuer.AcceptRetiredKey(oldKey, time.Now().Add(-ttl-time.Minute))
+	if _, err := issuer.Verify(issued); err == nil {
+		t.Error("the retired key still works after a whole token lifetime")
+	}
+
+	fresh, err := issuer.Issue("bob", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := issuer.Verify(fresh); err != nil {
+		t.Errorf("a token from the current key: %v", err)
+	}
+}

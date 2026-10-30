@@ -212,6 +212,20 @@ func (h *Handler) handleListInboundsDetailed(c *gin.Context) {
 func (h *Handler) handleDeleteInbound(c *gin.Context) {
 	tag := c.Param("tag")
 	ctx := c.Request.Context()
+	rows, err := h.store.Queries.ListInbounds(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not list inbounds"})
+		return
+	}
+	var remaining []string
+	for _, in := range rows {
+		if in.Tag != tag {
+			remaining = append(remaining, in.Protocol)
+		}
+	}
+	if !h.droppingCredentialsConfirmed(c, remaining) {
+		return
+	}
 
 	if err := h.deleteInboundByTag(ctx, tag); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -305,64 +319,8 @@ type inboundSyncEntry struct {
 // a distinct HTTP status - both callers already validate protocol values
 // upstream of this function in their own way).
 func (h *Handler) syncInboundEntries(ctx context.Context, entries []inboundSyncEntry) (created int, err error) {
-	for _, e := range entries {
-		if !proxyTypeValid(e.Protocol) {
-			return created, &inboundValidationError{"unknown protocol: " + e.Protocol}
-		}
-		// hysteria2/tuic are QUIC-based and sing-box refuses to even start
-		// one without TLS (C.ErrTLSRequired) - caught here as a clean 422
-		// instead of surfacing later as every one of that inbound's users
-		// failing to connect.
-		// anytls joins this same check for the same reason as hysteria2/tuic
-		// above (C.ErrTLSRequired at the sing-box level) - see
-		// internal/nodecore/anytls's own doc comment on why TLS is mandatory
-		// here rather than admin-optional like sing-box's own inbound. hysteria
-		// (v1) joins it too - sing-box's own NewInbound returns C.ErrTLSRequired
-		// for it exactly like hysteria2/tuic/anytls do.
-		if (e.Protocol == "hysteria2" || e.Protocol == "tuic" || e.Protocol == "anytls" || e.Protocol == "hysteria") && e.Security != "tls" {
-			return created, &inboundValidationError{"inbound " + e.Tag + ": security must be \"tls\" for protocol " + e.Protocol}
-		}
-		if e.Protocol == "tuic" && e.CongestionControl != "" && !validCongestionControl[e.CongestionControl] {
-			return created, &inboundValidationError{"inbound " + e.Tag + ": invalid congestion_control " + e.CongestionControl}
-		}
-		// Unlike hysteria2 (defaults to BBR, up_mbps/down_mbps are just an
-		// optional hint - see migration 00018's own comment), Hysteria v1 has
-		// no congestion-control fallback and genuinely cannot function
-		// without a declared bandwidth ceiling - sing-quic/hysteria.Service
-		// divides by these to pace sends, so a missing value here is a
-		// "connects but is unusably slow/broken" bug at runtime, not an
-		// obviously-rejected request. Caught here as a clean 422 instead,
-		// matching Core Config's own outbound-side requirement for the same
-		// protocol.
-		if e.Protocol == "hysteria" && (e.UpMbps <= 0 || e.DownMbps <= 0) {
-			return created, &inboundValidationError{"inbound " + e.Tag + ": up_mbps and down_mbps must both be > 0 for protocol hysteria"}
-		}
-		if e.Protocol == "snell" {
-			// sing-snell's own v6 server rejects a PSK outside this range
-			// (see internal/nodecore/snell's own doc comment) - checked here
-			// so a bad one is a clean 422, not a node that fails to start.
-			if len(e.SnellPSK) < 12 || len(e.SnellPSK) > 255 {
-				return created, &inboundValidationError{"inbound " + e.Tag + ": snell_psk must be 12-255 bytes"}
-			}
-			if e.SnellV6Mode != "" && !validSnellV6Modes[e.SnellV6Mode] {
-				return created, &inboundValidationError{"inbound " + e.Tag + ": invalid snell_v6_mode " + e.SnellV6Mode}
-			}
-		}
-		if e.Protocol == "shadowtls" {
-			// See internal/nodecore/shadowtls's own doc comment for why
-			// this protocol alone needs a second, inbound-level secret in
-			// addition to each user's own ShadowTLS password - checked
-			// here so a bad one is a clean 422, not a node that fails to
-			// start.
-			keyLen, ok := shadowTLSInnerKeyLength[e.ShadowTLSInnerMethod]
-			if !ok {
-				return created, &inboundValidationError{"inbound " + e.Tag + ": invalid shadowtls_inner_method " + e.ShadowTLSInnerMethod}
-			}
-			psk, err := base64.StdEncoding.DecodeString(e.ShadowTLSInnerPassword)
-			if err != nil || len(psk) < keyLen {
-				return created, &inboundValidationError{fmt.Sprintf("inbound %s: shadowtls_inner_password must be a base64-encoded key of at least %d bytes for method %s", e.Tag, keyLen, e.ShadowTLSInnerMethod)}
-			}
-		}
+	if err := validateInboundEntries(entries); err != nil {
+		return created, err
 	}
 
 	for _, e := range entries {
@@ -420,6 +378,71 @@ func (h *Handler) syncInboundEntries(ctx context.Context, entries []inboundSyncE
 		h.logger.Warn("invalidate node config cache", "error", err)
 	}
 	return created, nil
+}
+
+// validateInboundEntries refuses the settings a node could not start with, as a
+// clean 422, before anything is written.
+func validateInboundEntries(entries []inboundSyncEntry) error {
+	for _, e := range entries {
+		if !proxyTypeValid(e.Protocol) {
+			return &inboundValidationError{"unknown protocol: " + e.Protocol}
+		}
+		// hysteria2/tuic are QUIC-based and sing-box refuses to even start
+		// one without TLS (C.ErrTLSRequired) - caught here as a clean 422
+		// instead of surfacing later as every one of that inbound's users
+		// failing to connect.
+		// anytls joins this same check for the same reason as hysteria2/tuic
+		// above (C.ErrTLSRequired at the sing-box level) - see
+		// internal/nodecore/anytls's own doc comment on why TLS is mandatory
+		// here rather than admin-optional like sing-box's own inbound. hysteria
+		// (v1) joins it too - sing-box's own NewInbound returns C.ErrTLSRequired
+		// for it exactly like hysteria2/tuic/anytls do.
+		if (e.Protocol == "hysteria2" || e.Protocol == "tuic" || e.Protocol == "anytls" || e.Protocol == "hysteria") && e.Security != "tls" {
+			return &inboundValidationError{"inbound " + e.Tag + ": security must be \"tls\" for protocol " + e.Protocol}
+		}
+		if e.Protocol == "tuic" && e.CongestionControl != "" && !validCongestionControl[e.CongestionControl] {
+			return &inboundValidationError{"inbound " + e.Tag + ": invalid congestion_control " + e.CongestionControl}
+		}
+		// Unlike hysteria2 (defaults to BBR, up_mbps/down_mbps are just an
+		// optional hint - see migration 00018's own comment), Hysteria v1 has
+		// no congestion-control fallback and genuinely cannot function
+		// without a declared bandwidth ceiling - sing-quic/hysteria.Service
+		// divides by these to pace sends, so a missing value here is a
+		// "connects but is unusably slow/broken" bug at runtime, not an
+		// obviously-rejected request. Caught here as a clean 422 instead,
+		// matching Core Config's own outbound-side requirement for the same
+		// protocol.
+		if e.Protocol == "hysteria" && (e.UpMbps <= 0 || e.DownMbps <= 0) {
+			return &inboundValidationError{"inbound " + e.Tag + ": up_mbps and down_mbps must both be > 0 for protocol hysteria"}
+		}
+		if e.Protocol == "snell" {
+			// sing-snell's own v6 server rejects a PSK outside this range
+			// (see internal/nodecore/snell's own doc comment) - checked here
+			// so a bad one is a clean 422, not a node that fails to start.
+			if len(e.SnellPSK) < 12 || len(e.SnellPSK) > 255 {
+				return &inboundValidationError{"inbound " + e.Tag + ": snell_psk must be 12-255 bytes"}
+			}
+			if e.SnellV6Mode != "" && !validSnellV6Modes[e.SnellV6Mode] {
+				return &inboundValidationError{"inbound " + e.Tag + ": invalid snell_v6_mode " + e.SnellV6Mode}
+			}
+		}
+		if e.Protocol == "shadowtls" {
+			// See internal/nodecore/shadowtls's own doc comment for why
+			// this protocol alone needs a second, inbound-level secret in
+			// addition to each user's own ShadowTLS password - checked
+			// here so a bad one is a clean 422, not a node that fails to
+			// start.
+			keyLen, ok := shadowTLSInnerKeyLength[e.ShadowTLSInnerMethod]
+			if !ok {
+				return &inboundValidationError{"inbound " + e.Tag + ": invalid shadowtls_inner_method " + e.ShadowTLSInnerMethod}
+			}
+			psk, err := base64.StdEncoding.DecodeString(e.ShadowTLSInnerPassword)
+			if err != nil || len(psk) < keyLen {
+				return &inboundValidationError{fmt.Sprintf("inbound %s: shadowtls_inner_password must be a base64-encoded key of at least %d bytes for method %s", e.Tag, keyLen, e.ShadowTLSInnerMethod)}
+			}
+		}
+	}
+	return nil
 }
 
 // handleSyncInbounds implements POST /api/inbounds/sync (sudo only) - an
@@ -654,6 +677,35 @@ func generateBase64Key(n int) (string, error) {
 		return "", err
 	}
 	return base64.StdEncoding.EncodeToString(raw), nil
+}
+
+// droppingCredentialsConfirmed answers 409 and returns false when a change would
+// leave some users' credentials with no inbound of their protocol, and so delete
+// them, unless the request says ?confirm_drop_credentials=true. Those users would
+// need new links once that protocol came back, and no snapshot can restore them.
+func (h *Handler) droppingCredentialsConfirmed(c *gin.Context, remainingProtocols []string) bool {
+	// With no inbound left at all nothing gets pruned; see pruneOrphanedProxies.
+	if len(remainingProtocols) == 0 || c.Query("confirm_drop_credentials") == "true" {
+		return true
+	}
+	rows, err := h.store.Queries.CountProxiesOutsideProtocols(c.Request.Context(), remainingProtocols)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not count affected users"})
+		return false
+	}
+	if len(rows) == 0 {
+		return true
+	}
+	dropped := make([]gin.H, 0, len(rows))
+	for _, row := range rows {
+		dropped = append(dropped, gin.H{"protocol": row.Type, "users": row.Users})
+	}
+	c.JSON(http.StatusConflict, gin.H{
+		"detail":              "This removes the last inbound of a protocol, and with it these users' credentials for it. Send confirm_drop_credentials=true to go ahead.",
+		"confirm_required":    "drop_credentials",
+		"dropped_credentials": dropped,
+	})
+	return false
 }
 
 // pruneOrphanedProxies deletes every proxy whose protocol no longer has any

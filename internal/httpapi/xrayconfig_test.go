@@ -1,8 +1,14 @@
 package httpapi
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"net/http"
+	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/legendary1205/rapido-go/internal/db/generated"
 )
 
 func TestGetXrayConfigCombinesCoreConfigAndInbounds(t *testing.T) {
@@ -123,7 +129,7 @@ func TestUpdateXrayConfigDeletesInboundsOmittedFromThePayload(t *testing.T) {
 		"proxies":  map[string]interface{}{"vless": map[string]interface{}{}, "trojan": map[string]interface{}{}},
 	})
 
-	resp := doRequest(t, router, "PUT", "/api/settings/xray-config", token, map[string]interface{}{
+	resp := doRequest(t, router, "PUT", "/api/settings/xray-config?confirm_drop_credentials=true", token, map[string]interface{}{
 		"inbounds": []map[string]interface{}{{"tag": "Keep Me", "protocol": "vless"}},
 	})
 	if resp.Code != http.StatusOK {
@@ -166,5 +172,107 @@ func TestUpdateXrayConfigRejectsUnknownProtocol(t *testing.T) {
 	})
 	if resp.Code != http.StatusUnprocessableEntity {
 		t.Errorf("unknown protocol: %d, want 422: %v", resp.Code, resp.Body)
+	}
+}
+
+// Every setting the document shows has to survive a round trip through Apply.
+// Reflection, so an inbound setting added later fails here until it is carried
+// over, instead of being wiped silently by the next Apply.
+func TestInboundSyncEntryFromDetailCarriesEverySetting(t *testing.T) {
+	var in inboundDetailDTO
+	v := reflect.ValueOf(&in).Elem()
+	for i := 0; i < v.NumField(); i++ {
+		f := v.Field(i)
+		switch f.Kind() {
+		case reflect.String:
+			f.SetString(v.Type().Field(i).Name)
+		case reflect.Int32:
+			f.SetInt(int64(i + 1))
+		case reflect.Bool:
+			f.SetBool(true)
+		case reflect.Slice:
+			f.Set(reflect.ValueOf([]string{v.Type().Field(i).Name}))
+		default:
+			t.Fatalf("field %s: add a test value for kind %s", v.Type().Field(i).Name, f.Kind())
+		}
+	}
+
+	out := reflect.ValueOf(inboundSyncEntryFromDetail(in))
+	for i := 0; i < v.NumField(); i++ {
+		name := v.Type().Field(i).Name
+		got := out.FieldByName(name)
+		if !got.IsValid() {
+			t.Errorf("inboundSyncEntry has no field for the document's %s", name)
+			continue
+		}
+		if !reflect.DeepEqual(got.Interface(), v.Field(i).Interface()) {
+			t.Errorf("%s = %v, want %v", name, got.Interface(), v.Field(i).Interface())
+		}
+	}
+}
+
+// A panel holding one of these inbounds had every Apply refused (snell's PSK,
+// shadowtls's inner key and hysteria's bandwidth arrived empty) or silently
+// reset (hysteria2's obfuscation password, tuic's congestion control).
+func TestUpdateXrayConfigKeepsEachProtocolsOwnSettings(t *testing.T) {
+	router, token := newTestRouter(t)
+	inner := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("k", 32)))
+	put := func(inbounds []interface{}) map[string]interface{} {
+		t.Helper()
+		resp := doRequest(t, router, "PUT", "/api/settings/xray-config", token, map[string]interface{}{"inbounds": inbounds})
+		if resp.Code != http.StatusOK {
+			t.Fatalf("put xray config: %d %v", resp.Code, resp.Body)
+		}
+		return resp.Body
+	}
+
+	first := put([]interface{}{
+		map[string]interface{}{"tag": "S", "protocol": "snell", "snell_psk": "a-long-enough-psk", "snell_v6_mode": "unshaped"},
+		map[string]interface{}{"tag": "ST", "protocol": "shadowtls", "shadowtls_inner_method": "2022-blake3-aes-256-gcm", "shadowtls_inner_password": inner},
+		map[string]interface{}{"tag": "H1", "protocol": "hysteria", "security": "tls", "up_mbps": 100, "down_mbps": 200, "hysteria_obfs_password": "obfs1"},
+		map[string]interface{}{"tag": "H2", "protocol": "hysteria2", "security": "tls", "hysteria2_obfs_password": "obfs2"},
+		map[string]interface{}{"tag": "T", "protocol": "tuic", "security": "tls", "congestion_control": "bbr", "zero_rtt_handshake": true},
+	})
+
+	// The same document straight back, which is what Apply sends after any
+	// unrelated edit elsewhere in it.
+	second := put(first["inbounds"].([]interface{}))
+
+	byTag := map[string]map[string]interface{}{}
+	for _, raw := range second["inbounds"].([]interface{}) {
+		in := raw.(map[string]interface{})
+		byTag[in["tag"].(string)] = in
+	}
+	want := map[string]map[string]interface{}{
+		"S":  {"snell_psk": "a-long-enough-psk", "snell_v6_mode": "unshaped"},
+		"ST": {"shadowtls_inner_method": "2022-blake3-aes-256-gcm", "shadowtls_inner_password": inner},
+		"H1": {"up_mbps": float64(100), "down_mbps": float64(200), "hysteria_obfs_password": "obfs1"},
+		"H2": {"hysteria2_obfs_password": "obfs2"},
+		"T":  {"congestion_control": "bbr", "zero_rtt_handshake": true},
+	}
+	for tag, fields := range want {
+		for field, value := range fields {
+			if byTag[tag][field] != value {
+				t.Errorf("%s.%s = %v, want %v", tag, field, byTag[tag][field], value)
+			}
+		}
+	}
+}
+
+func TestCoreSnapshotPreviewSendsConfigAsJSON(t *testing.T) {
+	raw, err := json.Marshal(coreSnapshotPreview(generated.CoreConfigSnapshot{ID: 7, Reason: "PUT /api/settings/xray-config", Config: []byte(`{"snapshot_version":1}`)}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		ID     int64          `json:"id"`
+		Reason string         `json:"reason"`
+		Config map[string]any `json:"config"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("config did not arrive as an object: %v (%s)", err, raw)
+	}
+	if got.ID != 7 || got.Reason != "PUT /api/settings/xray-config" || got.Config["snapshot_version"] != float64(1) {
+		t.Fatalf("unexpected preview: %s", raw)
 	}
 }
