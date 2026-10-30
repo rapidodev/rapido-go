@@ -4,6 +4,7 @@ import (
 	"context"
 	"github.com/legendary1205/rapido-go/internal/nodecore/userkey"
 	"io"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,12 +32,16 @@ import (
 //
 // A nil *ConnGroup is valid and tracks nothing.
 type ConnGroup struct {
-	mu       sync.Mutex
-	conns    map[uint64]io.Closer
-	next     uint64
-	closed   bool
-	users    map[uint64]connectionUser
+	mu     sync.Mutex
+	conns  map[uint64]io.Closer
+	next   uint64
+	closed bool
+	// users is by inbound tag: a user change visits one listener's connections at
+	// a time, and with many listeners, scanning everybody's for each of them adds
+	// up under this lock, which every new connection also needs.
+	users    map[string]map[uint64]connectionUser
 	policies map[string]map[string][32]byte
+	lists    map[reflect.Type]any
 }
 
 func NewConnGroup() *ConnGroup {
@@ -125,6 +130,7 @@ func (g *ConnGroup) CloseAll() {
 	clear(g.conns)
 	clear(g.users)
 	clear(g.policies)
+	clear(g.lists)
 	g.mu.Unlock()
 
 	closeConnections(all)
@@ -177,16 +183,47 @@ type connectionUser struct {
 	fingerprint [32]byte
 }
 
+// SharedLists is this generation's memo of T's user lists, so that listeners
+// with the same users share what those users build to. Kept per generation, so
+// nothing built here can outlive the core, or the logger, it was built with. A
+// nil group shares nothing.
+func SharedLists[T comparable, V any](g *ConnGroup) *userkey.Lists[T, V] {
+	if g == nil {
+		return &userkey.Lists[T, V]{}
+	}
+	key := reflect.TypeFor[userkey.Lists[T, V]]()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if lists, ok := g.lists[key]; ok {
+		return lists.(*userkey.Lists[T, V])
+	}
+	lists := &userkey.Lists[T, V]{}
+	if g.lists == nil {
+		g.lists = map[reflect.Type]any{}
+	}
+	g.lists[key] = lists
+	return lists
+}
+
+// SharedList is the userkey.List for users, built once per generation.
+func SharedList[T comparable](g *ConnGroup, users []T) *userkey.List {
+	return SharedLists[T, *userkey.List](g).Get(users, func() *userkey.List { return userkey.NewList(users) })
+}
+
 // SetUserPolicy closes only removed accounts or changed credentials. Unchanged
 // users keep their streams even if the option list is reordered.
 func SetUserPolicy[T any](g *ConnGroup, tag string, users []T) {
 	if g == nil {
 		return
 	}
-	policy := make(map[string][32]byte, len(users))
-	for i, u := range users {
-		key := userkey.OptionKey(u, i)
-		policy[key.Label] = key.Fingerprint
+	SetPolicy(g, tag, userkey.NewList(users).Policy)
+}
+
+// SetPolicy is SetUserPolicy for a list already built. The group keeps policy
+// without copying it, so the caller must not change it afterwards.
+func SetPolicy(g *ConnGroup, tag string, policy map[string][32]byte) {
+	if g == nil {
+		return
 	}
 	g.mu.Lock()
 	if g.policies == nil {
@@ -194,17 +231,14 @@ func SetUserPolicy[T any](g *ConnGroup, tag string, users []T) {
 	}
 	g.policies[tag] = policy
 	var removed []io.Closer
-	for id, identity := range g.users {
-		if identity.tag != tag {
-			continue
-		}
+	for id, identity := range g.users[tag] {
 		fp, ok := policy[identity.name]
 		if !ok || fp != identity.fingerprint {
 			if c := g.conns[id]; c != nil {
 				removed = append(removed, c)
 			}
 			delete(g.conns, id)
-			delete(g.users, id)
+			delete(g.users[tag], id)
 		}
 	}
 	g.mu.Unlock()
@@ -235,16 +269,19 @@ func (g *ConnGroup) holdAuthenticated(tag, name string, authenticated *[32]byte,
 	id := g.next
 	g.conns[id] = c
 	if g.users == nil {
-		g.users = map[uint64]connectionUser{}
+		g.users = map[string]map[uint64]connectionUser{}
 	}
-	g.users[id] = connectionUser{tag, name, fp}
+	if g.users[tag] == nil {
+		g.users[tag] = map[uint64]connectionUser{}
+	}
+	g.users[tag][id] = connectionUser{tag, name, fp}
 	g.mu.Unlock()
 	var released atomic.Bool
 	return func() {
 		if released.CompareAndSwap(false, true) {
 			g.mu.Lock()
 			delete(g.conns, id)
-			delete(g.users, id)
+			delete(g.users[tag], id)
 			g.mu.Unlock()
 		}
 	}

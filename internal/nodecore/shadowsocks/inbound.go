@@ -126,13 +126,14 @@ func (h *Inbound) UpdateUsers(users []option.ShadowsocksUser) error {
 	if err != nil {
 		return err
 	}
-	err = service.UpdateUsersWithPasswords(userkey.BuildOptions(users), common.Map(users, func(user option.ShadowsocksUser) string {
+	list := traffic.SharedList(h.conns, users)
+	err = service.UpdateUsersWithPasswords(list.Keys, common.Map(users, func(user option.ShadowsocksUser) string {
 		return user.Password
 	}))
 	if err != nil {
 		return err
 	}
-	traffic.SetUserPolicy(h.conns, h.Tag(), users)
+	traffic.SetPolicy(h.conns, h.Tag(), list.Policy)
 	h.service.Store(service)
 	return nil
 }

@@ -62,7 +62,12 @@ func (m *Manager) Add(user string, up, down int64) {
 	if up == 0 && down == 0 {
 		return
 	}
-	v, _ := m.users.LoadOrStore(user, &userCounter{})
+	// Load first: this runs on every read and write of every connection, and
+	// LoadOrStore's argument would be a fresh allocation each time.
+	v, ok := m.users.Load(user)
+	if !ok {
+		v, _ = m.users.LoadOrStore(user, &userCounter{})
+	}
 	c := v.(*userCounter)
 	if up != 0 {
 		c.up.Add(up)

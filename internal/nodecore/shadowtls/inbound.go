@@ -98,9 +98,6 @@ type Inbound struct {
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options InboundOptions) (adapter.Inbound, error) {
-	if len(options.Users) == 0 {
-		return nil, E.New("missing users")
-	}
 	if options.InnerMethod == "" || options.InnerPassword == "" {
 		return nil, E.New("missing inner shadowsocks-2022 method/password")
 	}
@@ -171,6 +168,7 @@ func newInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		Listen:            options.ListenOptions,
 		ConnectionHandler: inb,
 	})
+	traffic.SetPolicy(inb.conns, inb.Tag(), traffic.SharedList(inb.conns, options.Users).Policy)
 	return inb, nil
 }
 
@@ -181,7 +179,7 @@ func (h *Inbound) UpdateUsers(users []option.ShadowTLSUser) {
 	h.service.UpdateUsers(common.Map(users, func(it option.ShadowTLSUser) shadowtls.User {
 		return shadowtls.User(it)
 	}))
-	traffic.SetUserPolicy(h.conns, h.Tag(), users)
+	traffic.SetPolicy(h.conns, h.Tag(), traffic.SharedList(h.conns, users).Policy)
 }
 
 func (h *Inbound) Start(stage adapter.StartStage) error {

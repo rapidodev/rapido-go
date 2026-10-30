@@ -124,7 +124,8 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 // error, changing nothing, exactly like the original constructor's own
 // per-user validation.
 func (h *Inbound) UpdateUsers(users []option.TUICUser) error {
-	keys := userkey.BuildOptions(users)
+	list := traffic.SharedList(h.conns, users)
+	keys := list.Keys
 	uuidList := make([][16]byte, len(users))
 	passwordList := make([]string, len(users))
 	for index, user := range users {
@@ -139,7 +140,7 @@ func (h *Inbound) UpdateUsers(users []option.TUICUser) error {
 		passwordList[index] = user.Password
 	}
 	h.server.UpdateUsers(keys, uuidList, passwordList)
-	traffic.SetUserPolicy(h.conns, h.Tag(), users)
+	traffic.SetPolicy(h.conns, h.Tag(), list.Policy)
 	return nil
 }
 

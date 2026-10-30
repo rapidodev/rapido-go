@@ -2,8 +2,10 @@ package nodecore
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"reflect"
+	"slices"
+	"sync"
 
 	box "github.com/legendary1205/rapido-go/internal/nodecore/box"
 	"github.com/sagernet/sing-box/option"
@@ -31,6 +33,9 @@ type Node struct {
 	// conns is every client connection this instance has accepted and not yet
 	// finished with; Close ends them all. See traffic.ConnGroup.
 	conns *traffic.ConnGroup
+
+	convertedMu sync.Mutex
+	converted   map[reflect.Type]convertedUsers
 }
 
 // New builds a sing-box instance from the given options - it does not
@@ -47,19 +52,6 @@ func New(ctx context.Context, opts option.Options, mgr *traffic.Manager) (*Node,
 	conns := traffic.NewConnGroup()
 	ctx = traffic.WithConnGroup(traffic.NewContext(ctx, mgr), conns)
 	ctx = box.Context(ctx, InboundRegistry(), OutboundRegistry(), EndpointRegistry(), DNSTransportRegistry(), ServiceRegistry(), CertificateProviderRegistry())
-	for _, in := range opts.Inbounds {
-		raw, err := json.Marshal(in.Options)
-		if err != nil {
-			return nil, err
-		}
-		var options struct {
-			Users []json.RawMessage `json:"users"`
-		}
-		if err := json.Unmarshal(raw, &options); err != nil {
-			return nil, err
-		}
-		traffic.SetUserPolicy(conns, in.Tag, options.Users)
-	}
 	instance, err := box.New(box.Options{
 		Context: ctx,
 		Options: opts,
@@ -110,47 +102,47 @@ type User struct {
 func (n *Node) UpdateUsers(tag, protocol string, users []User) error {
 	switch protocol {
 	case "vless":
-		return n.UpdateVLESSUsers(tag, mapUsers(users, func(u User) option.VLESSUser {
+		return n.UpdateVLESSUsers(tag, convertUsers(n, users, func(u User) option.VLESSUser {
 			return option.VLESSUser{Name: u.Name, UUID: u.UUID, Flow: u.Flow}
 		}))
 	case "vmess":
-		return n.UpdateVMessUsers(tag, mapUsers(users, func(u User) option.VMessUser {
+		return n.UpdateVMessUsers(tag, convertUsers(n, users, func(u User) option.VMessUser {
 			return option.VMessUser{Name: u.Name, UUID: u.UUID}
 		}))
 	case "trojan":
-		return n.UpdateTrojanUsers(tag, mapUsers(users, func(u User) option.TrojanUser {
+		return n.UpdateTrojanUsers(tag, convertUsers(n, users, func(u User) option.TrojanUser {
 			return option.TrojanUser{Name: u.Name, Password: u.Password}
 		}))
 	case "shadowsocks":
-		return n.UpdateShadowsocksUsers(tag, mapUsers(users, func(u User) option.ShadowsocksUser {
+		return n.UpdateShadowsocksUsers(tag, convertUsers(n, users, func(u User) option.ShadowsocksUser {
 			return option.ShadowsocksUser{Name: u.Name, Password: u.Password}
 		}))
 	case "hysteria2":
-		return n.UpdateHysteria2Users(tag, mapUsers(users, func(u User) option.Hysteria2User {
+		return n.UpdateHysteria2Users(tag, convertUsers(n, users, func(u User) option.Hysteria2User {
 			return option.Hysteria2User{Name: u.Name, Password: u.Password}
 		}))
 	case "tuic":
-		return n.UpdateTUICUsers(tag, mapUsers(users, func(u User) option.TUICUser {
+		return n.UpdateTUICUsers(tag, convertUsers(n, users, func(u User) option.TUICUser {
 			return option.TUICUser{Name: u.Name, UUID: u.UUID, Password: u.Password}
 		}))
 	case "snell":
-		return n.UpdateSnellUsers(tag, mapUsers(users, func(u User) option.SnellUser {
+		return n.UpdateSnellUsers(tag, convertUsers(n, users, func(u User) option.SnellUser {
 			return option.SnellUser{Name: u.Name, UserKey: u.UserKey}
 		}))
 	case "anytls":
-		return n.UpdateAnyTLSUsers(tag, mapUsers(users, func(u User) option.AnyTLSUser {
+		return n.UpdateAnyTLSUsers(tag, convertUsers(n, users, func(u User) option.AnyTLSUser {
 			return option.AnyTLSUser{Name: u.Name, Password: u.Password}
 		}))
 	case "hysteria":
-		return n.UpdateHysteriaUsers(tag, mapUsers(users, func(u User) option.HysteriaUser {
+		return n.UpdateHysteriaUsers(tag, convertUsers(n, users, func(u User) option.HysteriaUser {
 			return option.HysteriaUser{Name: u.Name, AuthString: u.Password}
 		}))
 	case "naive":
-		return n.UpdateNaiveUsers(tag, mapUsers(users, func(u User) auth.User {
+		return n.UpdateNaiveUsers(tag, convertUsers(n, users, func(u User) auth.User {
 			return auth.User{Username: u.Name, Password: u.Password}
 		}))
 	case "shadowtls":
-		return n.UpdateShadowTLSUsers(tag, mapUsers(users, func(u User) option.ShadowTLSUser {
+		return n.UpdateShadowTLSUsers(tag, convertUsers(n, users, func(u User) option.ShadowTLSUser {
 			return option.ShadowTLSUser{Name: u.Name, Password: u.Password}
 		}))
 	default:
@@ -158,12 +150,30 @@ func (n *Node) UpdateUsers(tag, protocol string, users []User) error {
 	}
 }
 
-func mapUsers[T any](users []User, convert func(User) T) []T {
+// convertUsers maps users to one protocol's option type, once for all the
+// listeners a change visits: the same users arrive once per listener, and a copy
+// each is a lot of garbage with a large list on many ports.
+func convertUsers[T any](n *Node, users []User, convert func(User) T) []T {
+	key := reflect.TypeFor[T]()
+	n.convertedMu.Lock()
+	defer n.convertedMu.Unlock()
+	if last, ok := n.converted[key]; ok && slices.Equal(last.source, users) {
+		return last.list.([]T)
+	}
 	out := make([]T, len(users))
 	for i, u := range users {
 		out[i] = convert(u)
 	}
+	if n.converted == nil {
+		n.converted = map[reflect.Type]convertedUsers{}
+	}
+	n.converted[key] = convertedUsers{source: slices.Clone(users), list: out}
 	return out
+}
+
+type convertedUsers struct {
+	source []User
+	list   any
 }
 
 // runningInbound looks up the inbound tagged tag and asserts it is the forked

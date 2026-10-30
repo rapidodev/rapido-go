@@ -72,9 +72,6 @@ type Inbound struct {
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.NaiveInboundOptions) (adapter.Inbound, error) {
-	if len(options.Users) == 0 {
-		return nil, E.New("missing users")
-	}
 	if common.Contains(options.Network.Build(), N.NetworkUDP) {
 		return nil, E.New("naive: UDP/HTTP3 is not supported by this inbound - remove \"udp\" from network")
 	}
@@ -91,7 +88,9 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		trafficMgr: traffic.FromContext(ctx),
 		conns:      traffic.ConnGroupFromContext(ctx),
 	}
-	inb.authenticator.Store(auth.NewAuthenticator(options.Users))
+	// No users is a normal state, not a broken config: the last one can expire
+	// at any moment. handshake refuses everybody then.
+	inb.UpdateUsers(options.Users)
 	if options.TLS != nil {
 		tlsConfig, err := tls.NewServer(ctx, logger, common.PtrValueOrDefault(options.TLS))
 		if err != nil {
@@ -108,7 +107,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 // upstream mutator (there isn't one).
 func (n *Inbound) UpdateUsers(users []auth.User) {
 	n.authenticator.Store(auth.NewAuthenticator(users))
-	traffic.SetUserPolicy(n.conns, n.Tag(), users)
+	traffic.SetPolicy(n.conns, n.Tag(), traffic.SharedList(n.conns, users).Policy)
 }
 
 func (n *Inbound) Start(stage adapter.StartStage) error {

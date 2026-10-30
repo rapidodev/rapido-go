@@ -130,13 +130,14 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 // users share a password.
 func (h *Inbound) UpdateUsers(users []option.TrojanUser) error {
 	service := trojan.NewService[*userkey.Key](adapter.NewUpstreamContextHandler(h.newConnection, h.newPacketConnection), h.fallbackHandler, h.logger)
-	err := service.UpdateUsers(userkey.BuildOptions(users), common.Map(users, func(it option.TrojanUser) string {
+	list := traffic.SharedList(h.conns, users)
+	err := service.UpdateUsers(list.Keys, common.Map(users, func(it option.TrojanUser) string {
 		return it.Password
 	}))
 	if err != nil {
 		return err
 	}
-	traffic.SetUserPolicy(h.conns, h.Tag(), users)
+	traffic.SetPolicy(h.conns, h.Tag(), list.Policy)
 	h.service.Store(service)
 	return nil
 }

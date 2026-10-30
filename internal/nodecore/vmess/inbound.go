@@ -109,9 +109,10 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 // UpdateUsers replaces the user list on the running service. Connections that
 // already passed the handshake are unaffected.
 func (h *Inbound) UpdateUsers(users []option.VMessUser) error {
-	err := h.service.UpdateUsers(userkey.BuildOptions(users), common.Map(users, func(it option.VMessUser) string { return it.UUID }), common.Map(users, func(it option.VMessUser) int { return it.AlterId }))
+	list := traffic.SharedList(h.conns, users)
+	err := h.service.UpdateUsers(list.Keys, common.Map(users, func(it option.VMessUser) string { return it.UUID }), common.Map(users, func(it option.VMessUser) int { return it.AlterId }))
 	if err == nil {
-		traffic.SetUserPolicy(h.conns, h.Tag(), users)
+		traffic.SetPolicy(h.conns, h.Tag(), list.Policy)
 	}
 	return err
 }

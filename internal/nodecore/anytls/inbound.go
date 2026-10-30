@@ -112,6 +112,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		Listen:            options.ListenOptions,
 		ConnectionHandler: inb,
 	})
+	traffic.SetPolicy(inb.conns, inb.Tag(), traffic.SharedList(inb.conns, options.Users).Policy)
 	return inb, nil
 }
 
@@ -121,7 +122,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 // way the other forks' UpdateUsers document.
 func (h *Inbound) UpdateUsers(users []option.AnyTLSUser) {
 	h.service.UpdateUsers(common.Map(users, func(it option.AnyTLSUser) anytls.User { return anytls.User(it) }))
-	traffic.SetUserPolicy(h.conns, h.Tag(), users)
+	traffic.SetPolicy(h.conns, h.Tag(), traffic.SharedList(h.conns, users).Policy)
 }
 
 func (h *Inbound) Start(stage adapter.StartStage) error {

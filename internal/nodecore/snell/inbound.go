@@ -145,14 +145,15 @@ func (h *Inbound) UpdateUsers(users []option.SnellUser) error {
 		}
 		names, keys = []string{""}, [][]byte{unreachable}
 	}
+	list := traffic.SharedList(h.conns, users)
 	err := h.service.UpdateUsers(func() []*userkey.Key {
 		if len(users) == 0 {
 			return userkey.Build(names)
 		}
-		return userkey.BuildOptions(users)
+		return list.Keys
 	}(), keys)
 	if err == nil {
-		traffic.SetUserPolicy(h.conns, h.Tag(), users)
+		traffic.SetPolicy(h.conns, h.Tag(), list.Policy)
 	}
 	return err
 }

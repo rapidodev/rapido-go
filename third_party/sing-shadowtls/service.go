@@ -113,9 +113,8 @@ func NewService(config ServiceConfig) (*Service, error) {
 	switch config.Version {
 	case 1, 2:
 	case 3:
-		if len(config.Users) == 0 {
-			return nil, E.New("missing users")
-		}
+		// No users is a normal state: UpdateUsers can bring the first one in,
+		// and until then every client just fails verification.
 	default:
 		return nil, E.New("unknown protocol version: ", config.Version)
 	}

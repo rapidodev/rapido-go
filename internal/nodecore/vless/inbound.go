@@ -129,16 +129,43 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 //
 // Users are keyed by userkey.Key rather than upstream's index into the option
 // slice; see that package for why.
+//
+// Listeners with the same users share one service, tables included: its only tie
+// to a listener is the handler, which finds the listener in the connection's
+// context instead. Per listener, those tables were most of a node's memory.
 func (h *Inbound) UpdateUsers(users []option.VLESSUser) {
-	service := vless.NewService[*userkey.Key](h.logger, adapter.NewUpstreamContextHandler(h.newConnectionEx, h.newPacketConnectionEx))
-	service.UpdateUsers(
-		userkey.BuildOptions(users),
-		common.Map(users, func(it option.VLESSUser) string { return it.UUID }),
-		common.Map(users, func(it option.VLESSUser) string { return it.Flow }),
-	)
-	traffic.SetUserPolicy(h.conns, h.Tag(), users)
-	h.service.Store(service)
+	shared := traffic.SharedLists[option.VLESSUser, *sharedService](h.conns).Get(users, func() *sharedService {
+		list := userkey.NewList(users)
+		service := vless.NewService[*userkey.Key](h.logger, listenerHandler)
+		service.UpdateUsers(
+			list.Keys,
+			common.Map(users, func(it option.VLESSUser) string { return it.UUID }),
+			common.Map(users, func(it option.VLESSUser) string { return it.Flow }),
+		)
+		return &sharedService{service: service, policy: list.Policy}
+	})
+	traffic.SetPolicy(h.conns, h.Tag(), shared.policy)
+	h.service.Store(shared.service)
 }
+
+// sharedService is what one user list builds to here.
+type sharedService struct {
+	service *vless.Service[*userkey.Key]
+	policy  map[string][32]byte
+}
+
+type listenerKey struct{}
+
+// listenerHandler is the handler of every shared service: NewConnection puts the
+// listener in the context, and multiplexed streams inherit that context too.
+var listenerHandler = adapter.NewUpstreamContextHandler(
+	func(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+		ctx.Value(listenerKey{}).(*Inbound).newConnectionEx(ctx, conn, metadata, onClose)
+	},
+	func(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+		ctx.Value(listenerKey{}).(*Inbound).newPacketConnectionEx(ctx, conn, metadata, onClose)
+	},
+)
 
 func (h *Inbound) Start(stage adapter.StartStage) error {
 	if stage != adapter.StartStateStart {
@@ -198,7 +225,7 @@ func (h *Inbound) NewConnection(ctx context.Context, conn net.Conn, metadata ada
 		}
 		conn = tlsConn
 	}
-	err := h.service.Load().NewConnection(adapter.WithContext(ctx, &metadata), conn, metadata.Source, onClose)
+	err := h.service.Load().NewConnection(adapter.WithContext(context.WithValue(ctx, listenerKey{}, h), &metadata), conn, metadata.Source, onClose)
 	if err != nil {
 		N.CloseOnHandshakeFailure(conn, onClose, err)
 		h.logger.ErrorContext(ctx, E.Cause(err, "process connection from ", metadata.Source))

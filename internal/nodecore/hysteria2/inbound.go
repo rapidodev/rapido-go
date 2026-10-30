@@ -239,11 +239,12 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 // password (sing-quic's own auth lookup), not index - see this package's own
 // doc comment.
 func (h *Inbound) UpdateUsers(users []option.Hysteria2User) {
+	list := traffic.SharedList(h.conns, users)
 	h.service.UpdateUsers(
-		userkey.BuildOptions(users),
+		list.Keys,
 		common.Map(users, func(it option.Hysteria2User) string { return it.Password }),
 	)
-	traffic.SetUserPolicy(h.conns, h.Tag(), users)
+	traffic.SetPolicy(h.conns, h.Tag(), list.Policy)
 }
 
 func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
