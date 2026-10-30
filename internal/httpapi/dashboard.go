@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"path"
 	"path/filepath"
 
 	"github.com/gin-gonic/gin"
@@ -31,6 +32,31 @@ import (
 // instead of /dashboard (nothing), while still being a 200 for any client
 // that probes the root to decide whether the server is reachable.
 func MountDashboardStatic(r *gin.Engine, dir string) {
-	r.StaticFS("/dashboard", http.Dir(dir))
-	r.StaticFS("/statics", http.Dir(filepath.Join(dir, "statics")))
+	r.StaticFS("/dashboard", noListing{http.Dir(dir)})
+	r.StaticFS("/statics", noListing{http.Dir(filepath.Join(dir, "statics"))})
+}
+
+// noListing treats a directory with no index.html as not there, where
+// http.FileServer would list what's in it.
+type noListing struct{ http.FileSystem }
+
+func (fs noListing) Open(name string) (http.File, error) {
+	f, err := fs.FileSystem.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if info.IsDir() {
+		index, err := fs.FileSystem.Open(path.Join(name, "index.html"))
+		if err != nil {
+			f.Close()
+			return nil, err
+		}
+		index.Close()
+	}
+	return f, nil
 }

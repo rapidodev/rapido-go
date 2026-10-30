@@ -180,6 +180,20 @@ func TestACredentialAnotherUserHoldsIsRefused(t *testing.T) {
 	}
 }
 
+// Bots create first and fetch on a conflict, sending the same id every time.
+func TestCreatingAnExistingUserAgainStillSaysItExists(t *testing.T) {
+	router, token := newTestRouter(t)
+	id := setupVLESSUser(t, router, token, "repeat")
+
+	again := doRequest(t, router, "POST", "/api/user", token, map[string]interface{}{
+		"username": "repeat",
+		"proxies":  map[string]interface{}{"vless": map[string]interface{}{"id": id}},
+	})
+	if again.Code != http.StatusConflict || !strings.Contains(string(again.Raw), "User already exists") {
+		t.Errorf("%d %s, want 409 User already exists", again.Code, again.Raw)
+	}
+}
+
 // A user already stuck with a shared credential can still be edited.
 func TestAUserWithAnExistingDuplicateCanStillBeEdited(t *testing.T) {
 	router, token, h := newTestRouterAndHandler(t)

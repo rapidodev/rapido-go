@@ -164,7 +164,7 @@ func NewRouter(h *Handler, logger *slog.Logger, allowedOrigins []string) *gin.En
 	if err := r.SetTrustedProxies(proxies); err != nil {
 		panic("invalid TRUSTED_PROXIES: " + err.Error())
 	}
-	r.Use(requestBudget(), slogMiddleware(logger), apiClientLogMiddleware(logger), gin.Recovery(), CORS(allowedOrigins), maintenanceMiddleware(h.store), h.refreshSigningIdentity(), atomicMutations(h))
+	r.Use(securityHeaders(), requestBudget(), slogMiddleware(logger), apiClientLogMiddleware(logger), gin.Recovery(), CORS(allowedOrigins), maintenanceMiddleware(h.store), h.refreshSigningIdentity(), atomicMutations(h))
 
 	// Gin's own defaults answer an unknown path with the plain-text body
 	// "404 page not found" and a wrong method with that same 404. FastAPI -
@@ -408,6 +408,28 @@ func maintenanceMiddleware(store *Store) gin.HandlerFunc {
 		c.Next()
 	}
 }
+
+// securityHeaders goes on every answer: the dashboard can't be framed by another
+// site, a browser takes each file for the type it's served as, and no address with
+// a token in it reaches another site as a referrer. The dashboard holds an admin's
+// token and needs nothing from anywhere else, so it also says so: injected markup
+// can neither run nor send anything out.
+func securityHeaders() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		header := c.Writer.Header()
+		header.Set("X-Frame-Options", "DENY")
+		header.Set("X-Content-Type-Options", "nosniff")
+		header.Set("Referrer-Policy", "same-origin")
+		if strings.HasPrefix(c.Request.URL.Path, "/dashboard") {
+			header.Set("Content-Security-Policy", dashboardCSP)
+		}
+		c.Next()
+	}
+}
+
+const dashboardCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+	"img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; " +
+	"base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
 
 func slogMiddleware(logger *slog.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {

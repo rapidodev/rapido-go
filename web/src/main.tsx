@@ -1,3 +1,5 @@
+// First: everything imported below may build its schemas as it loads.
+import "utils/zodConfig";
 import dayjs from "dayjs";
 import Duration from "dayjs/plugin/duration";
 import LocalizedFormat from "dayjs/plugin/localizedFormat";

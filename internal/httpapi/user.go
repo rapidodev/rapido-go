@@ -236,6 +236,13 @@ func (h *Handler) handleCreateUser(c *gin.Context) {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": err.Error()})
 		return
 	}
+	// An existing username answers as it always has, whatever the request carries:
+	// a client that creates first and fetches on a conflict sends the same id every
+	// time, and that id being taken by the very user it means isn't the news.
+	if _, err := h.store.Queries.GetUserByUsername(ctx, username); err == nil {
+		c.JSON(http.StatusConflict, gin.H{"detail": "User already exists"})
+		return
+	}
 	if !h.credentialsAreFree(c, 0, req.Proxies, settingsByType, nil) {
 		return
 	}
