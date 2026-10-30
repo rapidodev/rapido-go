@@ -237,9 +237,17 @@ func (h *Handler) recordNodeTraffic(ctx context.Context, nodeID int32, req nodeR
 	}
 	bucket := pgtype.Timestamptz{Time: time.Now().UTC().Truncate(time.Hour), Valid: true}
 	if len(ids) > 0 {
-		if err := q.BulkIncrementUserUsage(ctx, generated.BulkIncrementUserUsageParams{Ids: ids, Deltas: deltas}); err != nil {
+		// Keeps BulkIncrementUserUsage locking users in id order; see its comment.
+		if _, err := tx.Exec(ctx, "SET LOCAL enable_hashjoin = off"); err != nil {
 			return err
 		}
+		updated, err := q.BulkIncrementUserUsage(ctx, generated.BulkIncrementUserUsageParams{Ids: ids, Deltas: deltas})
+		if err != nil {
+			return err
+		}
+		// A user deleted since they were read would fail the whole report on the
+		// foreign key here. Those still counted are locked until this commits.
+		ids, deltas = onlyThese(updated, ids, deltas)
 		if err := q.BulkUpsertNodeUserUsage(ctx, generated.BulkUpsertNodeUserUsageParams{CreatedAt: bucket, NodeID: nodeID, UserIds: ids, Deltas: deltas}); err != nil {
 			return err
 		}
@@ -270,4 +278,24 @@ func (h *Handler) recordNodeTraffic(ctx context.Context, nodeID int32, req nodeR
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+// onlyThese narrows ids and their deltas to the ids in keep.
+func onlyThese(keep, ids []int32, deltas []int64) ([]int32, []int64) {
+	if len(keep) == len(ids) {
+		return ids, deltas
+	}
+	wanted := make(map[int32]bool, len(keep))
+	for _, id := range keep {
+		wanted[id] = true
+	}
+	keptIDs := make([]int32, 0, len(keep))
+	keptDeltas := make([]int64, 0, len(keep))
+	for i, id := range ids {
+		if wanted[id] {
+			keptIDs = append(keptIDs, id)
+			keptDeltas = append(keptDeltas, deltas[i])
+		}
+	}
+	return keptIDs, keptDeltas
 }

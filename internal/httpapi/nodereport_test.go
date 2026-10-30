@@ -3,7 +3,11 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"math/rand"
 	"net/http"
+	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -600,5 +604,155 @@ func TestGetMonitoringDecodesTheNodesTunnelShape(t *testing.T) {
 	legacy := byName["legacy"]
 	if legacy["present"] != true || legacy["up"] != true || legacy["last_handshake"] != float64(0) || legacy["handshake_age_seconds"] != nil {
 		t.Errorf("legacy = %v, want present defaulting to true with no handshake", legacy)
+	}
+}
+
+// Reports from different nodes share users and admin-wide actions touch the same
+// rows. They have to take those rows in one order, or two of them end up waiting on
+// each other and Postgres kills one, as it did on a live panel a few times a day.
+func TestConcurrentReportsAndAdminActionsDoNotDeadlock(t *testing.T) {
+	router, token := newTestRouter(t)
+	_, secretA := createTestNode(t, router, token, "deadlock-node-a")
+	_, secretB := createTestNode(t, router, token, "deadlock-node-b")
+	if resp := doRequest(t, router, "POST", "/api/admin", token, map[string]interface{}{
+		"username": "deadlock_admin", "password": "SomePassword123", "is_sudo": false,
+	}); resp.Code != http.StatusOK {
+		t.Fatalf("create admin: %d %v", resp.Code, resp.Body)
+	}
+	adminToken := loginAs(t, router, "deadlock_admin", "SomePassword123")
+	doRequest(t, router, "POST", "/api/inbounds/sync", token, []map[string]interface{}{{"tag": "VLESS TCP", "protocol": "vless"}})
+
+	const users = 40
+	names := make([]string, users)
+	for i := range names {
+		names[i] = fmt.Sprintf("deadlock_user_%d", i)
+		resp := doRequest(t, router, "POST", "/api/user", adminToken, map[string]interface{}{
+			"username": names[i], "proxies": map[string]interface{}{"vless": map[string]interface{}{}},
+		})
+		if resp.Code != http.StatusOK {
+			t.Fatalf("create %s: %d %v", names[i], resp.Code, resp.Body)
+		}
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var failures []string
+	fail := func(what string, resp apiResponse) {
+		mu.Lock()
+		defer mu.Unlock()
+		failures = append(failures, fmt.Sprintf("%s: %d %s", what, resp.Code, resp.Raw))
+	}
+	const rounds = 30
+	report := func(secret string, seed int64) {
+		defer wg.Done()
+		random := rand.New(rand.NewSource(seed))
+		for round := 0; round < rounds; round++ {
+			rows := make([]map[string]interface{}, 0, users)
+			for _, i := range random.Perm(users) {
+				rows = append(rows, map[string]interface{}{"username": names[i], "uplink": 1, "downlink": 1})
+			}
+			if resp := doRequest(t, router, "POST", "/api/internal/node-report", secret, nodeReportPayload(rows)); resp.Code != http.StatusOK {
+				fail("report", resp)
+			}
+		}
+	}
+	wg.Add(4)
+	go report(secretA, 1)
+	go report(secretB, 2)
+	go report(secretA, 3)
+	go report(secretB, 4)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for round := 0; round < rounds/2; round++ {
+			for _, action := range []string{"disable", "activate"} {
+				if resp := doRequest(t, router, "POST", "/api/admin/deadlock_admin/users/"+action, token, nil); resp.Code != http.StatusOK {
+					fail(action, resp)
+				}
+			}
+		}
+	}()
+	wg.Wait()
+	for _, failure := range failures {
+		t.Error(failure)
+	}
+
+	// Nothing got lost on the way: each of the four reporters added two bytes per
+	// user each round.
+	resp := doRequest(t, router, "GET", "/api/user/"+names[0], token, nil)
+	if got, want := int64(resp.Body["used_traffic"].(float64)), int64(4*rounds*2); len(failures) == 0 && got != want {
+		t.Errorf("used_traffic = %d, want %d", got, want)
+	}
+}
+
+// A report naming a user who is being deleted at that moment used to fail as a whole
+// on the foreign key, holding back everyone else's traffic until the node retried.
+func TestAReportOverlappingAUserDeletionStillCommits(t *testing.T) {
+	router, token, h := newTestRouterAndHandler(t)
+	_, secret := createTestNode(t, router, token, "deletion-race-node")
+	setupVLESSUser(t, router, token, "leaving")
+	setupVLESSUser(t, router, token, "staying")
+
+	ctx := context.Background()
+	tx, err := h.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "DELETE FROM users WHERE username = 'leaving'"); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan apiResponse, 1)
+	go func() {
+		done <- doRequest(t, router, "POST", "/api/internal/node-report", secret, nodeReportPayload([]map[string]interface{}{
+			{"username": "leaving", "uplink": 10, "downlink": 10},
+			{"username": "staying", "uplink": 10, "downlink": 10},
+		}))
+	}()
+	// Let the report get as far as waiting on the deleted row.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting int
+		if err := h.store.Pool.QueryRow(ctx, "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()").Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the report never reached the row being deleted")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := <-done
+	if resp.Code != http.StatusOK {
+		t.Fatalf("report: %d %s", resp.Code, resp.Raw)
+	}
+	staying := doRequest(t, router, "GET", "/api/user/staying", token, nil)
+	if got := int64(staying.Body["used_traffic"].(float64)); got != 20 {
+		t.Errorf("the other user's traffic = %d, want 20", got)
+	}
+}
+
+func TestOnlyTheseKeepsEachDeltaWithItsUser(t *testing.T) {
+	ids := []int32{1, 2, 3, 4}
+	deltas := []int64{10, 20, 30, 40}
+
+	gotIDs, gotDeltas := onlyThese([]int32{4, 1, 3, 2}, ids, deltas)
+	if !slices.Equal(gotIDs, ids) || !slices.Equal(gotDeltas, deltas) {
+		t.Errorf("everyone there: %v %v", gotIDs, gotDeltas)
+	}
+	gotIDs, gotDeltas = onlyThese([]int32{3, 1}, ids, deltas)
+	if !slices.Equal(gotIDs, []int32{1, 3}) || !slices.Equal(gotDeltas, []int64{10, 30}) {
+		t.Errorf("two gone: %v %v", gotIDs, gotDeltas)
+	}
+	gotIDs, gotDeltas = onlyThese(nil, ids, deltas)
+	if len(gotIDs) != 0 || len(gotDeltas) != 0 {
+		t.Errorf("nobody left: %v %v", gotIDs, gotDeltas)
 	}
 }

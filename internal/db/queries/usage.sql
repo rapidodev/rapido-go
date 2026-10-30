@@ -56,7 +56,10 @@ WHERE status IN ('expired', 'limited')
 ORDER BY id;
 
 -- name: DeleteUsersByIDs :exec
-DELETE FROM users WHERE id = ANY(sqlc.arg('ids')::int[]);
+WITH target AS (
+    SELECT id FROM users WHERE id = ANY(sqlc.arg('ids')::int[]) ORDER BY id FOR UPDATE
+)
+DELETE FROM users WHERE id IN (SELECT id FROM target);
 
 -- name: ListUserIDsByAdmin :many
 SELECT id FROM users WHERE admin_id = $1;
@@ -69,9 +72,12 @@ SELECT id FROM users;
 -- users that aren't deliberately parked (on_hold) or already finished
 -- (expired/disabled) - resetting traffic must never silently un-disable an
 -- account an admin switched off on purpose.
+WITH target AS (
+    SELECT id FROM users WHERE id = ANY(sqlc.arg('ids')::int[]) ORDER BY id FOR NO KEY UPDATE
+)
 UPDATE users SET used_traffic = 0,
     status = CASE WHEN status IN ('on_hold', 'expired', 'disabled') THEN status ELSE 'active' END
-WHERE id = ANY(sqlc.arg('ids')::int[]);
+WHERE id IN (SELECT id FROM target);
 
 -- name: DeleteNodeUserUsagesByUserIDs :exec
 DELETE FROM node_user_usages WHERE user_id = ANY(sqlc.arg('ids')::int[]);

@@ -23,7 +23,9 @@ INSERT INTO reseller_delivery_batches(id,destination,secret,payload,admin_ids,de
 -- name: CompleteResellerBatch :exec
 WITH sent AS (
  SELECT unnest(admin_ids) AS admin_id,unnest(deltas) AS amount FROM reseller_delivery_batches b WHERE b.id=$1 AND b.active
+), locked AS (
+ SELECT q.admin_id FROM reseller_api_usage_queue q WHERE q.admin_id IN (SELECT admin_id FROM sent) ORDER BY q.admin_id FOR NO KEY UPDATE
 ), billed AS (
- UPDATE reseller_api_usage_queue q SET pending=q.pending-sent.amount,reported=q.reported+sent.amount FROM sent WHERE q.admin_id=sent.admin_id
+ UPDATE reseller_api_usage_queue q SET pending=q.pending-sent.amount,reported=q.reported+sent.amount FROM sent JOIN locked ON locked.admin_id=sent.admin_id WHERE q.admin_id=sent.admin_id
 )
 UPDATE reseller_delivery_batches b SET active=false,secret='' WHERE b.id=$1 AND b.active;

@@ -71,7 +71,10 @@ ORDER BY last_activity ASC;
 -- (removing each user from the live core config) is dispatched by the
 -- caller from the returned rows - it depends on the node/RPC layer built in
 -- a later phase and isn't performed here.
-DELETE FROM users WHERE admin_id = $1
+WITH target AS (
+    SELECT t.id FROM users t WHERE t.admin_id = $1 ORDER BY t.id FOR UPDATE
+)
+DELETE FROM users WHERE id IN (SELECT id FROM target)
 RETURNING *;
 
 -- name: DisableActiveUsersByAdminID :many
@@ -79,9 +82,15 @@ RETURNING *;
 -- on_hold user under this admin goes to disabled in one statement - no
 -- separate node-side dispatch needed, since nodes poll their config and see
 -- the change through its data version (see migration 00015).
-UPDATE users SET status = 'disabled', last_status_change = now()
-WHERE admin_id = $1 AND status IN ('active', 'on_hold')
-RETURNING *;
+--
+-- Takes the rows lowest id first, as a node report does: otherwise each can
+-- end up waiting on the other.
+WITH target AS (
+    SELECT t.id FROM users t WHERE t.admin_id = $1 AND t.status IN ('active', 'on_hold') ORDER BY t.id FOR NO KEY UPDATE
+)
+UPDATE users u SET status = 'disabled', last_status_change = now()
+FROM target WHERE u.id = target.id
+RETURNING u.*;
 
 -- name: ActivateDisabledUsersByAdminID :many
 -- Mirrors crud.activate_all_disabled_users(admin=..., users_limit=None)'s
@@ -91,6 +100,9 @@ RETURNING *;
 -- statement just flipped to active within the same transaction, so it
 -- never matches anything for this call shape - not replicated here since
 -- it would be dead code either way.)
-UPDATE users SET status = 'active', last_status_change = now()
-WHERE admin_id = $1 AND status = 'disabled'
-RETURNING *;
+WITH target AS (
+    SELECT t.id FROM users t WHERE t.admin_id = $1 AND t.status = 'disabled' ORDER BY t.id FOR NO KEY UPDATE
+)
+UPDATE users u SET status = 'active', last_status_change = now()
+FROM target WHERE u.id = target.id
+RETURNING u.*;

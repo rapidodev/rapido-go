@@ -2,8 +2,10 @@
 -- Resolves a node report's usernames to (id, admin_id) in one round trip -
 -- a push tick only carries usernames (all the node ever knows about a
 -- user), the panel needs the id/admin_id to write used_traffic and the
--- per-admin aggregate.
-SELECT id, username, admin_id FROM users WHERE username = ANY(sqlc.arg('usernames')::text[]);
+-- per-admin aggregate. Lowest id first, the order BulkIncrementUserUsage has to
+-- take them in.
+SELECT id, username, admin_id FROM users WHERE username = ANY(sqlc.arg('usernames')::text[])
+ORDER BY id;
 
 -- name: IncrementUserUsage :exec
 -- online_at is set in the same statement as used_traffic, deliberately:
@@ -13,7 +15,7 @@ SELECT id, username, admin_id FROM users WHERE username = ANY(sqlc.arg('username
 -- record_usages.py's own combined UPDATE).
 UPDATE users SET used_traffic = used_traffic + $2, online_at = now() WHERE id = $1;
 
--- name: BulkIncrementUserUsage :exec
+-- name: BulkIncrementUserUsage :many
 -- Batch form of IncrementUserUsage - handleNodeReport used to call the
 -- single-row version once per user in a loop, meaning a real node's report
 -- of a few hundred active users cost a few hundred sequential round trips
@@ -21,9 +23,16 @@ UPDATE users SET used_traffic = used_traffic + $2, online_at = now() WHERE id = 
 -- load test: ~7s per report, entirely this loop). unnest() turns the two
 -- parallel arrays into a virtual per-row table so the whole batch is one
 -- statement instead of len(ids) of them.
+--
+-- Reports from different nodes share users, and this is what locks them, so each
+-- report has to reach them in the same order or two can end up waiting on each
+-- other: ids sorted, and a transaction with hash joins off, since a hash join
+-- would walk the table instead. Returns who was really there: a user deleted
+-- since the caller read them has no row left for anything else to refer to.
 UPDATE users SET used_traffic = used_traffic + v.delta, online_at = now()
-FROM (SELECT unnest(sqlc.arg('ids')::int[]) AS id, unnest(sqlc.arg('deltas')::bigint[]) AS delta) AS v
-WHERE users.id = v.id;
+FROM (SELECT unnest(sqlc.arg('ids')::int[]) AS id, unnest(sqlc.arg('deltas')::bigint[]) AS delta ORDER BY 1) AS v
+WHERE users.id = v.id
+RETURNING users.id;
 
 -- name: IncrementAdminUsage :exec
 UPDATE admins SET users_usage = users_usage + $2 WHERE id = $1;
@@ -36,15 +45,18 @@ UPDATE admins SET users_usage = users_usage + $2 WHERE id = $1;
 -- report added.
 WITH v AS (
     SELECT unnest(sqlc.arg('ids')::int[]) AS id, unnest(sqlc.arg('deltas')::bigint[]) AS delta
+), locked AS (
+    SELECT a.id FROM admins a WHERE a.id = ANY(sqlc.arg('ids')::int[]) ORDER BY a.id FOR NO KEY UPDATE
 ), bumped AS (
     UPDATE admins SET users_usage = users_usage + v.delta
-    FROM v
+    FROM v JOIN locked ON locked.id = v.id
     WHERE admins.id = v.id
     RETURNING admins.id, v.delta
 )
 INSERT INTO reseller_api_usage_queue (admin_id, pending)
 SELECT bumped.id, bumped.delta FROM bumped
 WHERE sqlc.arg('queue_for_reseller_api')::boolean
+ORDER BY bumped.id
 ON CONFLICT (admin_id) DO UPDATE SET pending = reseller_api_usage_queue.pending + EXCLUDED.pending;
 
 -- name: UpsertNodeUserUsage :exec
