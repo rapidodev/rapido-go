@@ -24,7 +24,7 @@ cleanup() {
 }
 trap cleanup EXIT
 wait_service() {
-    local service="$1" architecture="$2" ready=0 attempt cid image_id
+    local service="$1" architecture="$2" ready=0 attempt cid running
     for attempt in $(seq 1 120); do
         if compose exec -T "$service" wget -q -O /dev/null http://127.0.0.1:8000/dashboard/ </dev/null 2>/dev/null; then
             ready=1
@@ -40,10 +40,17 @@ wait_service() {
     fi
     [ "$(compose exec -T "$service" awk '/^Uid:/ {print $2}' /proc/1/status </dev/null | tr -d '\r')" = 10001 ] \
         || { echo "$service did not drop root privileges"; return 1; }
-    cid="$(compose ps -q "$service")"
-    image_id="$(docker inspect --format '{{.Image}}' "$cid")"
-    [ "$(docker image inspect --format '{{.Architecture}}' "$image_id")" = "$architecture" ] \
+    # Asked from inside: with the containerd image store an image ID names the whole
+    # multi-arch index, and inspecting it reports this machine's architecture
+    # whatever the container is really running.
+    case "$(compose exec -T "$service" uname -m </dev/null | tr -d '\r')" in
+        x86_64) running=amd64 ;;
+        aarch64) running=arm64 ;;
+        *) running=unknown ;;
+    esac
+    [ "$running" = "$architecture" ] \
         || { echo "$service did not run the requested architecture"; return 1; }
+    cid="$(compose ps -q "$service")"
     [ "$(docker inspect --format '{{.RestartCount}}' "$cid")" = 0 ] \
         || { echo "$service restarted during the startup test"; return 1; }
 }
