@@ -4,6 +4,8 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const fetchMock = vi.hoisted(() => vi.fn());
 vi.mock("service/http", () => ({ fetch: fetchMock, fetcher: fetchMock }));
+const isOwnerMock = vi.hoisted(() => vi.fn(() => true));
+vi.mock("hooks/useCurrentAdminQuery", () => ({ useIsOwner: isOwnerMock }));
 
 import { IntegrationsForm } from "../IntegrationsForm";
 
@@ -12,12 +14,34 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
+  isOwnerMock.mockReturnValue(true);
   fetchMock.mockReset();
   fetchMock.mockResolvedValue({ telegram_enabled: false, telegram_admin_ids: [], webhook_addresses: [] });
 });
 
 const puts = () => fetchMock.mock.calls.filter((c) => (c[1] as { method?: string } | undefined)?.method === "PUT");
 const channelField = () => screen.getAllByPlaceholderText(i18n.t("rapido.integrations.newValue") as string)[2];
+
+describe("who may change the Telegram console's access", () => {
+  const lockedInputs = () => screen.queryAllByPlaceholderText(i18n.t("rapido.integrations.ownerOnlyField") as string);
+
+  it("locks the fields an owner alone can change for a sudo admin", async () => {
+    isOwnerMock.mockReturnValue(false);
+    render(<IntegrationsForm />);
+    await screen.findByText(i18n.t("rapido.integrations.telegram") as string);
+    const inputs = lockedInputs();
+    expect(inputs).toHaveLength(3);
+    inputs.forEach((input) => expect(input).toBeDisabled());
+    // What they may still change stays open.
+    expect(channelField()).toBeEnabled();
+  });
+
+  it("leaves them open for an owner", async () => {
+    render(<IntegrationsForm />);
+    await screen.findByText(i18n.t("rapido.integrations.telegram") as string);
+    expect(lockedInputs()).toHaveLength(0);
+  });
+});
 
 describe("saving integration settings", () => {
   it("sends nothing and names the field when a number field holds no number", async () => {

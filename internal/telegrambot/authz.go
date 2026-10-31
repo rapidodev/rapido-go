@@ -17,7 +17,8 @@ type principal struct {
 // authorize maps a Telegram account to a panel identity, or reports that the
 // account may not use the console at all.
 //
-//   - An id on the integration settings' admin list is sudo.
+//   - An id on the integration settings' admin list acts as the panel's owner.
+//     Only an owner can edit that list, see ownerOnlyIntegrationFields.
 //   - Otherwise an admin whose own telegram_id matches acts with that admin's
 //     privileges, so a reseller only ever reaches their own users.
 //

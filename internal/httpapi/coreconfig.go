@@ -221,6 +221,15 @@ func validPort(p int) bool { return p >= 1 && p <= 65535 }
 // validateRuleMatchers checks the values the node would otherwise be the first
 // to reject: a port the uint16 conversion would wrap, an address or a range
 // sing-box can't parse, a regex that doesn't compile.
+// ruleHasCondition reports whether a rule narrows what it matches at all.
+func ruleHasCondition(rule routingRuleDTO) bool {
+	return len(rule.Inbound) > 0 || len(rule.InboundPort) > 0 || len(rule.Domain) > 0 || len(rule.DomainSuffix) > 0 ||
+		len(rule.DomainKeyword) > 0 || len(rule.DomainRegex) > 0 || len(rule.IPCIDR) > 0 || rule.IPIsPrivate ||
+		len(rule.Port) > 0 || len(rule.PortRange) > 0 || len(rule.Network) > 0 || len(rule.Protocol) > 0 ||
+		len(rule.SourceIPCIDR) > 0 || rule.SourceIPIsPrivate || len(rule.SourcePort) > 0 ||
+		len(rule.SourcePortRange) > 0 || len(rule.AuthUser) > 0
+}
+
 func validateRuleMatchers(rule routingRuleDTO) string {
 	for _, list := range [][]int{rule.Port, rule.SourcePort} {
 		for _, p := range list {
@@ -493,6 +502,12 @@ func validateCoreConfig(dto coreConfigDTO) string {
 			return "outbound dependency cycle: " + tag
 		}
 	}
+	blockOutbounds := make(map[string]bool)
+	for _, ob := range dto.Outbounds {
+		if ob.Type == "block" {
+			blockOutbounds[ob.Tag] = true
+		}
+	}
 	for _, rule := range dto.RoutingRules {
 		if !validTarget(rule.OutboundTag) {
 			return "routing rule targets unknown outbound: " + rule.OutboundTag
@@ -509,6 +524,12 @@ func validateCoreConfig(dto coreConfigDTO) string {
 		}
 		if msg := validateRuleMatchers(rule); msg != "" {
 			return msg
+		}
+		// With no condition a rule matches every connection, which can be what an
+		// admin wants for an exit. To a block outbound it is every user of every
+		// node cut off, and nothing in the save would look wrong.
+		if !ruleHasCondition(rule) && (rule.OutboundTag == "block" || blockOutbounds[rule.OutboundTag]) {
+			return "routing rule to " + rule.OutboundTag + " has no condition and would block all traffic: add what it should match"
 		}
 		if len(rule.InboundPort) > 0 {
 			if len(rule.Inbound) == 0 {

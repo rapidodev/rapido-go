@@ -18,6 +18,7 @@ package tunnelprovision
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"regexp"
@@ -39,6 +40,11 @@ type Params struct {
 	FRPControlPort int32
 	FRPToken       string
 	Ports          []int32
+
+	// KeepNodeFRP and KeepRelayFRP make Teardown leave that end's frp config and
+	// service alone, for when another tunnel is using them.
+	KeepNodeFRP  bool
+	KeepRelayFRP bool
 
 	// Method selects which tunnel design is built (see methods.go). Empty
 	// means gre_frp, the only design before methods existed, so rows created
@@ -224,7 +230,50 @@ func ensurePathFree(ctx context.Context, c *sshexec.Client, path string) error {
 		return fmt.Errorf("check for %s: %w", path, err)
 	}
 	if strings.TrimSpace(out) == "present" {
-		return fmt.Errorf("%s already exists - refusing to overwrite something this provisioning run did not create (the allocated port or interface name collided with existing config on this box)", path)
+		return fmt.Errorf("%w: %s - refusing to overwrite something this provisioning run did not create (the allocated port or interface name collided with existing config on this box)", ErrPathInUse, path)
+	}
+	return nil
+}
+
+// ErrPathInUse means a path a tunnel needs already exists, so it belongs to
+// something else on that server. Whoever gets this must not run Teardown, which
+// removes that same path.
+var ErrPathInUse = errors.New("a path this tunnel needs already exists")
+
+// provisionPaths is every file Provision will create that Teardown removes.
+func provisionPaths(p Params) (relay, node []string) {
+	frps := fmt.Sprintf("/root/frp/server/server-%d.toml", p.FRPControlPort)
+	frpc := fmt.Sprintf("/root/frp/client/client-%d.toml", p.FRPControlPort)
+	gre := "/etc/systemd/system/gre-" + p.InterfaceName + ".service"
+	dnat := "/etc/systemd/system/" + dnatUnit(p) + ".service"
+	wg := "/etc/wireguard/" + p.InterfaceName + ".conf"
+	switch m := p.method(); {
+	case m == MethodGREFRP:
+		return []string{gre, frps}, []string{gre, frpc}
+	case isFRP(m):
+		return []string{frps}, []string{frpc}
+	case m == MethodGREDNAT || m == MethodIP6GREDNAT:
+		return []string{gre, dnat}, []string{gre}
+	case m == MethodWGDNAT:
+		return []string{wg, dnat}, []string{wg}
+	}
+	return nil, nil
+}
+
+// checkPathsFree runs before anything is written, on either server. Finding a
+// collision halfway would leave this run's own files behind with no safe way to
+// tell them from what was already there.
+func checkPathsFree(ctx context.Context, relay, node *sshexec.Client, p Params) error {
+	relayPaths, nodePaths := provisionPaths(p)
+	for _, path := range relayPaths {
+		if err := ensurePathFree(ctx, relay, path); err != nil {
+			return fmt.Errorf("relay: %w", err)
+		}
+	}
+	for _, path := range nodePaths {
+		if err := ensurePathFree(ctx, node, path); err != nil {
+			return fmt.Errorf("node: %w", err)
+		}
 	}
 	return nil
 }
@@ -472,10 +521,18 @@ func teardownGREFRP(ctx context.Context, relay, node *sshexec.Client, p Params) 
 		}
 	}
 
-	run(relay, "relay: stop frps", fmt.Sprintf("systemctl disable --now frps@server-%d 2>/dev/null; rm -f /root/frp/server/server-%d.toml /etc/systemd/system/multi-user.target.wants/frps@server-%d.service", p.FRPControlPort, p.FRPControlPort, p.FRPControlPort))
+	relayFRP, nodeFRP := relay, node
+	if p.KeepRelayFRP {
+		relayFRP = nil
+	}
+	if p.KeepNodeFRP {
+		nodeFRP = nil
+	}
+
+	run(relayFRP, "relay: stop frps", fmt.Sprintf("systemctl disable --now frps@server-%d 2>/dev/null; rm -f /root/frp/server/server-%d.toml /etc/systemd/system/multi-user.target.wants/frps@server-%d.service", p.FRPControlPort, p.FRPControlPort, p.FRPControlPort))
 	run(relay, "relay: stop GRE", "systemctl disable --now gre-"+p.InterfaceName+" 2>/dev/null; rm -f /etc/systemd/system/gre-"+p.InterfaceName+".service")
 
-	run(node, "node: stop frpc", fmt.Sprintf("systemctl disable --now frpc@client-%d 2>/dev/null; rm -f /root/frp/client/client-%d.toml /etc/systemd/system/multi-user.target.wants/frpc@client-%d.service", p.FRPControlPort, p.FRPControlPort, p.FRPControlPort))
+	run(nodeFRP, "node: stop frpc", fmt.Sprintf("systemctl disable --now frpc@client-%d 2>/dev/null; rm -f /root/frp/client/client-%d.toml /etc/systemd/system/multi-user.target.wants/frpc@client-%d.service", p.FRPControlPort, p.FRPControlPort, p.FRPControlPort))
 	run(node, "node: stop GRE", "systemctl disable --now gre-"+p.InterfaceName+" 2>/dev/null; rm -f /etc/systemd/system/gre-"+p.InterfaceName+".service")
 
 	if relay != nil {

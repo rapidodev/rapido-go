@@ -29,6 +29,7 @@ RETURNING *;
 -- place, see gatewaySyncPayload's own doc comment) or synced_from_panel_name
 -- itself (a replica never changes which panel it's a replica of).
 UPDATE users SET
+    last_usage_reset_at = CASE WHEN data_limit_reset_strategy IS DISTINCT FROM $4 THEN now() ELSE last_usage_reset_at END,
     status = $2,
     data_limit = $3,
     data_limit_reset_strategy = $4,
@@ -56,6 +57,9 @@ UPDATE users SET
     -- Auto-delete counts from this: a status set here must restart its clock
     -- like one set by the review job does.
     last_status_change = CASE WHEN status IS DISTINCT FROM $2 THEN now() ELSE last_status_change END,
+    -- A new strategy starts its first period now. Falling back to created_at would
+    -- declare it long over and wipe the usage on the next pass.
+    last_usage_reset_at = CASE WHEN data_limit_reset_strategy IS DISTINCT FROM $4 THEN now() ELSE last_usage_reset_at END,
     status = $2,
     data_limit = $3,
     data_limit_reset_strategy = $4,

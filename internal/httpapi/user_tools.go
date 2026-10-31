@@ -180,6 +180,9 @@ func planBulk(u generated.User, action string, days int, now time.Time) bulkPlan
 		case u.Expire.Valid && int64(u.Expire.Int32) <= now.Unix():
 			return bulkPlan{Skip: "the expiry has passed; extend it first"}
 		}
+		if planNotStarted(u.OnHoldExpireDuration, u.Expire) {
+			return bulkPlan{NewStatus: statusOnHold, NewExpire: u.Expire}
+		}
 		return bulkPlan{NewStatus: statusActive, NewExpire: u.Expire}
 	case bulkDisable:
 		if u.Status == statusDisabled {

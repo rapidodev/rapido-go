@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"net/netip"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -134,6 +136,10 @@ type nodeConfigInboundSpec struct {
 	// each means.
 	ShadowTLSInnerMethod   string `json:"shadowtls_inner_method,omitempty"`
 	ShadowTLSInnerPassword string `json:"shadowtls_inner_password,omitempty"`
+	// ShadowTLSHandshakeServer is the site a client that fails ShadowTLS's
+	// authentication gets relayed to, so that a prober sees a real TLS server:
+	// the primary host's SNI. See plainHostName for when there isn't one.
+	ShadowTLSHandshakeServer string `json:"shadowtls_handshake_server,omitempty"`
 
 	// usersKey is which nodeConfigSnapshot.usersJSON entry holds this
 	// inbound's already-encoded Users - the protocol, or its no-flow variant
@@ -175,7 +181,25 @@ type nodeConfigInboundWire struct {
 	HysteriaObfsPassword   string `json:"hysteria_obfs_password,omitempty"`
 	ShadowTLSInnerMethod   string `json:"shadowtls_inner_method,omitempty"`
 	ShadowTLSInnerPassword string `json:"shadowtls_inner_password,omitempty"`
+
+	ShadowTLSHandshakeServer string `json:"shadowtls_handshake_server,omitempty"`
 }
+
+// plainHostName keeps what can be dialled as it stands: a host's SNI can also be
+// a {VARIABLE} template, a comma-separated list or a wildcard from a migrated
+// panel, or an address. Anything else leaves a ShadowTLS inbound with no site to
+// relay to, and a client failing its authentication is then closed instead.
+func plainHostName(s string) string {
+	if !plainHostNameRe.MatchString(s) || !strings.Contains(s, ".") {
+		return ""
+	}
+	if _, err := netip.ParseAddr(s); err == nil {
+		return ""
+	}
+	return s
+}
+
+var plainHostNameRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
 
 // nodeConfigResponse is the full payload a node self-applies - see
 // cmd/node/main.go's pull loop. Version is a hash of the payload's own
@@ -336,6 +360,14 @@ func (h *Handler) loadNodeConfigSnapshot(ctx context.Context, version int64) (*n
 
 	inbounds := make([]nodeConfigInboundSpec, 0, len(inboundRows))
 	for _, in := range inboundRows {
+		// Rows written before this was checked: a node would refuse the whole
+		// config over one, which is every inbound on it, not just this one.
+		if in.Security == "reality" {
+			if problem := realityProblem(in.RealityPrivateKey.String, in.RealityServerName.String, in.RealityServerPort.Int32, in.RealityShortIds); problem != "" {
+				unservable = append(unservable, "inbound "+in.Tag+": "+problem)
+				continue
+			}
+		}
 		usersKey := in.Protocol
 		if (in.Protocol == "vless" || in.Protocol == "trojan") && !flowApplies(in.Network, in.Security, in.HeaderType.String) {
 			usersKey = noFlowUsersKey(in.Protocol)
@@ -361,6 +393,7 @@ func (h *Handler) loadNodeConfigSnapshot(ctx context.Context, version int64) (*n
 		switch in.Security {
 		case "reality":
 			tls := &nodeConfigTLSSpec{
+				ServerName: in.RealityServerName.String,
 				Reality: &nodeConfigRealitySpec{
 					PrivateKey: in.RealityPrivateKey.String,
 					ShortID:    in.RealityShortIds,
@@ -397,6 +430,7 @@ func (h *Handler) loadNodeConfigSnapshot(ctx context.Context, version int64) (*n
 		case "shadowtls":
 			spec.ShadowTLSInnerMethod = in.ShadowtlsInnerMethod.String
 			spec.ShadowTLSInnerPassword = in.ShadowtlsInnerPassword.String
+			spec.ShadowTLSHandshakeServer = plainHostName(in.Sni.String)
 		}
 		if spec.Users == nil {
 			spec.Users = []nodeConfigUserSpec{}
@@ -526,6 +560,7 @@ func (s *nodeConfigSnapshot) renderSchema(p nodeProfile, schema nodeConfigSchema
 			SnellPSK: in.SnellPSK, SnellV6Mode: in.SnellV6Mode,
 			HysteriaObfsPassword: in.HysteriaObfsPassword,
 			ShadowTLSInnerMethod: in.ShadowTLSInnerMethod, ShadowTLSInnerPassword: in.ShadowTLSInnerPassword,
+			ShadowTLSHandshakeServer: in.ShadowTLSHandshakeServer,
 		})
 	}
 

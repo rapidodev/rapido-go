@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/netip"
@@ -379,7 +380,7 @@ func (h *Handler) handleCreateTunnel(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
 		return
 	}
-	usedPorts, err := h.store.Queries.ListUsedFRPControlPorts(ctx, req.RelayHost)
+	usedPorts, err := h.store.Queries.ListUsedFRPControlPorts(ctx, generated.ListUsedFRPControlPortsParams{RelayHost: req.RelayHost, NodeID: req.NodeID})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "could not allocate an FRP control port"})
 		return
@@ -438,6 +439,40 @@ func (h *Handler) dialTunnelEnds(ctx context.Context, t generated.Tunnel, node g
 	return relay, nodeClient, nil
 }
 
+// sharesFRPConfig reports which ends of t another tunnel's frp config sits at,
+// under the same file name: the name holds only the port. Rows made before ports
+// were allocated per node can share one, and the row that failed on that collision
+// is the one that owns nothing, so a failed row is never what makes the other keep
+// its config.
+func sharesFRPConfig(t generated.Tunnel, others []generated.Tunnel) (node, relay bool) {
+	for _, other := range others {
+		if other.ID == t.ID || other.FrpControlPort != t.FrpControlPort || other.Status == "failed" || !tunnelprovision.UsesFRP(other.Method) {
+			continue
+		}
+		if other.NodeID == t.NodeID {
+			node = true
+		}
+		if other.RelayHost == t.RelayHost {
+			relay = true
+		}
+	}
+	return node, relay
+}
+
+// keepSharedFRP is params for tearing t down without touching a config that
+// another tunnel is using. If that can't be read it keeps both, since a stray
+// config is far cheaper than taking a live tunnel down.
+func (h *Handler) keepSharedFRP(ctx context.Context, t generated.Tunnel, params tunnelprovision.Params) tunnelprovision.Params {
+	others, err := h.store.Queries.ListTunnels(ctx)
+	if err != nil {
+		h.logger.Warn("could not check other tunnels before teardown, keeping frp configs", "tunnel_id", t.ID, "error", err)
+		params.KeepNodeFRP, params.KeepRelayFRP = true, true
+		return params
+	}
+	params.KeepNodeFRP, params.KeepRelayFRP = sharesFRPConfig(t, others)
+	return params
+}
+
 func tunnelParams(t generated.Tunnel, nodeAddress string) tunnelprovision.Params {
 	return tunnelprovision.Params{
 		InterfaceName: t.InterfaceName, NodeAddress: nodeAddress, RelayHost: t.RelayHost,
@@ -466,11 +501,20 @@ func (h *Handler) provisionTunnelInBackground(t generated.Tunnel, node generated
 	params := tunnelParams(t, node.Address)
 	if err := tunnelprovision.Provision(ctx, relay, nodeClient, params); err != nil {
 		h.failTunnel(ctx, t.ID, err.Error())
+		if errors.Is(err, tunnelprovision.ErrPathInUse) {
+			// What's there isn't this tunnel's, and removing it is how a live
+			// tunnel used to die. Nothing was written, so there's nothing to clean
+			// up now, and this row must not clean it up when it's deleted either.
+			if err := h.store.Queries.MarkTunnelUnmanaged(ctx, t.ID); err != nil {
+				h.logger.Warn("could not mark a colliding tunnel unmanaged", "tunnel_id", t.ID, "error", err)
+			}
+			return
+		}
 		// Best-effort cleanup of whatever partially came up, so a failed
 		// attempt doesn't leave stray systemd units/processes behind for a
 		// retry (a new POST, which allocates a fresh interface name/port
 		// rather than reusing this failed row) to collide with.
-		tunnelprovision.Teardown(ctx, relay, nodeClient, params)
+		tunnelprovision.Teardown(ctx, relay, nodeClient, h.keepSharedFRP(ctx, t, params))
 		return
 	}
 
@@ -658,7 +702,7 @@ func (h *Handler) handleDeleteTunnel(c *gin.Context) {
 		defer nodeClient.Close()
 	}
 
-	if err := tunnelprovision.Teardown(teardownCtx, relay, nodeClient, tunnelParams(t, node.Address)); err != nil {
+	if err := tunnelprovision.Teardown(teardownCtx, relay, nodeClient, h.keepSharedFRP(teardownCtx, t, tunnelParams(t, node.Address))); err != nil {
 		h.logger.Warn("tunnel teardown had errors, deleting the row anyway", "tunnel_id", t.ID, "error", err)
 	}
 

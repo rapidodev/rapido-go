@@ -31,11 +31,13 @@ END;
 -- one statement - both mutate the same row with no observable
 -- intermediate state, so there's no reason to round-trip twice. Sets
 -- expire = now + on_hold_expire_duration and clears both hold fields,
--- exactly like start_user_expire.
+-- exactly like start_user_expire. The sum is held to what the int4 column can
+-- store: past that the statement would fail on every tick, leaving the user on
+-- hold, and served, for good.
 UPDATE users SET
     status = 'active',
     last_status_change = now(),
-    expire = extract(epoch FROM now())::int + on_hold_expire_duration,
+    expire = LEAST(extract(epoch FROM now())::bigint + on_hold_expire_duration, 2147483647)::int,
     on_hold_expire_duration = NULL,
     on_hold_timeout = NULL
 WHERE id = $1 AND status = 'on_hold';
@@ -56,13 +58,20 @@ DELETE FROM node_user_usages WHERE user_id = $1;
 -- A plan that names no limit or no expiry leaves that one as it is. What's left
 -- of the old limit is never below zero and an unlimited user has none, so a user
 -- past their limit doesn't start the new plan in debt, or with no limit at all.
+-- A user still waiting to start, given a plan with no expiry of its own, keeps
+-- waiting: active with no expiry would be service with no end.
 UPDATE users u SET
-    status = 'active',
+    status = CASE WHEN COALESCE(np.expire, 0) <= 0 AND COALESCE(u.expire, 0) = 0 AND u.on_hold_expire_duration > 0
+        THEN 'on_hold' ELSE 'active' END,
     last_status_change = now(),
+    last_usage_reset_at = now(),
+    on_hold_expire_duration = CASE WHEN COALESCE(np.expire, 0) > 0 THEN NULL ELSE u.on_hold_expire_duration END,
+    on_hold_timeout = CASE WHEN COALESCE(np.expire, 0) > 0 THEN NULL ELSE u.on_hold_timeout END,
     data_limit = CASE WHEN np.data_limit > 0
         THEN np.data_limit + (CASE WHEN np.add_remaining_traffic THEN 0 ELSE GREATEST(COALESCE(u.data_limit, 0) - u.used_traffic, 0) END)
         ELSE u.data_limit END,
-    expire = CASE WHEN COALESCE(np.expire, 0) > 0 THEN extract(epoch FROM now())::int + np.expire ELSE u.expire END,
+    expire = CASE WHEN COALESCE(np.expire, 0) > 0
+        THEN LEAST(extract(epoch FROM now())::bigint + np.expire, 2147483647)::int ELSE u.expire END,
     used_traffic = 0
 FROM next_plans np
 WHERE u.id = $1 AND np.user_id = u.id

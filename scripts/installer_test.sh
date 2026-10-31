@@ -443,6 +443,12 @@ unit "RAPIDO_BUILD_LOCALLY builds instead of pulling the panel image" 'BUILD' \
     'pull_images() { PULL_FAILED=""; }; build_local_image() { echo BUILD; }
      APP_DIR="$(mktemp -d)"; RAPIDO_BUILD_LOCALLY=1 obtain_images 2>&1 | grep -x BUILD'
 
+# ---- what the shipped files must keep ----
+unit "the backend gets the subscription address, for the links the Telegram console hands out" '2' \
+    'sed -n "/^  backend:/,/^  caddy:/p" docker-compose.prod.yml | grep -cE "^      XRAY_SUBSCRIPTION_URL_PREFIX(ES)?:"'
+unit "both node builds include what REALITY needs" '2' \
+    'grep -c "go build -trimpath -tags with_utls" docker/Dockerfile.panel'
+
 # ---- local compose overrides ----
 unit "compose uses only the shipped file when there is no custom one" '-f docker-compose.prod.yml' \
     'APP_DIR="$(mktemp -d)"; compose_file_args | paste -sd" " -'

@@ -42,7 +42,16 @@ const (
 	// A destination name that does not resolve ("dns_failure:usa~wg"): what the
 	// client asked for does not exist, which says nothing about the exit.
 	KindDNSFailure = "dns_failure"
+
+	// The resolver's own line about that same failure, kept apart so one request
+	// isn't counted as two failures.
+	KindDNSLookup = "dns_lookup"
 )
+
+// routeLookupOutbound is what a name failing in the route is counted against. The
+// node only looks names up there for traffic leaving through its own routes (see
+// cmd/node's destinationGuard), which is the implicit direct outbound.
+const routeLookupOutbound = "direct-out"
 
 // Levels are the four the panel knows.
 const (
@@ -114,6 +123,15 @@ func Classify(level, text string) (kind string, benign bool) {
 	}
 	if i := strings.Index(text, "process connection from "); i >= 0 {
 		return classifyInbound(text[i+len("process connection from "):])
+	}
+	// A name looked up in the route fails on these two lines rather than at the
+	// dial: still a destination that doesn't exist. A resolver that doesn't answer
+	// is a fault, and stays out of this just as it does there.
+	if strings.Contains(text, "router: lookup ") && isNameNotFound(text) {
+		return KindDNSFailure + ":" + routeLookupOutbound, true
+	}
+	if strings.Contains(text, "dns: lookup failed for ") && isNameNotFound(text) {
+		return KindDNSLookup, true
 	}
 	for _, marker := range [...]string{"connection upload closed: ", "connection download closed: "} {
 		if i := strings.Index(text, marker); i >= 0 {

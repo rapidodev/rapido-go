@@ -210,7 +210,8 @@ func TestSubscriptionClashMetaFormatIncludesReality(t *testing.T) {
 	doRequest(t, router, "POST", "/api/inbounds/sync", token, []map[string]interface{}{
 		{"tag": "VLESS Reality", "protocol": "vless", "network": "tcp", "security": "reality",
 			"reality_private_key": "SGVsbG9Xb3JsZEhlbGxvV29ybGRIZWxsb1dvcmxkMTI",
-			"reality_short_ids":   []string{"abcd1234"}},
+			"reality_short_ids":   []string{"abcd1234"},
+			"reality_server_name": "www.example.com"},
 	})
 	doRequest(t, router, "PUT", "/api/hosts", token, map[string]interface{}{
 		"VLESS Reality": []map[string]interface{}{{"remark": "MetaNode", "address": "1.2.3.4", "port": 443, "sni": "example.com", "security": "reality"}},

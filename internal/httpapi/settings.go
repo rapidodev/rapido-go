@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/legendary1205/rapido-go/internal/auth"
 	"github.com/legendary1205/rapido-go/internal/db/generated"
 	"github.com/legendary1205/rapido-go/internal/integrationsettings"
 	"github.com/legendary1205/rapido-go/internal/report"
@@ -200,6 +201,13 @@ func (h *Handler) handleGetIntegrationSettings(c *gin.Context) {
 	c.JSON(http.StatusOK, toIntegrationSettingsDTO(vals, row))
 }
 
+// ownerOnlyIntegrationFields decide who commands the Telegram console, which an
+// id on telegram_admin_ids does as the panel's owner, full backups included. Open
+// to any sudo admin, a sudo admin could list themselves and take everything owner
+// tier exists to keep from them: the signing keys, the CA key, every SSH password.
+// The token and the proxy count too: whoever runs the proxy can forge any sender.
+var ownerOnlyIntegrationFields = []string{"telegram_admin_ids", "telegram_api_token", "telegram_proxy_url"}
+
 // handleUpdateIntegrationSettings implements PUT /api/settings/integrations
 // (sudo only). Only fields present in the request body change - a field
 // left out keeps its current value, sending it explicitly as null clears
@@ -217,6 +225,14 @@ func (h *Handler) handleUpdateIntegrationSettings(c *gin.Context) {
 	if len(body) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"detail": "No fields to update"})
 		return
+	}
+	if !auth.CurrentIdentity(c).IsOwner {
+		for _, field := range ownerOnlyIntegrationFields {
+			if _, present := body[field]; present {
+				c.JSON(http.StatusForbidden, gin.H{"detail": "Only an owner can change " + field})
+				return
+			}
+		}
 	}
 
 	ctx := c.Request.Context()

@@ -322,6 +322,14 @@ func (s *Service[U]) NewConnection(ctx context.Context, conn net.Conn, source M.
 	option := headerBuffer[34]
 	paddingLen := int(headerBuffer[35] >> 4)
 	security := headerBuffer[35] & 0x0F
+	// The client picks this, and CreateReader panics on a value it has no reader
+	// for, which would end the whole process. Auto and Zero never reach the wire:
+	// a client resolves them to one of these before it sends.
+	switch security {
+	case SecurityTypeLegacy, SecurityTypeAes128Gcm, SecurityTypeChacha20Poly1305, SecurityTypeNone:
+	default:
+		return E.Extend(ErrUnsupportedSecurityType, security)
+	}
 	command := headerBuffer[37]
 	switch command {
 	case CommandTCP, CommandUDP, CommandMux:

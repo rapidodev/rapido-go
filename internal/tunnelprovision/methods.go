@@ -57,6 +57,12 @@ func RequiresIPv6(m string) bool { return m == MethodIP6GREDNAT }
 
 func isFRP(m string) bool { return m == MethodFRPDirect || m == MethodFRPQUIC }
 
+// UsesFRP reports whether a tunnel of this method keeps an frp config on each end.
+func UsesFRP(method string) bool {
+	m := Params{Method: method}.method()
+	return m == MethodGREFRP || isFRP(m)
+}
+
 // tunnelUnit is the systemd unit that brings the tunnel interface itself up.
 func tunnelUnit(p Params) string {
 	if p.method() == MethodWGDNAT {
@@ -70,6 +76,9 @@ func dnatUnit(p Params) string { return "rapido-dnat-" + p.InterfaceName }
 // Provision builds a tunnel of p.Method between the relay and the node.
 func Provision(ctx context.Context, relay, node *sshexec.Client, p Params) error {
 	if err := p.check(); err != nil {
+		return err
+	}
+	if err := checkPathsFree(ctx, relay, node, p); err != nil {
 		return err
 	}
 	switch m := p.method(); {
@@ -446,8 +455,15 @@ func teardownFRPDirect(ctx context.Context, relay, node *sshexec.Client, p Param
 			errs = append(errs, label+": "+err.Error())
 		}
 	}
-	run(node, "node: remove frpc", fmt.Sprintf("systemctl disable --now frpc@client-%d 2>/dev/null; rm -f /root/frp/client/client-%d.toml /etc/systemd/system/multi-user.target.wants/frpc@client-%d.service", p.FRPControlPort, p.FRPControlPort, p.FRPControlPort))
-	run(relay, "relay: remove frps", fmt.Sprintf("systemctl disable --now frps@server-%d 2>/dev/null; rm -f /root/frp/server/server-%d.toml /etc/systemd/system/multi-user.target.wants/frps@server-%d.service", p.FRPControlPort, p.FRPControlPort, p.FRPControlPort))
+	relayFRP, nodeFRP := relay, node
+	if p.KeepRelayFRP {
+		relayFRP = nil
+	}
+	if p.KeepNodeFRP {
+		nodeFRP = nil
+	}
+	run(nodeFRP, "node: remove frpc", fmt.Sprintf("systemctl disable --now frpc@client-%d 2>/dev/null; rm -f /root/frp/client/client-%d.toml /etc/systemd/system/multi-user.target.wants/frpc@client-%d.service", p.FRPControlPort, p.FRPControlPort, p.FRPControlPort))
+	run(relayFRP, "relay: remove frps", fmt.Sprintf("systemctl disable --now frps@server-%d 2>/dev/null; rm -f /root/frp/server/server-%d.toml /etc/systemd/system/multi-user.target.wants/frps@server-%d.service", p.FRPControlPort, p.FRPControlPort, p.FRPControlPort))
 	for _, c := range []*sshexec.Client{relay, node} {
 		if c != nil {
 			c.Run(ctx, "systemctl daemon-reload")

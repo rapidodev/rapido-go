@@ -100,9 +100,14 @@ RETURNING u.*;
 -- statement just flipped to active within the same transaction, so it
 -- never matches anything for this call shape - not replicated here since
 -- it would be dead code either way.)
+--
+-- A user who was on hold when disabled goes back to on hold: their plan hasn't
+-- started, so active here would mean active with no expiry, for good.
 WITH target AS (
     SELECT t.id FROM users t WHERE t.admin_id = $1 AND t.status = 'disabled' ORDER BY t.id FOR NO KEY UPDATE
 )
-UPDATE users u SET status = 'active', last_status_change = now()
+UPDATE users u SET
+    status = CASE WHEN u.on_hold_expire_duration > 0 AND COALESCE(u.expire, 0) = 0 THEN 'on_hold' ELSE 'active' END,
+    last_status_change = now()
 FROM target WHERE u.id = target.id
 RETURNING u.*;

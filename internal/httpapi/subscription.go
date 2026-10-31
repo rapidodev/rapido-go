@@ -90,6 +90,14 @@ type SubscriptionFormatFlags struct {
 }
 
 var (
+	// clashMetaUserAgent, on a lowercased User-Agent, is every client running the
+	// Meta core: a plain-Clash answer strips VLESS, Reality, Hysteria and TUIC from
+	// them, and on a VLESS-only panel leaves a profile with no servers they refuse
+	// outright. The separator in clash-meta is optional because the Android client
+	// writes none (ClashMetaForAndroid), and some clients only mention the core
+	// further along, as in "clash.party/v1.8.0 (clash.meta)".
+	clashMetaUserAgent = regexp.MustCompile(`^(clash[- ]verge|clash[-.]?meta|flclash|mihomo|clash-nyanpasu|clash\.party|clashx[- ]?meta|clashmi|koala-clash)|clash\.meta`)
+
 	v2rayNVersionRe  = regexp.MustCompile(`^v2rayN/(\d+\.\d+)`)
 	v2rayNGVersionRe = regexp.MustCompile(`^v2rayNG/(\d+\.\d+\.\d+)`)
 	happVersionRe    = regexp.MustCompile(`^Happ/(\d+\.\d+\.\d+)`)
@@ -133,7 +141,7 @@ func versionAtLeast(a, b string) bool {
 func detectSubscriptionFormat(userAgent string, flags SubscriptionFormatFlags) string {
 	lower := strings.ToLower(userAgent)
 	switch {
-	case hasAnyPrefix(lower, "clash-verge", "clash-meta", "clash.meta", "flclash", "mihomo"):
+	case clashMetaUserAgent.MatchString(lower):
 		return "clash-meta"
 	case hasAnyPrefix(lower, "clash", "stash"):
 		return "clash"

@@ -309,6 +309,8 @@ func coreRoutingRulesToExport(in []routingRuleDTO) []xrayimport.RoutingRule {
 			Inbound: r.Inbound, InboundPort: r.InboundPort, Domain: r.Domain, DomainSuffix: r.DomainSuffix, DomainKeyword: r.DomainKeyword,
 			IPCIDR: r.IPCIDR, IPIsPrivate: r.IPIsPrivate, Port: r.Port, PortRange: r.PortRange,
 			Network: r.Network, Protocol: r.Protocol, OutboundTag: r.OutboundTag,
+			DomainRegex: r.DomainRegex, SourceIPCIDR: r.SourceIPCIDR, SourceIPIsPrivate: r.SourceIPIsPrivate,
+			SourcePort: r.SourcePort, SourcePortRange: r.SourcePortRange, AuthUser: r.AuthUser,
 		}
 	}
 	return out

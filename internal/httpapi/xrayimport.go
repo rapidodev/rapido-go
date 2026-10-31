@@ -180,6 +180,8 @@ func appendNewRoutingRules(existing []routingRuleDTO, imported []xrayimport.Rout
 			Inbound: r.Inbound, Domain: r.Domain, DomainSuffix: r.DomainSuffix, DomainKeyword: r.DomainKeyword,
 			IPCIDR: r.IPCIDR, IPIsPrivate: r.IPIsPrivate, Port: r.Port, PortRange: r.PortRange,
 			Network: r.Network, Protocol: r.Protocol, OutboundTag: r.OutboundTag,
+			DomainRegex: r.DomainRegex, SourceIPCIDR: r.SourceIPCIDR, SourceIPIsPrivate: r.SourceIPIsPrivate,
+			SourcePort: r.SourcePort, SourcePortRange: r.SourcePortRange, AuthUser: r.AuthUser,
 		}
 		if k := key(rule); !seen[k] {
 			seen[k] = true

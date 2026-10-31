@@ -75,7 +75,7 @@ SELECT id FROM users;
 WITH target AS (
     SELECT id FROM users WHERE id = ANY(sqlc.arg('ids')::int[]) ORDER BY id FOR NO KEY UPDATE
 )
-UPDATE users SET used_traffic = 0,
+UPDATE users SET used_traffic = 0, last_usage_reset_at = now(),
     status = CASE WHEN status IN ('on_hold', 'expired', 'disabled') THEN status ELSE 'active' END
 WHERE id IN (SELECT id FROM target);
 

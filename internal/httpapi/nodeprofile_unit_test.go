@@ -107,7 +107,8 @@ func TestValidateCoreOverridesChecksTheMergedConfig(t *testing.T) {
 	}{
 		{"empty", coreOverridesDTO{}, ""},
 		{"rule to a fleet outbound", coreOverridesDTO{RoutingRulesFirst: []routingRuleDTO{{OutboundTag: "exit-a"}}}, ""},
-		{"rule to a builtin", coreOverridesDTO{RoutingRulesFirst: []routingRuleDTO{{OutboundTag: "block"}}}, ""},
+		{"rule to a builtin", coreOverridesDTO{RoutingRulesFirst: []routingRuleDTO{{IPIsPrivate: true, OutboundTag: "block"}}}, ""},
+		{"rule blocking everything", coreOverridesDTO{RoutingRulesFirst: []routingRuleDTO{{OutboundTag: "block"}}}, "no condition"},
 		{"rule to an outbound the override adds", coreOverridesDTO{
 			Outbounds:         []outboundDTO{{Tag: "new", Type: "direct"}},
 			RoutingRulesFirst: []routingRuleDTO{{OutboundTag: "new"}},

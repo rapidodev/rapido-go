@@ -302,58 +302,6 @@ func applyOutboundTLS(out *Outbound, stream xrayStreamSettings) {
 	out.TLSServerName = stream.TLSSettings.ServerName
 }
 
-// parseRoutingRule resolves one Xray routing rule into this codebase's
-// inbound-tag-based shape. A rule naming both an inboundTag and a
-// localPort matches exactly the one split tag for that port; one naming
-// only an inboundTag (Xray's own catch-all pattern, see the plan's real
-// sample - the trailing unconditional "route to blackhole" rule per node)
-// matches every split tag that original inbound produced.
-func parseRoutingRule(r xrayRoutingRule, tagSplits map[string][]splitTag) (*RoutingRule, string) {
-	if r.Type != "" && r.Type != "field" {
-		return nil, fmt.Sprintf("rule type %q is not supported here, skipped", r.Type)
-	}
-	rule := &RoutingRule{OutboundTag: r.OutboundTag}
-
-	if len(r.InboundTag) == 0 {
-		return rule, ""
-	}
-	ports, portWarnings := parsePortList(r.LocalPort, "routing rule localPort")
-	var warning string
-	if len(portWarnings) > 0 {
-		warning = strings.Join(portWarnings, "; ")
-	}
-
-	for _, origTag := range r.InboundTag {
-		splits, ok := tagSplits[origTag]
-		if !ok {
-			warning = appendWarning(warning, fmt.Sprintf("references inbound tag %q, which wasn't found among this file's own inbounds, skipped for that tag", origTag))
-			continue
-		}
-		if len(ports) == 0 {
-			// No localPort named - matches every port that original tag
-			// expanded into.
-			for _, s := range splits {
-				rule.Inbound = append(rule.Inbound, s.tag)
-			}
-			continue
-		}
-		for _, p := range ports {
-			found := false
-			for _, s := range splits {
-				if s.port == p {
-					rule.Inbound = append(rule.Inbound, s.tag)
-					found = true
-					break
-				}
-			}
-			if !found {
-				warning = appendWarning(warning, fmt.Sprintf("localPort %d doesn't match any port inbound %q actually has, skipped", p, origTag))
-			}
-		}
-	}
-	return rule, warning
-}
-
 func appendWarning(existing, next string) string {
 	if existing == "" {
 		return next

@@ -104,6 +104,8 @@ Run it as root on the node server. It asks for the setup blob shown next to it: 
 
 Afterwards the node manages itself with `rapido-go-node status`, `rapido-go-node update` (downloads the version your panel ships, verifies it, and rolls back if it does not start), `rapido-go-node tunnels` (brings up and enables WireGuard exits) and `rapido-go-node uninstall`.
 
+A node doesn't let proxy users reach its own loopback, its private networks or its cloud provider's metadata service. If customers really should reach a private range, add a routing rule to Core Config that names it with `ip_cidr` (only that range opens), or with `ip_is_private` (all of them open).
+
 ### Domains
 
 - **Primary domain** (`--domain`) - the dashboard and the admin API.
@@ -322,6 +324,8 @@ curl -fsSL https://<panel>/install/node.sh | sudo bash
 آن را با کاربر root روی سرور نود اجرا کنید. دستور، setup blob را که کنارش نشان داده شده می‌خواهد: همان‌جا paste کنید؛ نه نمایش داده می‌شود و نه در تاریخچهٔ شل می‌ماند. همان لحظه کپی‌اش کنید، چون این blob جایی ذخیره نمی‌شود که داشبورد دوباره نشانتان بدهد. (اگر ترمینال ندارید، آن را در فایلی بگذارید که فقط root بخواند و `-s -- --setup-blob-file <file>` را بدهید.) این blob گواهی، کلید، CA، رمز گزارش و آدرس پنل را با خودش دارد، پس چیز دیگری برای تنظیم نمی‌ماند و نود فقط به سمت پنل اتصال خروجی می‌زند. اسکریپت و باینری نود را هم پنل خودتان سرو می‌کند، پس سرور نود نیازی به دسترسی گیت‌هاب ندارد.
 
 بعد از آن، نود خودش را مدیریت می‌کند: `rapido-go-node status`، `rapido-go-node update` (نسخه‌ای را که پنلتان دارد دانلود، تأیید و اگر بالا نیامد برمی‌گرداند)، `rapido-go-node tunnels` (تونل‌های وایرگارد را بالا و فعال می‌کند) و `rapido-go-node uninstall`.
+
+نود نمی‌گذارد کاربران پروکسی به loopback خودش، شبکه‌های خصوصی‌اش یا سرویس متادیتای ارائه‌دهنده ابر برسند. اگر واقعاً لازم است مشتری‌ها به یک بازه خصوصی دسترسی داشته باشند، در Core Config یک قانون مسیریابی بگذارید که آن را با `ip_cidr` نام ببرد (فقط همان بازه باز می‌شود) یا با `ip_is_private` (همه باز می‌شوند).
 
 ### دامنه‌ها
 

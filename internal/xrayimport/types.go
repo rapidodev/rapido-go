@@ -84,7 +84,15 @@ type RoutingRule struct {
 	PortRange     []string
 	Network       []string
 	Protocol      []string
-	OutboundTag   string
+
+	DomainRegex       []string
+	SourceIPCIDR      []string
+	SourceIPIsPrivate bool
+	SourcePort        []int
+	SourcePortRange   []string
+	AuthUser          []string
+
+	OutboundTag string
 }
 
 // DNSServer mirrors internal/httpapi/coreconfig.go's dnsServerDTO.

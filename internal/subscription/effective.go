@@ -126,15 +126,22 @@ func BuildEffectiveInbound(inbound generated.Inbound, host generated.Host) Effec
 		ShadowTLSInnerMethod:   inbound.ShadowtlsInnerMethod.String,
 		ShadowTLSInnerPassword: inbound.ShadowtlsInnerPassword.String,
 	}
-	if host.UseSniAsHost {
-		e.HostHeader = e.SNI
-	}
-
 	if security == "reality" {
 		e.RealityPublicKey = derivePublicKey(inbound.RealityPrivateKey.String)
 		if len(inbound.RealityShortIds) > 0 {
 			e.RealityShortID = inbound.RealityShortIds[0]
 		}
+		// The server accepts only the name it impersonates, so a host that doesn't
+		// set one uses that name rather than its own address.
+		e.SNI = valueOr(host.Sni, valueOr(inbound.RealityServerName, host.Address))
+		// REALITY is built on uTLS: mihomo refuses it with no fingerprint, and
+		// removed the global default that used to cover this.
+		if e.Fingerprint == "" {
+			e.Fingerprint = "chrome"
+		}
+	}
+	if host.UseSniAsHost {
+		e.HostHeader = e.SNI
 	}
 	return e
 }

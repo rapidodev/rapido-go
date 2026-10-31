@@ -39,7 +39,15 @@ DELETE FROM tunnels WHERE id = $1;
 SELECT tunnel_subnet FROM tunnels;
 
 -- name: ListUsedFRPControlPorts :many
-SELECT frp_control_port FROM tunnels WHERE relay_host = $1;
+-- Both ends: the port names frps's config on the relay and frpc's on the node, so
+-- it has to be free on each. Taken per relay only, a node's second tunnel to a new
+-- relay got the port of its first one.
+SELECT frp_control_port FROM tunnels WHERE relay_host = $1 OR node_id = $2;
+
+-- name: MarkTunnelUnmanaged :exec
+-- For a tunnel that turned out to collide with something else on the server: what
+-- is at its paths isn't its own, so nothing done to this row may touch them.
+UPDATE tunnels SET managed = false WHERE id = $1;
 
 -- name: UpdateTunnelEdit :one
 -- The fields an admin can change on an existing tunnel. Everything that

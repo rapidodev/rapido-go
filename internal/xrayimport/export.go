@@ -266,14 +266,9 @@ func buildXrayOutbound(ob Outbound) map[string]any {
 // InboundPort goes out as Xray's localPort beside inboundTag (a
 // comma-separated string, like the multi-port inbound "port"): it is how a
 // multi-port inbound's per-port routing reads in Xray, though ParseXrayConfig
-// turns it back into split tags rather than into InboundPort. The
-// other routingRuleDTO fields (Domain/DomainSuffix/DomainKeyword/Port/
-// PortRange/Protocol/IPIsPrivate) exist on RoutingRule only because it's
-// shared with the dashboard's own Core Config editor - parseRoutingRule
-// itself never populates them from a real Xray file - but a rule an
-// admin authored by hand in that editor can have them, so they're still
-// translated back into Xray's real field shapes here rather than
-// silently dropped.
+// turns it back into split tags rather than into InboundPort. Every other
+// condition is translated back into Xray's real field shape, and has to be: a
+// rule that leaves here without one means more when it comes back.
 func buildXrayRoutingRule(r RoutingRule) map[string]any {
 	rule := map[string]any{"type": "field", "outboundTag": r.OutboundTag}
 	if len(r.Inbound) > 0 {
@@ -290,6 +285,9 @@ func buildXrayRoutingRule(r RoutingRule) map[string]any {
 	}
 	for _, d := range r.DomainSuffix {
 		domain = append(domain, "domain:"+d)
+	}
+	for _, d := range r.DomainRegex {
+		domain = append(domain, "regexp:"+d)
 	}
 	if len(domain) > 0 {
 		rule["domain"] = domain
@@ -318,6 +316,28 @@ func buildXrayRoutingRule(r RoutingRule) map[string]any {
 	ports = append(ports, r.PortRange...)
 	if len(ports) > 0 {
 		rule["port"] = joinStrings(ports, ",")
+	}
+
+	var source []string
+	source = append(source, r.SourceIPCIDR...)
+	if r.SourceIPIsPrivate {
+		source = append(source, "geoip:private")
+	}
+	if len(source) > 0 {
+		rule["source"] = source
+	}
+
+	var sourcePorts []string
+	for _, p := range r.SourcePort {
+		sourcePorts = append(sourcePorts, itoa(p))
+	}
+	sourcePorts = append(sourcePorts, r.SourcePortRange...)
+	if len(sourcePorts) > 0 {
+		rule["sourcePort"] = joinStrings(sourcePorts, ",")
+	}
+
+	if len(r.AuthUser) > 0 {
+		rule["user"] = r.AuthUser
 	}
 
 	return rule

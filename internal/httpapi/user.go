@@ -393,6 +393,23 @@ func resolveProxySettings(raw map[string]json.RawMessage) (wanted map[string]pro
 	return wanted, remove, nil
 }
 
+// planNotStarted reports whether a user still has an on-hold plan waiting: a
+// duration, and no expiry yet, since starting the plan clears the one and sets
+// the other.
+func planNotStarted(duration pgtype.Int8, expire pgtype.Int4) bool {
+	return duration.Valid && duration.Int64 > 0 && (!expire.Valid || expire.Int32 == 0)
+}
+
+// expireAfter is the expiry of a plan of this many seconds starting at now, held to
+// what the column can store.
+func expireAfter(seconds int64, now time.Time) pgtype.Int4 {
+	end := now.Unix() + seconds
+	if end > math.MaxInt32 {
+		end = math.MaxInt32
+	}
+	return pgtype.Int4{Int32: int32(end), Valid: true}
+}
+
 // isJSONNull reports whether raw is exactly the JSON literal null, as
 // opposed to absent (raw == nil, the key wasn't in the object at all) or a
 // real value.
@@ -400,19 +417,23 @@ func isJSONNull(raw json.RawMessage) bool {
 	return string(bytes.TrimSpace(raw)) == "null"
 }
 
-// maxPlanSeconds bounds a duration the review job adds to now() in an int4
-// column. A value past it - an absolute timestamp sent where a duration belongs
-// is the usual way - would fail that statement on every tick.
-const maxPlanSeconds = 20 * 365 * 24 * 60 * 60
+// durationFits reports whether a duration can be added to the current time in an
+// int4 expire column, which is what starting a plan does. That limit gets closer
+// every day, so it can't be a fixed number of years: an absolute timestamp sent
+// where a duration belongs is the usual way past it.
+func durationFits(seconds int64, now time.Time) bool {
+	return seconds >= 0 && seconds <= math.MaxInt32-now.Unix()
+}
 
 // checkDurations returns why a request's durations can't be stored, or "".
 func checkDurations(req userWriteRequest) string {
-	if d := req.OnHoldExpireDuration; d != nil && (*d < 0 || *d > maxPlanSeconds) {
-		return "on_hold_expire_duration must be between 0 and 20 years, in seconds"
+	now := time.Now()
+	if d := req.OnHoldExpireDuration; d != nil && !durationFits(*d, now) {
+		return "on_hold_expire_duration must be a duration in seconds, ending before 2038"
 	}
 	if plan := req.NextPlan.plan; plan != nil {
-		if plan.Expire < 0 || plan.Expire > maxPlanSeconds {
-			return "next_plan.expire must be a duration between 0 and 20 years, in seconds"
+		if !durationFits(plan.Expire, now) {
+			return "next_plan.expire must be a duration in seconds, ending before 2038"
 		}
 		if plan.DataLimit < 0 {
 			return "next_plan.data_limit cannot be negative"
@@ -760,6 +781,24 @@ func (h *Handler) handleModifyUser(c *gin.Context) {
 	newAutoDelete := dbuser.AutoDeleteInDays
 	if req.AutoDeleteInDays != nil {
 		newAutoDelete = pgInt4FromPtr(req.AutoDeleteInDays)
+	}
+
+	// A plan on hold has no expiry until it starts, so plain active would be
+	// service with no end. Re-enabling puts the user back to waiting for it, and
+	// activating one by hand starts it, as a first connection does.
+	if newStatus == statusActive && planNotStarted(newOnHoldExpireDuration, newExpire) {
+		switch dbuser.Status {
+		case statusDisabled:
+			newStatus = statusOnHold
+		case statusOnHold:
+			newExpire = expireAfter(newOnHoldExpireDuration.Int64, time.Now())
+			newOnHoldExpireDuration = pgtype.Int8{}
+			newOnHoldTimeout = pgtype.Timestamptz{}
+		}
+	}
+	if newStatus == statusOnHold && req.OnHoldExpireDuration != nil && onHoldExpire == nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": "User cannot be on hold without a valid on_hold_expire_duration."})
+		return
 	}
 
 	updated, err := h.store.Queries.UpdateUserCore(ctx, generated.UpdateUserCoreParams{

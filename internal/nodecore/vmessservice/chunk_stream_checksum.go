@@ -24,6 +24,10 @@ func (r *StreamChecksumReader) Read(p []byte) (n int, err error) {
 	if err != nil {
 		return
 	}
+	// A client can send a chunk shorter than the checksum it has to start with.
+	if n < 4 {
+		return 0, ErrInvalidChecksum
+	}
 	hash := fnv.New32a()
 	common.Must1(hash.Write(p[4:n]))
 	if hash.Sum32() != binary.BigEndian.Uint32(p) {
@@ -37,6 +41,9 @@ func (r *StreamChecksumReader) ReadBuffer(buffer *buf.Buffer) error {
 	err := r.upstream.ReadBuffer(buffer)
 	if err != nil {
 		return err
+	}
+	if buffer.Len() < 4 {
+		return ErrInvalidChecksum
 	}
 	hash := fnv.New32a()
 	common.Must1(hash.Write(buffer.From(4)))

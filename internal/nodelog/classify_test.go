@@ -29,6 +29,14 @@ func TestClassifyRealProductionLines(t *testing.T) {
 		{"\x1b[31mERROR\x1b[0m[0123] [\x1b[38;5;70m3647852086\x1b[0m 131ms] inbound/vless[vless-in]: process connection from 127.0.0.1:5898: EOF", KindClientEOF},
 		{"\x1b[31mERROR\x1b[0m[0123] connection: open connection to 5.6.7.8:443 using outbound/direct[germany~wg]: dial tcp 5.6.7.8:443: i/o timeout", KindDialTimeout + ":germany~wg"},
 
+		// A name that doesn't exist, looked up in the route by the destination guard.
+		{`ERROR[0000] [530198484 0ms] dns: lookup failed for missing.test: (exchange6: NXDOMAIN | exchange4: NXDOMAIN)`, KindDNSLookup},
+		{`ERROR[0000] [530198484 0ms] router: lookup missing.test: (exchange6: NXDOMAIN | exchange4: NXDOMAIN)`, KindDNSFailure + ":direct-out"},
+		{`ERROR[0000] router: lookup missing.test: lookup missing.test: no such host`, KindDNSFailure + ":direct-out"},
+		// A resolver that doesn't answer is worth reading.
+		{`ERROR[0000] dns: lookup failed for example.com: exchange4: context deadline exceeded`, ""},
+		{`ERROR[0000] router: lookup example.com: exchange4: context deadline exceeded`, ""},
+
 		// Other TLS handshake failures.
 		{`ERROR[0001] inbound/vless[main#20001]: process connection from 1.2.3.4:5678: TLS handshake: tls: first record does not look like a TLS handshake`, KindTLSHandshake},
 		{`ERROR[0001] inbound/trojan[t#443]: process connection from [2001:db8::7]:5678: TLS handshake: read tcp 10.0.0.1:443->[2001:db8::7]:5678: read: connection reset by peer`, KindTLSHandshake},

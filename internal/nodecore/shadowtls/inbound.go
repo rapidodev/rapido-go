@@ -84,6 +84,33 @@ type InboundOptions struct {
 	Users         []option.ShadowTLSUser
 	InnerMethod   string
 	InnerPassword string
+	// HandshakeServer is the site a client gets relayed to when it fails
+	// authentication, so that a prober sees a real TLS server. Empty closes that
+	// client instead.
+	HandshakeServer string
+}
+
+// publicOnlyDialer is the dialer for a ShadowTLS handshake relay. An
+// authenticated client still names its own target by SNI, and what that name
+// resolves to is only known once connected, so the check comes after the dial
+// and nothing has been sent by then.
+type publicOnlyDialer struct {
+	N.Dialer
+}
+
+func (d publicOnlyDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	if !destination.IsValid() {
+		return nil, E.New("no handshake server for an unauthenticated client")
+	}
+	conn, err := d.Dialer.DialContext(ctx, network, destination)
+	if err != nil {
+		return nil, err
+	}
+	if remote := M.SocksaddrFromNet(conn.RemoteAddr()); remote.Addr.IsValid() && !N.IsPublicAddr(remote.Addr) {
+		conn.Close()
+		return nil, E.New("handshake server ", destination, " is not a public address")
+	}
+	return conn, nil
 }
 
 type Inbound struct {
@@ -102,26 +129,31 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		return nil, E.New("missing inner shadowsocks-2022 method/password")
 	}
 
-	// WildcardSNI "all" needs a dialer capable of reaching an arbitrary
-	// domain (the client's own SNI) - a plain system dialer, since this
-	// panel has no admin-facing "handshake server" setting for v3 at all.
+	// WildcardSNIAuthed, not All: with All, a client that fails authentication
+	// is relayed to port 443 of whatever host its SNI names, which makes this
+	// inbound a free, unmetered proxy for anyone on the internet, reaching the
+	// node's own network too. Only a client with a valid password picks its
+	// target now; everyone else goes to the one fixed server, or is closed.
 	handshakeDialer, err := dialer.New(ctx, option.DialerOptions{}, true)
 	if err != nil {
 		return nil, err
 	}
-	return newInbound(ctx, router, logger, tag, options,
-		shadowtls.WildcardSNI(option.ShadowTLSWildcardSNIAll), shadowtls.HandshakeConfig{Dialer: handshakeDialer})
+	handshake := shadowtls.HandshakeConfig{Dialer: publicOnlyDialer{handshakeDialer}}
+	if options.HandshakeServer != "" {
+		handshake.Server = M.Socksaddr{Fqdn: options.HandshakeServer, Port: 443}
+	}
+	return newInbound(ctx, router, logger, tag, options, shadowtls.WildcardSNIAuthed, handshake)
 }
 
 // newInbound is NewInbound's real body, with the outer ShadowTLS service's
 // handshake-relay target factored out as parameters - production always
-// goes through NewInbound's own WildcardSNI=all (see that function's doc
+// goes through NewInbound's own WildcardSNIAuthed (see that function's own
 // comment), but this fork's own tests need a fixed, local
-// Handshake.Server instead: WildcardSNI=all hardcodes the relay target to
-// "<client's claimed SNI>:443" (third_party/sing-shadowtls's own
-// NewConnection, v3 case), which needs a real reachable TLS server on
-// port 443 for whatever name the test picks - impractical in a portable,
-// unprivileged unit test. WildcardSNIOff uses Handshake.Server exactly as
+// Handshake.Server instead: WildcardSNIAuthed hardcodes an authenticated
+// client's relay target to "<client's claimed SNI>:443" (third_party/
+// sing-shadowtls's own NewConnection, v3 case), which needs a real reachable
+// TLS server on port 443 for whatever name the test picks - impractical in a
+// portable, unprivileged unit test. WildcardSNIOff uses Handshake.Server exactly as
 // given instead, letting a test point it at a throwaway local TLS server
 // on an ephemeral port while exercising the exact same inner+outer gluing
 // logic (newConnection/NewConnectionEx below) production uses.
@@ -207,6 +239,7 @@ func (h *Inbound) NewError(ctx context.Context, err error) {
 }
 
 func (h *Inbound) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+	defer traffic.CloseOnPanic(ctx, h.logger, conn, onClose)
 	err := h.service.NewConnection(adapter.WithContext(log.ContextWithNewID(ctx), &metadata), conn, metadata.Source, metadata.Destination, onClose)
 	N.CloseOnHandshakeFailure(conn, onClose, err)
 	if err != nil {
@@ -228,6 +261,7 @@ func (h *Inbound) NewConnection(ctx context.Context, conn net.Conn, metadata ada
 type inboundHandler Inbound
 
 func (h *inboundHandler) NewConnectionEx(ctx context.Context, conn net.Conn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
+	defer traffic.CloseOnPanic(ctx, h.logger, conn, onClose)
 	err := h.inner.NewConnection(ctx, conn, M.Metadata{Source: source})
 	N.CloseOnHandshakeFailure(conn, onClose, err)
 	if err != nil {

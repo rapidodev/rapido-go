@@ -224,6 +224,7 @@ export type ConfigIssueKind =
   | "ruleIpInvalid"
   | "rulePortRangeInvalid"
   | "ruleUserEmpty"
+  | "ruleBlocksEverything"
   | "inboundPortNotList"
   | "inboundPortNeedsInbound"
   | "inboundPortNotInteger"
@@ -237,7 +238,11 @@ export type ConfigIssueKind =
   | "snellPskLength"
   | "snellModeInvalid"
   | "shadowtlsMethodInvalid"
-  | "shadowtlsKeyInvalid";
+  | "shadowtlsKeyInvalid"
+  | "realityKeyInvalid"
+  | "realityServerRequired"
+  | "realityPortInvalid"
+  | "realityShortIdInvalid";
 
 export type IssueScope = "general" | "outbound" | "rule" | "dns" | "inbound";
 
@@ -377,7 +382,28 @@ export const outboundIssues = (o: Item, index: number, others: ReadonlySet<strin
   return out;
 };
 
-export const ruleIssues = (r: Item, index: number, targets: readonly string[], inboundTags: ReadonlySet<string>): ConfigIssue[] => {
+const RULE_CONDITION_KEYS = [
+  "inbound", "inbound_port", "domain", "domain_suffix", "domain_keyword", "domain_regex", "ip_cidr", "ip_is_private",
+  "port", "port_range", "network", "protocol", "source_ip_cidr", "source_ip_is_private", "source_port", "source_port_range", "auth_user",
+];
+
+const ruleHasCondition = (r: Item): boolean =>
+  RULE_CONDITION_KEYS.some((key) => (Array.isArray(r[key]) ? r[key].length > 0 : r[key] === true));
+
+/** What a rule sends to when it means block: the built-in, and any block outbound. */
+export const blockOutboundTags = (doc: Item | null): ReadonlySet<string> =>
+  new Set([
+    "block",
+    ...asList(doc?.outbounds).flatMap((o) => (isObject(o) && o.type === "block" ? [str(o.tag)] : [])),
+  ]);
+
+export const ruleIssues = (
+  r: Item,
+  index: number,
+  targets: readonly string[],
+  inboundTags: ReadonlySet<string>,
+  blockTags: ReadonlySet<string>
+): ConfigIssue[] => {
   const out: ConfigIssue[] = [];
   const target = str(r.outbound_tag);
   const add = reporter("rule", index, target, out);
@@ -399,6 +425,7 @@ export const ruleIssues = (r: Item, index: number, targets: readonly string[], i
     }
   }
   if (asList(r.auth_user).some((user) => user === "")) add("ruleUserEmpty", "auth_user");
+  if (blockTags.has(target) && !ruleHasCondition(r)) add("ruleBlocksEverything", "outbound_tag", target);
 
   const problem = validateInboundPortField(r.inbound_port, r.inbound);
   if (problem) {
@@ -448,6 +475,16 @@ export const inboundIssues = (i: Item, index: number, others: ReadonlySet<string
     return out;
   }
   if (within(TLS_REQUIRED_PROTOCOLS, protocol) && i.security !== "tls") add("inboundTlsRequired", "security", protocol);
+  if (i.security === "reality") {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(str(i.reality_private_key))) add("realityKeyInvalid", "reality_private_key");
+    if (str(i.reality_server_name) === "") add("realityServerRequired", "reality_server_name");
+    if (i.reality_server_port !== undefined && i.reality_server_port !== 0 && !isPortNumber(i.reality_server_port)) {
+      add("realityPortInvalid", "reality_server_port", String(i.reality_server_port));
+    }
+    for (const id of asList(i.reality_short_ids)) {
+      if (typeof id !== "string" || !/^([0-9a-fA-F]{2}){0,8}$/.test(id)) add("realityShortIdInvalid", "reality_short_ids", String(id));
+    }
+  }
   if (protocol === "tuic" && str(i.congestion_control) !== "" && !within(CONGESTION_CONTROL_TYPES, i.congestion_control)) {
     add("congestionInvalid", "congestion_control", str(i.congestion_control));
   }
@@ -514,7 +551,8 @@ export const validateCoreConfigDoc = (doc: unknown): ConfigIssue[] => {
     const index = asList(doc.outbounds).findIndex((o) => isObject(o) && o.tag === cycle);
     issues.push({ scope: "outbound", index, ref: cycle, kind: "dependencyCycle", field: "outbounds" });
   }
-  each("routing_rules", "rule", (r, i) => ruleIssues(r, i, targets, inboundTags));
+  const blockTags = blockOutboundTags(isObject(doc) ? doc : null);
+  each("routing_rules", "rule", (r, i) => ruleIssues(r, i, targets, inboundTags, blockTags));
   each("dns_servers", "dns", (s, i) => dnsIssues(s, i, otherTags(doc, "dns_servers", i)));
   each("inbounds", "inbound", (b, i) => inboundIssues(b, i, otherTags(doc, "inbounds", i)));
   return issues;

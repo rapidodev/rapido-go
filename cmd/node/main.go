@@ -10,6 +10,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -492,6 +493,9 @@ type inboundSpec struct {
 	// per-user credential too).
 	ShadowTLSInnerMethod   string `json:"shadowtls_inner_method,omitempty"`
 	ShadowTLSInnerPassword string `json:"shadowtls_inner_password,omitempty"`
+	// ShadowTLSHandshakeServer is the site a client that fails ShadowTLS's
+	// authentication gets relayed to. Empty closes that client instead.
+	ShadowTLSHandshakeServer string `json:"shadowtls_handshake_server,omitempty"`
 }
 
 func (in inboundSpec) ports() []uint16 {
@@ -873,13 +877,15 @@ func buildInboundTLS(in inboundSpec) *sbox.InboundTLSOptions {
 	if in.TLS == nil {
 		return nil
 	}
-	tlsOpts := &sbox.InboundTLSOptions{
-		Enabled:     true,
-		ServerName:  in.TLS.ServerName,
-		Certificate: badoption.Listable[string]{in.TLS.Certificate},
-		Key:         badoption.Listable[string]{in.TLS.Key},
-	}
 	if in.TLS.Reality != nil {
+		// sing-box refuses a certificate or key next to REALITY, which borrows
+		// the handshake target's, and accepts only the client SNI named here. A
+		// panel that predates sending it still sends the target's name.
+		serverName := in.TLS.ServerName
+		if serverName == "" {
+			serverName = in.TLS.Reality.Handshake.ServerName
+		}
+		tlsOpts := &sbox.InboundTLSOptions{Enabled: true, ServerName: serverName}
 		tlsOpts.Reality = &sbox.InboundRealityOptions{
 			Enabled:    true,
 			PrivateKey: in.TLS.Reality.PrivateKey,
@@ -887,12 +893,45 @@ func buildInboundTLS(in inboundSpec) *sbox.InboundTLSOptions {
 			Handshake: sbox.InboundRealityHandshakeOptions{
 				ServerOptions: sbox.ServerOptions{
 					Server:     in.TLS.Reality.Handshake.ServerName,
-					ServerPort: in.TLS.Reality.Handshake.ServerPort,
+					ServerPort: realityHandshakePort(in.TLS.Reality),
 				},
 			},
 		}
+		return tlsOpts
 	}
-	return tlsOpts
+	return &sbox.InboundTLSOptions{
+		Enabled:     true,
+		ServerName:  in.TLS.ServerName,
+		Certificate: badoption.Listable[string]{in.TLS.Certificate},
+		Key:         badoption.Listable[string]{in.TLS.Key},
+	}
+}
+
+// realityHandshakePort is the target's port, which the panel leaves unset for
+// the usual HTTPS site.
+func realityHandshakePort(r *realitySpec) uint16 {
+	if r.Handshake.ServerPort == 0 {
+		return 443
+	}
+	return r.Handshake.ServerPort
+}
+
+// checkReality refuses what building the core would not refuse cleanly. sing-box
+// decodes each short id into an 8-byte array, so a longer one panics there. A
+// missing target would pass and then fail every client.
+func checkReality(in inboundSpec) error {
+	if in.TLS == nil || in.TLS.Reality == nil {
+		return nil
+	}
+	if in.TLS.Reality.Handshake.ServerName == "" {
+		return fmt.Errorf("inbound %q: REALITY needs a handshake server", in.Tag)
+	}
+	for _, id := range in.TLS.Reality.ShortID {
+		if _, err := hex.DecodeString(id); err != nil || len(id) > 16 {
+			return fmt.Errorf("inbound %q: REALITY short id %q must be up to 16 hex digits, in pairs", in.Tag, id)
+		}
+	}
+	return nil
 }
 
 // buildInboundTransport turns an inbound's transportSpec into sing-box's own
@@ -946,6 +985,9 @@ func buildOptionsPlan(req startRequest) (sbox.Options, nodePlan, error) {
 	inbounds := make([]sbox.Inbound, 0, len(req.Inbounds))
 	for _, in := range req.Inbounds {
 		if err := validateUserList(in.Protocol, in.Users); err != nil {
+			return sbox.Options{}, nodePlan{}, err
+		}
+		if err := checkReality(in); err != nil {
 			return sbox.Options{}, nodePlan{}, err
 		}
 		var built any
@@ -1108,6 +1150,8 @@ func buildOptionsPlan(req startRequest) (sbox.Options, nodePlan, error) {
 					Users:         users,
 					InnerMethod:   in.ShadowTLSInnerMethod,
 					InnerPassword: in.ShadowTLSInnerPassword,
+
+					HandshakeServer: in.ShadowTLSHandshakeServer,
 				}})
 			}
 		}
@@ -1345,7 +1389,11 @@ func buildCoreOptions(core *coreSpec, portsByTag map[string][]uint16) ([]sbox.Ou
 		{Type: "block", Tag: implicitOutboundTagBlock, Options: &sbox.StubOptions{}},
 	}
 	route := &sbox.RouteOptions{Final: implicitOutboundTagDirect}
+	guard := newDestinationGuard(core)
 	if core == nil {
+		if guard != nil {
+			route.Rules = []sbox.Rule{guard.rule, resolveRule(sbox.RawDefaultRule{}), guard.rule}
+		}
 		return outbounds, route, nil, coreLogOptions(""), nil, nil
 	}
 
@@ -1417,6 +1465,11 @@ func buildCoreOptions(core *coreSpec, portsByTag map[string][]uint16) ([]sbox.Ou
 			RuleAction: sbox.RuleAction{Action: "sniff"},
 		}})
 	}
+	// First, so no routing rule can send a client to a literal address it must
+	// not reach. A domain has no address yet: see the two places below.
+	if guard != nil {
+		rules = append(rules, guard.rule)
+	}
 	for _, r := range core.RoutingRules {
 		raw := sbox.RawDefaultRule{
 			IPIsPrivate:       r.IPIsPrivate,
@@ -1476,6 +1529,9 @@ func buildCoreOptions(core *coreSpec, portsByTag map[string][]uint16) ([]sbox.Ou
 		if len(r.AuthUser) > 0 {
 			raw.AuthUser = badoption.Listable[string](r.AuthUser)
 		}
+		if guard != nil && guard.resolveFirst(r.OutboundTag) {
+			rules = append(rules, resolveRule(raw), guard.rule)
+		}
 		rules = append(rules, sbox.Rule{Type: "default", DefaultOptions: sbox.DefaultRule{
 			RawDefaultRule: raw,
 			RuleAction: sbox.RuleAction{
@@ -1483,6 +1539,10 @@ func buildCoreOptions(core *coreSpec, portsByTag map[string][]uint16) ([]sbox.Ou
 				RouteOptions: sbox.RouteActionOptions{Outbound: resolveOutboundTag(r.OutboundTag)},
 			},
 		}})
+	}
+	// What no rule claimed leaves through Final, the node's own default route.
+	if guard != nil {
+		rules = append(rules, resolveRule(sbox.RawDefaultRule{}), guard.rule)
 	}
 	route.Rules = rules
 

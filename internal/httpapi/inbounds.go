@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -380,6 +381,27 @@ func (h *Handler) syncInboundEntries(ctx context.Context, entries []inboundSyncE
 	return created, nil
 }
 
+// realityProblem says what a REALITY inbound lacks for a node to start it, or "".
+// One bad entry would otherwise make every node refuse the whole config, and a
+// short id over 16 digits panics sing-box rather than being refused by it.
+func realityProblem(privateKey, serverName string, serverPort int32, shortIDs []string) string {
+	if key, err := base64.RawURLEncoding.DecodeString(privateKey); err != nil || len(key) != 32 {
+		return "reality_private_key must be a base64url-encoded 32-byte X25519 key"
+	}
+	if serverName == "" {
+		return "reality_server_name is required: it is the site REALITY borrows its handshake from"
+	}
+	if serverPort < 0 || serverPort > 65535 {
+		return "reality_server_port must be 1-65535"
+	}
+	for _, id := range shortIDs {
+		if _, err := hex.DecodeString(id); err != nil || len(id) > 16 {
+			return "reality_short_ids must each be up to 16 hex digits, in pairs"
+		}
+	}
+	return ""
+}
+
 // validateInboundEntries refuses the settings a node could not start with, as a
 // clean 422, before anything is written.
 func validateInboundEntries(entries []inboundSyncEntry) error {
@@ -399,6 +421,11 @@ func validateInboundEntries(entries []inboundSyncEntry) error {
 		// for it exactly like hysteria2/tuic/anytls do.
 		if (e.Protocol == "hysteria2" || e.Protocol == "tuic" || e.Protocol == "anytls" || e.Protocol == "hysteria") && e.Security != "tls" {
 			return &inboundValidationError{"inbound " + e.Tag + ": security must be \"tls\" for protocol " + e.Protocol}
+		}
+		if e.Security == "reality" {
+			if problem := realityProblem(e.RealityPrivateKey, e.RealityServerName, e.RealityServerPort, e.RealityShortIDs); problem != "" {
+				return &inboundValidationError{"inbound " + e.Tag + ": " + problem}
+			}
 		}
 		if e.Protocol == "tuic" && e.CongestionControl != "" && !validCongestionControl[e.CongestionControl] {
 			return &inboundValidationError{"inbound " + e.Tag + ": invalid congestion_control " + e.CongestionControl}

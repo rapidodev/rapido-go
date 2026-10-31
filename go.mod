@@ -127,3 +127,9 @@ replace github.com/sagernet/sing-shadowtls => ./third_party/sing-shadowtls
 
 // Keep QUIC authentication tables safe during live user updates.
 replace github.com/sagernet/sing-quic => ./third_party/sing-quic
+
+// Both read a length from the peer and trust it, which ends the whole node
+// process: see each one's PATCHES.md.
+replace github.com/sagernet/sing-vmess => ./third_party/sing-vmess
+
+replace github.com/sagernet/sing-shadowsocks => ./third_party/sing-shadowsocks

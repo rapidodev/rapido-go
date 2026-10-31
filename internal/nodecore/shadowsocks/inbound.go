@@ -151,6 +151,7 @@ func (h *Inbound) Close() error {
 
 //nolint:staticcheck
 func (h *Inbound) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+	defer traffic.CloseOnPanic(ctx, h.logger, conn, onClose)
 	err := h.service.Load().NewConnection(ctx, conn, adapter.UpstreamMetadata(metadata))
 	N.CloseOnHandshakeFailure(conn, onClose, err)
 	if err != nil {
@@ -164,6 +165,7 @@ func (h *Inbound) NewConnection(ctx context.Context, conn net.Conn, metadata ada
 
 //nolint:staticcheck
 func (h *Inbound) NewPacket(buffer *buf.Buffer, source M.Socksaddr) {
+	defer traffic.CloseOnPanic(h.ctx, h.logger, nil, nil)
 	err := h.service.Load().NewPacket(h.ctx, &stubPacketConn{h.listener.PacketWriter()}, buffer, M.Metadata{Source: source})
 	if err != nil {
 		h.logger.Error(E.Cause(err, "process packet from ", source))

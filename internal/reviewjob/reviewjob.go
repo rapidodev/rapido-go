@@ -92,13 +92,15 @@ func reviewActiveUsers(ctx context.Context, q *generated.Queries, dispatcher *re
 				if errors.Is(err, errPlanNoLongerDue) {
 					continue
 				}
-				if err != nil {
-					logger.Error("review_users: fire next plan", "username", user.Username, "error", err)
+				if err == nil {
+					logger.Info("user data reset by next_plan", "username", user.Username)
+					dispatcher.UserDataResetByNext(ctx, toUserSummary(updated), lookupAdminRef(ctx, q, updated.AdminID, logger))
 					continue
 				}
-				logger.Info("user data reset by next_plan", "username", user.Username)
-				dispatcher.UserDataResetByNext(ctx, toUserSummary(updated), lookupAdminRef(ctx, q, updated.AdminID, logger))
-				continue
+				// A plan that can't fire must not mean a user who is never cut off:
+				// they fall through to the status they have earned, and an admin can
+				// still run the plan by hand.
+				logger.Error("review_users: fire next plan", "username", user.Username, "error", err)
 			}
 		}
 

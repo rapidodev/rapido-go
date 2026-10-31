@@ -12,7 +12,7 @@ func TestListInboundsDetailedReturnsRealFields(t *testing.T) {
 	doRequest(t, router, "POST", "/api/inbounds/sync", token, []map[string]interface{}{
 		{
 			"tag": "VLESS Reality", "protocol": "vless", "network": "tcp", "security": "reality",
-			"reality_private_key": "priv-key-value", "reality_short_ids": []string{"ab12"},
+			"reality_private_key": "SGVsbG9Xb3JsZEhlbGxvV29ybGRIZWxsb1dvcmxkMTI", "reality_short_ids": []string{"ab12"},
 			"reality_server_name": "example.com", "reality_server_port": 443,
 		},
 	})
@@ -37,8 +37,8 @@ func TestListInboundsDetailedReturnsRealFields(t *testing.T) {
 	if found["protocol"] != "vless" || found["network"] != "tcp" || found["security"] != "reality" {
 		t.Errorf("unexpected shape: %v", found)
 	}
-	if found["reality_private_key"] != "priv-key-value" {
-		t.Errorf("reality_private_key = %v, want priv-key-value", found["reality_private_key"])
+	if found["reality_private_key"] != "SGVsbG9Xb3JsZEhlbGxvV29ybGRIZWxsb1dvcmxkMTI" {
+		t.Errorf("reality_private_key = %v, want SGVsbG9Xb3JsZEhlbGxvV29ybGRIZWxsb1dvcmxkMTI", found["reality_private_key"])
 	}
 	if found["reality_server_port"].(float64) != 443 {
 		t.Errorf("reality_server_port = %v, want 443", found["reality_server_port"])

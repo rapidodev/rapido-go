@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import classNames from "classnames";
 import { fetch } from "service/http";
 import { errorText } from "service/errors";
+import { useIsOwner } from "hooks/useCurrentAdminQuery";
 import { IntegrationSettingsStatus } from "types/Integrations";
 import {
   buildIntegrationsPatch,
@@ -23,6 +24,9 @@ import { Input } from "rapido-ui/Input";
 // query cache any better here than it did in the old dashboard.
 
 type FieldConfig = IntegrationFieldSpec & { labelKey: string };
+
+// The API refuses these from anyone but an owner, see ownerOnlyIntegrationFields.
+const OWNER_ONLY_FIELDS = new Set(["telegram_api_token", "telegram_admin_ids", "telegram_proxy_url"]);
 
 const TELEGRAM_FIELDS: FieldConfig[] = [
   { key: "telegram_api_token", labelKey: "rapido.integrations.telegramApiToken", kind: "password" },
@@ -90,6 +94,8 @@ const FieldRow: FC<{
   onToggleClear: () => void;
 }> = ({ field, status, draft, cleared, onDraftChange, onToggleClear }) => {
   const { t } = useTranslation();
+  const isOwner = useIsOwner();
+  const locked = !isOwner && OWNER_ONLY_FIELDS.has(field.key);
   return (
     <div className="flex flex-col gap-1 border-t border-rapido-border py-3 first:border-t-0 first:pt-0">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -104,9 +110,11 @@ const FieldRow: FC<{
           dir="ltr"
           type={field.kind === "password" ? "password" : "text"}
           autoComplete="off"
-          disabled={cleared}
+          disabled={cleared || locked}
           placeholder={
-            cleared
+            locked
+              ? t("rapido.integrations.ownerOnlyField")
+              : cleared
               ? t("rapido.integrations.willClear")
               : field.kind === "intArray" || field.kind === "strArray"
               ? t("rapido.integrations.commaSeparated")
@@ -115,7 +123,7 @@ const FieldRow: FC<{
           value={draft}
           onChange={(e) => onDraftChange(e.target.value)}
         />
-        <Button variant="chip" tone={cleared ? "amber" : "neutral"} onClick={onToggleClear}>
+        <Button variant="chip" tone={cleared ? "amber" : "neutral"} disabled={locked} onClick={onToggleClear}>
           {cleared ? t("cancel") : t("rapido.integrations.resetToEnv")}
         </Button>
       </div>

@@ -132,13 +132,6 @@ type xrayRouting struct {
 	Rules          []xrayRoutingRule `json:"rules"`
 }
 
-type xrayRoutingRule struct {
-	Type        string          `json:"type"`
-	InboundTag  stringOrList    `json:"inboundTag"`
-	LocalPort   json.RawMessage `json:"localPort"`
-	OutboundTag string          `json:"outboundTag"`
-}
-
 // stringOrList accepts either form Xray itself accepts for a routing rule's
 // inboundTag: a bare string for one tag, or an array for several. Only the
 // array form was handled before, so importing a config written the other way

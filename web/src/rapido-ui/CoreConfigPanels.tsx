@@ -29,6 +29,7 @@ import {
   outboundTargets,
   renameInboundReferences,
   renameOutboundReferences,
+  blockOutboundTags,
   ruleIssues,
   str,
   uniqueTag,
@@ -650,7 +651,7 @@ export const CoreConfigPanels: FC<{
             note={t("rapido.coreForm.ruleNote")}
             fields={ruleFields}
             normalize={normalizeRule}
-            issues={(d) => ruleIssues(normalizeRule(d), index ?? -1, targets, otherTags(doc, "inbounds", null))}
+            issues={(d) => ruleIssues(normalizeRule(d), index ?? -1, targets, otherTags(doc, "inbounds", null), blockOutboundTags(doc))}
           />
         );
       case "dns_servers":
