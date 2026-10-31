@@ -899,12 +899,19 @@ func buildInboundTLS(in inboundSpec) *sbox.InboundTLSOptions {
 		}
 		return tlsOpts
 	}
-	return &sbox.InboundTLSOptions{
+	tlsOpts := &sbox.InboundTLSOptions{
 		Enabled:     true,
 		ServerName:  in.TLS.ServerName,
 		Certificate: badoption.Listable[string]{in.TLS.Certificate},
 		Key:         badoption.Listable[string]{in.TLS.Key},
 	}
+	// Every TUIC client offers h3 (its links say so, and it is Clash Meta's default),
+	// and a server with no ALPN of its own fails that handshake. A client offering
+	// none still connects.
+	if in.Protocol == "tuic" {
+		tlsOpts.ALPN = badoption.Listable[string]{"h3"}
+	}
+	return tlsOpts
 }
 
 // realityHandshakePort is the target's port, which the panel leaves unset for

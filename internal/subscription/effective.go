@@ -1,8 +1,13 @@
 package subscription
 
 import (
+	"bytes"
 	"crypto/ecdh"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
+	"net/netip"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgtype"
 
@@ -79,6 +84,28 @@ type EffectiveInbound struct {
 	ShadowTLSInnerPassword string `json:"shadowtls_inner_password"`
 }
 
+// dialsOwnCertificate reports whether a host reaches, by bare address, an inbound
+// holding the self-signed certificate the panel generates when none is uploaded. No
+// client can verify that one, and nothing names a domain that could have a real one,
+// so such a host only works without verification. A host that names a domain, or
+// says either way itself, is left alone: a CDN in front of it has a real certificate.
+func dialsOwnCertificate(inbound generated.Inbound, host generated.Host, security string) bool {
+	if security != "tls" || host.Sni.String != "" {
+		return false
+	}
+	if !strings.Contains(host.Address, "{SERVER_IP}") {
+		if _, err := netip.ParseAddr(host.Address); err != nil {
+			return false
+		}
+	}
+	block, _ := pem.Decode([]byte(inbound.TlsCertificate.String))
+	if block == nil {
+		return false
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	return err == nil && bytes.Equal(cert.RawIssuer, cert.RawSubject)
+}
+
 // BuildEffectiveInbound merges one Host row onto its parent Inbound row.
 func BuildEffectiveInbound(inbound generated.Inbound, host generated.Host) EffectiveInbound {
 	security := inbound.Security
@@ -112,7 +139,7 @@ func BuildEffectiveInbound(inbound generated.Inbound, host generated.Host) Effec
 		Path:          host.Path.String,
 		ALPN:          alpn,
 		Fingerprint:   fingerprint,
-		AllowInsecure: host.Allowinsecure.Valid && host.Allowinsecure.Bool,
+		AllowInsecure: host.Allowinsecure.Bool || (!host.Allowinsecure.Valid && dialsOwnCertificate(inbound, host, security)),
 		MuxEnable:     host.MuxEnable, FragmentSetting: host.FragmentSetting.String, NoiseSetting: host.NoiseSetting.String,
 		RandomUserAgent:        host.RandomUserAgent,
 		Hysteria2ObfsPassword:  inbound.Hysteria2ObfsPassword.String,

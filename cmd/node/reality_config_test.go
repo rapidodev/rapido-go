@@ -30,6 +30,17 @@ func TestPlainTLSOptionsKeepTheirCertificate(t *testing.T) {
 	}
 }
 
+func TestTUICOffersTheALPNEveryClientAsksFor(t *testing.T) {
+	spec := &tlsSpec{Certificate: "CERT", Key: "KEY"}
+	opts := buildInboundTLS(inboundSpec{Protocol: "tuic", TLS: spec})
+	if len(opts.ALPN) != 1 || opts.ALPN[0] != "h3" {
+		t.Errorf("tuic ALPN = %v, want [h3]", opts.ALPN)
+	}
+	if opts := buildInboundTLS(inboundSpec{Protocol: "vless", TLS: spec}); len(opts.ALPN) != 0 {
+		t.Errorf("vless ALPN = %v, want none", opts.ALPN)
+	}
+}
+
 func TestCheckRealityRefusesWhatWouldPanicOrFailEveryClient(t *testing.T) {
 	valid := func() *realitySpec {
 		s := &realitySpec{ShortID: []string{"", "ab", "0123456789abcdef"}}

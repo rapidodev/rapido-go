@@ -216,9 +216,20 @@ func singBoxTLS(in EffectiveInbound) map[string]any {
 // never in the selector's own tag list, so an admin's client never offers
 // it as something to pick directly.
 func SingBoxConfig(outbounds, hidden []map[string]any) ([]byte, error) {
+	// sing-box refuses a whole document over a repeated tag, and "proxy" and "direct"
+	// are the selector and the bypass below.
+	taken := map[string]bool{"proxy": true, "direct": true}
+	for _, o := range hidden {
+		if tag, ok := o["tag"].(string); ok {
+			taken[tag] = true
+		}
+	}
 	tags := make([]string, 0, len(outbounds))
 	for _, o := range outbounds {
-		tags = append(tags, o["tag"].(string))
+		tag := UniqueName(o["tag"].(string), taken)
+		o["tag"] = tag
+		taken[tag] = true
+		tags = append(tags, tag)
 	}
 	allOutbounds := append(append(append([]map[string]any{}, outbounds...), hidden...),
 		map[string]any{"type": "selector", "tag": "proxy", "outbounds": tags, "default": firstOrEmpty(tags)},

@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/goccy/go-yaml"
+
 	"github.com/legendary1205/rapido-go/internal/subscription"
 )
 
@@ -202,6 +204,75 @@ func TestSubscriptionClashFormat(t *testing.T) {
 	}
 	if !strings.Contains(body, "proxy-groups:") || !strings.Contains(body, "rules:") {
 		t.Errorf("clash config missing required top-level keys: %s", body)
+	}
+}
+
+// What a brand-new panel handed FlClash: every inbound starts on the same remark
+// template and on {SERVER_IP} with a certificate the panel made itself, so the first
+// two of a kind repeated a name, and each TLS proxy had a literal {SERVER_IP} for an
+// SNI and verified a certificate nobody can.
+func TestNewPanelsDefaultHostsMakeAProfileFlClashCanUse(t *testing.T) {
+	router, token := newTestRouter(t)
+	for _, in := range []map[string]interface{}{
+		{"tag": "vless-main", "protocol": "vless", "port": 2001, "security": "tls"},
+		{"tag": "vless-second", "protocol": "vless", "port": 2002, "security": "tls"},
+		{"tag": "hy2-main", "protocol": "hysteria2", "port": 2003},
+		{"tag": "tuic-main", "protocol": "tuic", "port": 2004},
+	} {
+		if resp := doRequest(t, router, "POST", "/api/inbounds", token, in); resp.Code != 200 {
+			t.Fatalf("create inbound %v: %d %s", in["tag"], resp.Code, resp.Raw)
+		}
+	}
+	doRequest(t, router, "POST", "/api/user", token, map[string]interface{}{
+		"username": "flclash_user", "proxies": map[string]interface{}{"vless": map[string]interface{}{}, "hysteria2": map[string]interface{}{}, "tuic": map[string]interface{}{}},
+	})
+
+	req := httptest.NewRequest("GET", "/sub/"+subscription.CreateToken("flclash_user", []byte(testSubSecret)), nil)
+	req.Header.Set("User-Agent", "FlClash/v0.8.95 clash-verge Platform/android")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("subscription: %d %s", rec.Code, rec.Body.String())
+	}
+
+	var doc struct {
+		Proxies []map[string]any `yaml:"proxies"`
+		Groups  []struct {
+			Name    string   `yaml:"name"`
+			Proxies []string `yaml:"proxies"`
+		} `yaml:"proxy-groups"`
+	}
+	if err := yaml.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("not YAML: %v\n%s", err, rec.Body.String())
+	}
+	if len(doc.Proxies) != 4 {
+		t.Fatalf("proxies = %d, want 4:\n%s", len(doc.Proxies), rec.Body.String())
+	}
+	seen := map[string]bool{}
+	for _, p := range doc.Proxies {
+		name, _ := p["name"].(string)
+		if seen[name] {
+			t.Errorf("repeated name %q", name)
+		}
+		seen[name] = true
+		if p["skip-cert-verify"] != true {
+			t.Errorf("%s verifies a certificate the panel made itself: %v", name, p)
+		}
+		sni, _ := p["sni"].(string)
+		if p["type"] == "vless" {
+			sni, _ = p["servername"].(string)
+		}
+		if sni != "203.0.113.1" {
+			t.Errorf("%s has SNI %q, want the panel's address", name, sni)
+		}
+	}
+	if len(doc.Groups) != 1 || doc.Groups[0].Name != "Net Shield" || len(doc.Groups[0].Proxies) != 4 {
+		t.Errorf("groups = %+v", doc.Groups)
+	}
+	for _, name := range doc.Groups[0].Proxies {
+		if !seen[name] {
+			t.Errorf("the group names %q, which is no proxy", name)
+		}
 	}
 }
 

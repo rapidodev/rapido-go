@@ -301,6 +301,15 @@ func (h *Handler) forEachUserHost(ctx context.Context, user generated.User, fn f
 	if err != nil {
 		return err
 	}
+	// Two hosts on one remark are routine, as every inbound starts on the same
+	// template, and clients refuse a whole profile over a repeated name.
+	names := make(map[string]bool)
+	emit := fn
+	fn = func(protocol string, settings proxysettings.Settings, remark, address string, eff subscription.EffectiveInbound) {
+		remark = subscription.UniqueName(remark, names)
+		names[remark] = true
+		emit(protocol, settings, remark, address, eff)
+	}
 	vars := subscription.BuildVariables(toSubUserInfo(user), h.publicIP)
 	settingsByProtocol := make(map[string]proxysettings.Settings, len(proxies))
 
@@ -362,6 +371,14 @@ func (h *Handler) forEachUserHost(ctx context.Context, user generated.User, fn f
 			remarkVars["TRANSPORT"] = eff.Network
 			remark, sortKey, sortable := loads.remark(remarkVars, host)
 			address := remarkVars.Format(host.Address)
+			if address == "" {
+				// {SERVER_IP} with no PUBLIC_IP: no client can dial it, and
+				// Clash Meta refuses the whole profile over one.
+				continue
+			}
+			// With no SNI of its own a host's is the raw address template.
+			eff.SNI = remarkVars.Format(eff.SNI)
+			eff.HostHeader = remarkVars.Format(eff.HostHeader)
 			if sortByLoad {
 				held = append(held, pendingHost{
 					protocol: p.Type, settings: settings, remark: remark, address: address, eff: eff,

@@ -2,12 +2,19 @@ package subscription
 
 import (
 	_ "embed"
+	"fmt"
 	"strings"
 
 	"github.com/goccy/go-yaml"
 
 	"github.com/legendary1205/rapido-go/internal/proxysettings"
 )
+
+// clashBuiltinNames are the policies Clash itself provides, which a proxy can't be
+// named after and a proxy-group can list without any proxy of that name existing.
+var clashBuiltinNames = map[string]bool{
+	"DIRECT": true, "REJECT": true, "REJECT-DROP": true, "PASS": true, "COMPATIBLE": true, "GLOBAL": true,
+}
 
 // defaultClashTemplate is what subscriptions get with no template of the operator's
 // own, or one that can't be used. In the binary, no path or file mode can lose it.
@@ -145,7 +152,12 @@ func ClashProxy(remark, address string, in EffectiveInbound, settings proxysetti
 	case proxysettings.Hysteria:
 		// Also self-contained, same reason as hysteria2 above (mandatory
 		// TLS, no classic tls/network block) - see
-		// internal/nodecore/hysteria's own doc comment.
+		// internal/nodecore/hysteria's own doc comment. Meta refuses the
+		// whole profile over a hysteria proxy with no speeds, so an inbound
+		// missing them costs its own entry instead.
+		if in.UpMbps <= 0 || in.DownMbps <= 0 {
+			return nil, nil
+		}
 		node["type"] = "hysteria"
 		node["auth-str"] = settings.Hysteria.AuthString
 		node["sni"] = in.SNI
@@ -198,6 +210,9 @@ func ClashProxy(remark, address string, in EffectiveInbound, settings proxysetti
 		if isMeta {
 			if in.Fingerprint != "" {
 				node["client-fingerprint"] = in.Fingerprint
+			} else if in.Security == "reality" {
+				// Meta won't dial REALITY without one, and "none" is a host's default.
+				node["client-fingerprint"] = "chrome"
 			}
 			if in.Security == "reality" && in.RealityPublicKey != "" {
 				node["reality-opts"] = map[string]any{"public-key": in.RealityPublicKey, "short-id": in.RealityShortID}
@@ -296,18 +311,15 @@ func ClashProxy(remark, address string, in EffectiveInbound, settings proxysetti
 // (CLASH_SUBSCRIPTION_TEMPLATE) providing everything the operator wants
 // beyond bare connectivity - mixed-port/dns/tun/sniffer settings, real
 // rule-providers, a branded proxy-group name, a full routing rule set.
-// Every proxy-group in that file gets its "proxies" list replaced with
-// the real, current server names; nothing else in the file is touched.
+// Every proxy-group in that file gets the real, current server names, after any
+// Clash policy or other group it lists itself; nothing else in the file is touched.
 // With no template configured (or one that fails to load), defaultClashTemplate
 // takes its place the same way.
+//
+// Meta refuses a whole profile over a proxy named like a group or a built-in policy,
+// or over a group with nothing in it, so neither can leave here. With no server to
+// offer, a group rejects: going direct would look like a working VPN that isn't one.
 func ClashConfig(proxies []map[string]any, templatePath string) ([]byte, error) {
-	names := make([]string, 0, len(proxies))
-	for _, p := range proxies {
-		if name, ok := p["name"].(string); ok {
-			names = append(names, name)
-		}
-	}
-
 	tmpl, ok := LoadYAMLTemplate(templatePath)
 	if !ok {
 		if err := yaml.Unmarshal(defaultClashTemplate, &tmpl); err != nil {
@@ -315,8 +327,43 @@ func ClashConfig(proxies []map[string]any, templatePath string) ([]byte, error) 
 		}
 	}
 	doc := shallowCopyMap(tmpl)
-	doc["proxies"] = proxies
-	if groups, ok := doc["proxy-groups"].([]any); ok {
+	groups, _ := doc["proxy-groups"].([]any)
+
+	policies := make(map[string]bool, len(clashBuiltinNames)+len(groups))
+	for name := range clashBuiltinNames {
+		policies[name] = true
+	}
+	for _, g := range groups {
+		if gm, ok := g.(map[string]any); ok {
+			if name, ok := gm["name"].(string); ok {
+				policies[name] = true
+			}
+		}
+	}
+
+	taken := make(map[string]bool, len(policies)+len(proxies))
+	for name := range policies {
+		taken[name] = true
+	}
+	named := make([]map[string]any, len(proxies))
+	names := make([]string, 0, len(proxies))
+	for i, p := range proxies {
+		named[i] = p
+		name, ok := p["name"].(string)
+		if !ok {
+			continue
+		}
+		if unique := UniqueName(name, taken); unique != name {
+			named[i] = shallowCopyMap(p)
+			named[i]["name"] = unique
+			name = unique
+		}
+		taken[name] = true
+		names = append(names, name)
+	}
+	doc["proxies"] = named
+
+	if groups != nil {
 		filled := make([]any, len(groups))
 		for i, g := range groups {
 			gm, ok := g.(map[string]any)
@@ -325,10 +372,41 @@ func ClashConfig(proxies []map[string]any, templatePath string) ([]byte, error) 
 				continue
 			}
 			ng := shallowCopyMap(gm)
-			ng["proxies"] = names
+			ng["proxies"] = groupProxies(gm["proxies"], policies, names)
 			filled[i] = ng
 		}
 		doc["proxy-groups"] = filled
 	}
 	return yaml.Marshal(doc)
+}
+
+// groupProxies is a group's list: what the template lists that still means something,
+// then every server. A server name written into a template is left out, as the next
+// subscription may no longer have it and Meta refuses a group naming what doesn't exist.
+func groupProxies(listed any, policies map[string]bool, names []string) []string {
+	var out []string
+	if entries, ok := listed.([]any); ok {
+		for _, e := range entries {
+			if name, ok := e.(string); ok && policies[name] {
+				out = append(out, name)
+			}
+		}
+	}
+	out = append(out, names...)
+	if len(out) == 0 {
+		return []string{"REJECT"}
+	}
+	return out
+}
+
+// UniqueName returns name, or name with the first free " (2)"-style suffix if taken.
+func UniqueName(name string, taken map[string]bool) string {
+	if !taken[name] {
+		return name
+	}
+	for i := 2; ; i++ {
+		if candidate := fmt.Sprintf("%s (%d)", name, i); !taken[candidate] {
+			return candidate
+		}
+	}
 }
