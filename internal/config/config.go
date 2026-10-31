@@ -79,7 +79,7 @@ type Config struct {
 	// a real YAML/JSON file supplying everything beyond bare connectivity
 	// (dns/tun/sniffer settings, rule-providers, a branded proxy-group
 	// name, local inbounds/routing) for those two subscription formats.
-	// Empty (the default) falls back to a minimal built-in shape - see
+	// Empty (the default) falls back to a built-in one - see
 	// subscription.ClashConfig/V2rayJSONConfig's own doc comments.
 	ClashTemplateFile             string
 	V2raySubscriptionTemplateFile string

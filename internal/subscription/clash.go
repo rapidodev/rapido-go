@@ -1,12 +1,19 @@
 package subscription
 
 import (
+	_ "embed"
 	"strings"
 
 	"github.com/goccy/go-yaml"
 
 	"github.com/legendary1205/rapido-go/internal/proxysettings"
 )
+
+// defaultClashTemplate is what subscriptions get with no template of the operator's
+// own, or one that can't be used. In the binary, no path or file mode can lose it.
+//
+//go:embed default_clash.yml
+var defaultClashTemplate []byte
 
 // ClashProxy builds one Clash (or Clash Meta, with isMeta=true) proxy node,
 // porting app/subscription/clash.py's ClashConfiguration/ClashMetaConfiguration
@@ -291,9 +298,8 @@ func ClashProxy(remark, address string, in EffectiveInbound, settings proxysetti
 // rule-providers, a branded proxy-group name, a full routing rule set.
 // Every proxy-group in that file gets its "proxies" list replaced with
 // the real, current server names; nothing else in the file is touched.
-// With no template configured (or one that fails to load), this falls
-// back to the minimum that makes the profile actually route traffic at
-// all: one generic "PROXY" select group and a MATCH catch-all.
+// With no template configured (or one that fails to load), defaultClashTemplate
+// takes its place the same way.
 func ClashConfig(proxies []map[string]any, templatePath string) ([]byte, error) {
 	names := make([]string, 0, len(proxies))
 	for _, p := range proxies {
@@ -302,32 +308,27 @@ func ClashConfig(proxies []map[string]any, templatePath string) ([]byte, error) 
 		}
 	}
 
-	if tmpl, ok := LoadYAMLTemplate(templatePath); ok {
-		doc := shallowCopyMap(tmpl)
-		doc["proxies"] = proxies
-		if groups, ok := doc["proxy-groups"].([]any); ok {
-			filled := make([]any, len(groups))
-			for i, g := range groups {
-				gm, ok := g.(map[string]any)
-				if !ok {
-					filled[i] = g
-					continue
-				}
-				ng := shallowCopyMap(gm)
-				ng["proxies"] = names
-				filled[i] = ng
-			}
-			doc["proxy-groups"] = filled
+	tmpl, ok := LoadYAMLTemplate(templatePath)
+	if !ok {
+		if err := yaml.Unmarshal(defaultClashTemplate, &tmpl); err != nil {
+			return nil, err
 		}
-		return yaml.Marshal(doc)
 	}
-
-	doc := map[string]any{
-		"proxies": proxies,
-		"proxy-groups": []any{
-			map[string]any{"name": "PROXY", "type": "select", "proxies": names},
-		},
-		"rules": []any{"MATCH,PROXY"},
+	doc := shallowCopyMap(tmpl)
+	doc["proxies"] = proxies
+	if groups, ok := doc["proxy-groups"].([]any); ok {
+		filled := make([]any, len(groups))
+		for i, g := range groups {
+			gm, ok := g.(map[string]any)
+			if !ok {
+				filled[i] = g
+				continue
+			}
+			ng := shallowCopyMap(gm)
+			ng["proxies"] = names
+			filled[i] = ng
+		}
+		doc["proxy-groups"] = filled
 	}
 	return yaml.Marshal(doc)
 }

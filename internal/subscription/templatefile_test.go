@@ -3,6 +3,8 @@ package subscription
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/goccy/go-yaml"
@@ -25,6 +27,117 @@ func TestLoadJSONTemplateMissingPathReturnsNotOK(t *testing.T) {
 	}
 	if _, ok := LoadJSONTemplate(filepath.Join(t.TempDir(), "does-not-exist.json")); ok {
 		t.Error("nonexistent file should return ok=false")
+	}
+}
+
+// The built-in template stands in for anything an operator's file can go wrong with,
+// including the Jinja files carried over from the Python panel.
+func TestClashConfigServesTheBuiltInTemplateWhenTheFileCannotBeUsed(t *testing.T) {
+	dir := t.TempDir()
+	jinja := filepath.Join(dir, "jinja.yml")
+	if err := os.WriteFile(jinja, []byte("proxies:\n{{ conf | yaml }}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, path := range map[string]string{"none": "", "missing": filepath.Join(dir, "missing.yml"), "jinja": jinja} {
+		raw, err := ClashConfig([]map[string]any{{"name": "Germany", "type": "vless"}}, path)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var doc map[string]any
+		if err := yaml.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("%s: output is not valid YAML: %v\n%s", name, err, raw)
+		}
+		if _, ok := doc["rule-providers"]; !ok {
+			t.Errorf("%s: not the built-in template:\n%s", name, raw)
+		}
+		group := doc["proxy-groups"].([]any)[0].(map[string]any)
+		if names := group["proxies"].([]any); len(names) != 1 || names[0] != "Germany" {
+			t.Errorf("%s: group proxies = %+v", name, group["proxies"])
+		}
+	}
+}
+
+// Rendering must not change a thing in the template but the server lists. A quoting
+// slip on values such as "*" or a nameserver's #group would break a real client.
+func TestClashConfigKeepsTheBuiltInTemplateIntact(t *testing.T) {
+	var want map[string]any
+	if err := yaml.Unmarshal(defaultClashTemplate, &want); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := ClashConfig([]map[string]any{{"name": "Germany", "type": "vless"}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := yaml.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("output is not valid YAML: %v\n%s", err, raw)
+	}
+	for key, value := range want {
+		if key == "proxy-groups" {
+			continue
+		}
+		if !reflect.DeepEqual(got[key], value) {
+			t.Errorf("%s changed: got %+v, want %+v", key, got[key], value)
+		}
+	}
+}
+
+// mihomo refuses the whole profile over a rule naming a group or provider it doesn't
+// have, so a slip here would take every Clash client down at once.
+func TestBuiltInClashTemplateRulesPointAtThingsThatExist(t *testing.T) {
+	var doc map[string]any
+	if err := yaml.Unmarshal(defaultClashTemplate, &doc); err != nil {
+		t.Fatal(err)
+	}
+	targets := map[string]bool{"DIRECT": true, "REJECT": true}
+	for _, g := range doc["proxy-groups"].([]any) {
+		targets[g.(map[string]any)["name"].(string)] = true
+	}
+	providers := doc["rule-providers"].(map[string]any)
+	rules := doc["rules"].([]any)
+	if last := rules[len(rules)-1].(string); !strings.HasPrefix(last, "MATCH,") {
+		t.Errorf("last rule = %q, want a catch-all", last)
+	}
+	for _, r := range rules {
+		fields := strings.Split(r.(string), ",")
+		target := fields[len(fields)-1]
+		if fields[0] == "MATCH" {
+			target = fields[1]
+		} else if len(fields) > 3 {
+			target = fields[2] // the rest are options such as no-resolve
+		}
+		if !targets[target] {
+			t.Errorf("rule %q goes to %q, which doesn't exist", r, target)
+		}
+		if fields[0] == "RULE-SET" {
+			if _, ok := providers[fields[1]]; !ok {
+				t.Errorf("rule %q names a provider that doesn't exist", r)
+			}
+		}
+	}
+}
+
+func TestCheckYAMLTemplateSaysWhyAFileIsIgnored(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.yml")
+	if err := os.WriteFile(good, []byte("mixed-port: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	jinja := filepath.Join(dir, "jinja.yml")
+	if err := os.WriteFile(jinja, []byte("proxies:\n{{ conf | yaml }}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckYAMLTemplate(""); err != nil {
+		t.Errorf("no template configured: %v", err)
+	}
+	if err := CheckYAMLTemplate(good); err != nil {
+		t.Errorf("a good file: %v", err)
+	}
+	if err := CheckYAMLTemplate(filepath.Join(dir, "missing.yml")); err == nil {
+		t.Error("a missing file went unreported")
+	}
+	if err := CheckYAMLTemplate(jinja); err == nil {
+		t.Error("a Jinja file went unreported")
 	}
 }
 

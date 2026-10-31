@@ -19,15 +19,31 @@ func LoadYAMLTemplate(path string) (map[string]any, bool) {
 	if path == "" {
 		return nil, false
 	}
+	doc, err := readYAMLTemplate(path)
+	return doc, err == nil
+}
+
+// CheckYAMLTemplate says why a configured template can't be used. Serving falls
+// back without a word on every request, so this is the operator's one chance to
+// hear that their file is being ignored.
+func CheckYAMLTemplate(path string) error {
+	if path == "" {
+		return nil
+	}
+	_, err := readYAMLTemplate(path)
+	return err
+}
+
+func readYAMLTemplate(path string) (map[string]any, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
 	var doc map[string]any
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
-		return nil, false
+		return nil, err
 	}
-	return doc, true
+	return doc, nil
 }
 
 // LoadJSONTemplate is LoadYAMLTemplate's JSON equivalent, for the v2ray

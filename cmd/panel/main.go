@@ -45,6 +45,7 @@ import (
 	"github.com/legendary1205/rapido-go/internal/resellerapi"
 	"github.com/legendary1205/rapido-go/internal/resellerusagejob"
 	"github.com/legendary1205/rapido-go/internal/reviewjob"
+	"github.com/legendary1205/rapido-go/internal/subscription"
 	"github.com/legendary1205/rapido-go/internal/telegram"
 	"github.com/legendary1205/rapido-go/internal/telegrambot"
 	"github.com/legendary1205/rapido-go/internal/tunneldiscover"
@@ -168,6 +169,10 @@ func run(logger *slog.Logger) error {
 			Settings: settingsFn, Logger: logger,
 		})
 
+	}
+
+	if err := subscription.CheckYAMLTemplate(cfg.ClashTemplateFile); err != nil {
+		logger.Warn("CLASH_SUBSCRIPTION_TEMPLATE can't be used, so subscriptions get the built-in template", "path", cfg.ClashTemplateFile, "error", err)
 	}
 
 	formatFlags := httpapi.SubscriptionFormatFlags{
