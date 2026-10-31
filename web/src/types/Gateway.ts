@@ -17,6 +17,38 @@ export type GatewayPeer = {
   base_url: string;
   secret: string;
   enabled: boolean;
+  // What the background job last learned about it, about every half a minute.
+  last_seen_at: string | null;
+  last_error: string;
+  // Null until a pass has reached it, or once it has been out of reach for a while.
+  crowdedness: number | null;
+  hosts: GatewayPeerHost[] | null;
+  // This panel's users it took and refused, out of total_users.
+  synced_users: number;
+  rejected_users: number;
+  total_users: number;
+};
+
+export type GatewayPeerHost = {
+  remark: string;
+  protocol: string;
+  network: string;
+  security: string;
+  address: string;
+  port: number;
+};
+
+export type GatewayRejectedUser = {
+  username: string;
+  detail: string;
+  at: string;
+};
+
+export type GatewayPeerDeleted = {
+  deleted: boolean;
+  copies_removed: number;
+  // The peer couldn't be reached, so it still holds working copies of these users.
+  copies_left: boolean;
 };
 
 export type GatewayPeerRequest = {

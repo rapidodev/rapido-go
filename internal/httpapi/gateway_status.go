@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -105,6 +106,10 @@ func (h *Handler) handleGatewayStatus(c *gin.Context) {
 			continue
 		}
 		eff := subscription.BuildEffectiveInbound(inbound, r)
+		// {SERVER_IP} is this panel's address, which the panel serving the
+		// subscription doesn't know: left in, it would fill in its own.
+		eff.Address = strings.ReplaceAll(eff.Address, "{SERVER_IP}", h.publicIP)
+		eff.SNI = strings.ReplaceAll(eff.SNI, "{SERVER_IP}", h.publicIP)
 		hosts = append(hosts, gatewayStatusHostDTO{EffectiveInbound: eff, Remark: r.Remark, Priority: r.Priority})
 	}
 

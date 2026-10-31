@@ -211,9 +211,8 @@ func run(logger *slog.Logger) error {
 		return cmd.Run()
 	})
 	dispatcher.SetWebhookSink(store.EnqueueWebhook)
-	dispatcher.OnUserChanged(handler.SyncUserByName)
 	if cfg.Role == config.RoleBackend {
-		go runAsBackendSingleton(ctx, cfg.DatabaseURL, queries, dispatcher, hostMetricsTracker, redisClient, usageReporter, settingsFn, cfg.UsageRetentionDays, cfg.AdminDigestHourUTC, telegramConsole.Run, logger)
+		go runAsBackendSingleton(ctx, cfg.DatabaseURL, queries, dispatcher, hostMetricsTracker, redisClient, usageReporter, settingsFn, cfg.UsageRetentionDays, cfg.AdminDigestHourUTC, telegramConsole.Run, handler.SyncGatewayPeers, logger)
 	}
 	router := httpapi.NewRouter(handler, logger, cfg.AllowedOrigins)
 	httpapi.MountDashboardStatic(router, cfg.DashboardDir)
@@ -268,7 +267,7 @@ func run(logger *slog.Logger) error {
 // as long as its holding connection does, and a pool connection can be
 // silently recycled or closed at any time, which would release the lock
 // out from under this process without it noticing.
-func runAsBackendSingleton(ctx context.Context, databaseURL string, queries *generated.Queries, dispatcher *report.Dispatcher, hostMetricsTracker *hostmetrics.PreviousTracker, redisClient *cache.Client, usageReporter *resellerapi.Client, settingsFn resellerusagejob.SettingsFunc, usageRetentionDays, digestHourUTC int, runConsole func(context.Context), logger *slog.Logger) {
+func runAsBackendSingleton(ctx context.Context, databaseURL string, queries *generated.Queries, dispatcher *report.Dispatcher, hostMetricsTracker *hostmetrics.PreviousTracker, redisClient *cache.Client, usageReporter *resellerapi.Client, settingsFn resellerusagejob.SettingsFunc, usageRetentionDays, digestHourUTC int, runConsole func(context.Context), syncGatewayPeers func(context.Context), logger *slog.Logger) {
 	const retryInterval = 10 * time.Second
 	for {
 		select {
@@ -435,11 +434,11 @@ func runAsBackendSingleton(ctx context.Context, databaseURL string, queries *gen
 			Logger: logger,
 			OnTick: func(rows []tunnelmetrics.Row) { watcher.Handle(ctx, rows) },
 		})
-		// Gateway (multi-panel load balancer) sub-phase 4: keeps every
-		// enabled peer's crowdedness/host cache warm so a real client's
-		// subscription fetch never waits on a network call to another
-		// panel - see internal/gatewayjob's own doc comment.
-		go gatewayjob.Run(ctx, queries, redisClient, logger, 2*time.Minute)
+		// Gateway (multi-panel load balancer): keeps every peer's host cache warm,
+		// its copies of this panel's users current, and its traffic added to their
+		// limits. Singleton-only: two processes reading one peer's counters is what
+		// ClaimGatewayPeerUsage guards against, but pushing every user twice isn't.
+		go gatewayjob.Run(ctx, syncGatewayPeers, 30*time.Second)
 		// One Telegram message a day to each admin that has a telegram_id: configs
 		// expiring within 3 days and configs with 10% or less data left.
 		go digestjob.Run(ctx, digestjob.Deps{

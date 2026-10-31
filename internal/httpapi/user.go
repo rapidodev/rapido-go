@@ -336,7 +336,6 @@ func (h *Handler) handleCreateUser(c *gin.Context) {
 	// sets admin_id to the caller's own id) - the bootstrap sudo account has
 	// no admins row at all, so its created users have no owning admin.
 	h.reports.UserCreated(ctx, toUserSummary(resp), identity.Username, h.resolveAdminRef(ctx, dbuser.AdminID))
-	h.dispatchGatewayUserSync(ctx, dbuser)
 	h.attachUserLinks(ctx, dbuser, &resp)
 	c.JSON(http.StatusOK, resp)
 }
@@ -611,8 +610,7 @@ func (h *Handler) handleModifyUser(c *gin.Context) {
 	// change via a sync push FROM the panel that actually owns it - a
 	// direct edit here would apply locally only, silently diverge from
 	// that panel's own state, and then get invisibly clobbered by its next
-	// sync push anyway. Reject outright rather than let that footgun exist
-	// just because dispatchGatewayUserSync happens to skip replicas.
+	// sync push anyway. Reject outright rather than let that footgun exist.
 	if dbuser.SyncedFromPanelName.Valid {
 		c.JSON(http.StatusConflict, gin.H{"detail": "This user is managed by another panel (" + dbuser.SyncedFromPanelName.String + ") via the Gateway - edit it there instead."})
 		return
@@ -838,7 +836,6 @@ func (h *Handler) handleModifyUser(c *gin.Context) {
 	if updated.Status != dbuser.Status {
 		h.reports.StatusChange(ctx, updated.Username, updated.Status, userAdmin)
 	}
-	h.dispatchGatewayUserSync(ctx, updated)
 	h.attachUserLinks(ctx, updated, &resp)
 	c.JSON(http.StatusOK, resp)
 }
@@ -951,6 +948,9 @@ func (h *Handler) handleDeleteUser(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if !h.refuseGatewayReplica(c, dbuser) {
+		return
+	}
 	if err := h.deleteUserCore(c.Request.Context(), dbuser, identity.Username); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
 		return
@@ -973,7 +973,6 @@ func (h *Handler) deleteUserCore(ctx context.Context, dbuser generated.User, byU
 	// serial PK that's never reused, so any leftover cache entry keyed on
 	// one just expires unread via its TTL - never served to anyone.
 	h.reports.UserDeleted(ctx, dbuser.Username, byUsername, userAdmin)
-	h.dispatchGatewayUserDelete(ctx, dbuser)
 	return nil
 }
 
@@ -985,6 +984,9 @@ func (h *Handler) handleResetUserDataUsage(c *gin.Context) {
 	identity := auth.CurrentIdentity(c)
 	dbuser, ok := h.loadAuthorizedUser(c)
 	if !ok {
+		return
+	}
+	if !h.refuseGatewayReplica(c, dbuser) {
 		return
 	}
 	ctx := c.Request.Context()
@@ -1033,7 +1035,6 @@ func (h *Handler) resetUsageCore(ctx context.Context, dbuser generated.User, byU
 		return generated.User{}, errors.New("Could not clear next_plan")
 	}
 	h.reports.UserDataUsageReset(ctx, updated.Username, byUsername, h.resolveAdminRef(ctx, updated.AdminID))
-	h.dispatchGatewayUserSync(ctx, updated)
 	return updated, nil
 }
 
@@ -1046,6 +1047,9 @@ func (h *Handler) handleRevokeUserSub(c *gin.Context) {
 	identity := auth.CurrentIdentity(c)
 	dbuser, ok := h.loadAuthorizedUser(c)
 	if !ok {
+		return
+	}
+	if !h.refuseGatewayReplica(c, dbuser) {
 		return
 	}
 	ctx := c.Request.Context()
@@ -1078,7 +1082,6 @@ func (h *Handler) handleRevokeUserSub(c *gin.Context) {
 		return
 	}
 	h.reports.UserSubscriptionRevoked(ctx, updated.Username, identity.Username, h.resolveAdminRef(ctx, updated.AdminID))
-	h.dispatchGatewayUserSync(ctx, updated)
 	h.attachUserLinks(ctx, updated, &resp)
 	c.JSON(http.StatusOK, resp)
 }
@@ -1548,4 +1551,16 @@ func (h *Handler) limitInboundsToResellerScope(c *gin.Context, identity *auth.Id
 		}
 	}
 	return true
+}
+
+// refuseGatewayReplica answers 409 for a copy of another panel's user: it belongs to the
+// panel that owns the user, whose state the next push would put back. Deleting it, or
+// changing its credential, would also cut off a customer that panel still serves, and
+// resetting it would lose traffic that panel hasn't read yet.
+func (h *Handler) refuseGatewayReplica(c *gin.Context, dbuser generated.User) bool {
+	if !dbuser.SyncedFromPanelName.Valid {
+		return true
+	}
+	c.JSON(http.StatusConflict, gin.H{"detail": "This user is managed by another panel (" + dbuser.SyncedFromPanelName.String + ") via the Gateway, change them there instead"})
+	return false
 }

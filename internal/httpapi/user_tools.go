@@ -245,7 +245,6 @@ func (h *Handler) applyUserChange(ctx context.Context, identity *auth.Identity, 
 			h.reports.StatusChange(ctx, updated.Username, updated.Status, userAdmin)
 		}
 	}
-	h.dispatchGatewayUserSync(ctx, updated)
 	return nil
 }
 

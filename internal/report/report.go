@@ -144,9 +144,6 @@ func belongsTo(userAdmin *AdminRef) *string {
 }
 
 func (d *Dispatcher) StatusChange(ctx context.Context, username, status string, userAdmin *AdminRef) {
-	if d.changed != nil {
-		d.changed(ctx, username)
-	}
 	if !d.flags.StatusChange {
 		return
 	}
@@ -227,9 +224,6 @@ func (d *Dispatcher) UserDataUsageReset(ctx context.Context, username, byUsernam
 }
 
 func (d *Dispatcher) UserDataResetByNext(ctx context.Context, user UserSummary, userAdmin *AdminRef) {
-	if d.changed != nil {
-		d.changed(ctx, user.Username)
-	}
 	if !d.flags.UserDataUsedReset {
 		return
 	}
@@ -380,8 +374,6 @@ func (d *Dispatcher) Login(ctx context.Context, username, clientIP, status strin
 	payload := discord.LoginPayload(username, clientIP, status)
 	d.discord.Send(ctx, payload, vals.DiscordWebhookURL, nil, d.logger)
 }
-
-func (d *Dispatcher) OnUserChanged(fn func(context.Context, string)) { d.changed = fn }
 
 func (d *Dispatcher) SetWebhookSink(fn func(context.Context, integrationsettings.Values, string, any) error) {
 	d.webhook = fn

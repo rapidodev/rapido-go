@@ -512,7 +512,6 @@ func (h *Handler) handleDisableAdminUsers(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not disable this admin's users"})
 		return
 	}
-	h.dispatchGatewayUsersSync(c.Request.Context(), users)
 	c.JSON(http.StatusOK, gin.H{"detail": "Users successfully disabled", "users_affected": len(users)})
 }
 
@@ -530,7 +529,6 @@ func (h *Handler) handleActivateAdminUsers(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not activate this admin's users"})
 		return
 	}
-	h.dispatchGatewayUsersSync(c.Request.Context(), users)
 	c.JSON(http.StatusOK, gin.H{"detail": "Users successfully activated", "users_affected": len(users)})
 }
 
@@ -623,9 +621,6 @@ func (h *Handler) handleDeleteInactiveAdmins(c *gin.Context) {
 		if err := h.store.InvalidateAdmin(c.Request.Context(), r.ID, r.Username); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not invalidate admin cache"})
 			return
-		}
-		for _, user := range users {
-			h.dispatchGatewayUserDelete(c.Request.Context(), user)
 		}
 		usersRemoved += len(users)
 		removed = append(removed, inactiveAdminDTO{

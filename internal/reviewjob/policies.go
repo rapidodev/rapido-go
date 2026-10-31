@@ -2,12 +2,10 @@ package reviewjob
 
 import (
 	"context"
-	"encoding/json"
 	"github.com/legendary1205/rapido-go/internal/db/generated"
 	"github.com/legendary1205/rapido-go/internal/report"
 	"github.com/legendary1205/rapido-go/internal/txscope"
 	"log/slog"
-	"strings"
 	"time"
 )
 
@@ -44,24 +42,6 @@ func PeriodicPolicies(ctx context.Context, q *generated.Queries, d *report.Dispa
 				if err == nil {
 					for _, u := range users {
 						d.UserDeleted(batchCtx, u.Username, "automatic policy", lookupAdminRef(batchCtx, queries, u.AdminID, logger))
-						if !u.SyncedFromPanelName.Valid {
-							peers, peerErr := queries.ListGatewayPeers(batchCtx)
-							if peerErr != nil {
-								err = peerErr
-								break
-							}
-							raw, _ := json.Marshal(map[string]any{"username": u.Username, "deleted": true})
-							for _, peer := range peers {
-								if !peer.Enabled {
-									continue
-								}
-								payload, _ := json.Marshal(map[string]any{"body": json.RawMessage(raw), "ordering_key": u.Username, "headers": map[string]string{"Authorization": "Bearer " + peer.Secret}})
-								if e := queries.EnqueueDelivery(batchCtx, generated.EnqueueDeliveryParams{Kind: "gateway", Destination: strings.TrimRight(peer.BaseUrl, "/") + "/api/internal/gateway/users/sync", Payload: payload}); e != nil {
-									err = e
-									break
-								}
-							}
-						}
 					}
 				}
 			}

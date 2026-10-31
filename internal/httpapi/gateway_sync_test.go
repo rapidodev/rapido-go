@@ -73,7 +73,7 @@ func TestGatewaySyncCreatesAndUpdatesAReplica(t *testing.T) {
 
 	// Deleting a replica via a sync push actually removes it.
 	del := doRequest(t, router, "POST", "/api/internal/gateway/users/sync", secret, map[string]interface{}{
-		"username": "replica_alice", "deleted": true,
+		"origin_panel_name": "Origin Panel", "username": "replica_alice", "deleted": true,
 	})
 	if del.Code != http.StatusOK {
 		t.Fatalf("delete replica: %d %v", del.Code, del.Body)

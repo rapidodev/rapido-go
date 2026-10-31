@@ -1,6 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { fetch } from "service/http";
-import { GatewayPeer, GatewayPeerRequest, GatewaySettings, GatewayTestResult } from "types/Gateway";
+import {
+  GatewayPeer,
+  GatewayPeerDeleted,
+  GatewayPeerRequest,
+  GatewayRejectedUser,
+  GatewaySettings,
+  GatewayTestResult,
+} from "types/Gateway";
 import { queryKeys } from "utils/queryClient";
 
 // GET /api/settings/gateway - lazily creates this panel's own secret on
@@ -22,11 +29,28 @@ export const useUpdateGatewaySettingsMutation = () => {
   });
 };
 
+// Polled: a first push of a whole panel's users takes minutes, and this is its progress.
 export const useGatewayPeersQuery = () =>
   useQuery({
     queryKey: queryKeys.gatewayPeers,
     queryFn: () => fetch<GatewayPeer[]>("/settings/gateway/peers"),
+    refetchInterval: 15000,
   });
+
+export const useGatewayRejectedQuery = (id: number, enabled: boolean) =>
+  useQuery({
+    queryKey: [...queryKeys.gatewayPeers, id, "rejected"],
+    queryFn: () => fetch<GatewayRejectedUser[]>(`/settings/gateway/peers/${id}/rejected`),
+    enabled,
+  });
+
+export const useRetryGatewayRejectedMutation = () => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => fetch(`/settings/gateway/peers/${id}/retry`, { method: "POST" }),
+    onSuccess: () => invalidatePeers(queryClient),
+  });
+};
 
 const invalidatePeers = (queryClient: ReturnType<typeof useQueryClient>) =>
   queryClient.invalidateQueries({ queryKey: queryKeys.gatewayPeers });
@@ -52,7 +76,7 @@ export const useUpdateGatewayPeerMutation = () => {
 export const useDeleteGatewayPeerMutation = () => {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (id: number) => fetch(`/settings/gateway/peers/${id}`, { method: "DELETE" }),
+    mutationFn: (id: number) => fetch<GatewayPeerDeleted>(`/settings/gateway/peers/${id}`, { method: "DELETE" }),
     onSuccess: () => invalidatePeers(queryClient),
   });
 };

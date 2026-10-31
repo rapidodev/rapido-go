@@ -5,15 +5,23 @@
 -- condition), pushed down to avoid loading every active user on every
 -- tick. See that file's own comment: unfiltered, this was the slowest
 -- single query in the whole system in production.
+--
+-- A Gateway copy's traffic is only this panel's share of its limit, so whether it is
+-- used up is for the panel that adds the shares together to say. An expiry means the
+-- same anywhere, and keeps working with the two panels cut off from each other. A copy
+-- with no origin ID comes from a panel too old to add anything up, so this is all the
+-- limit it has.
 SELECT * FROM users
 WHERE status = 'active'
   AND (
-    (data_limit IS NOT NULL AND data_limit > 0 AND used_traffic >= data_limit)
+    (data_limit IS NOT NULL AND data_limit > 0 AND used_traffic >= data_limit AND synced_origin_id IS NULL)
     OR (expire IS NOT NULL AND expire != 0 AND expire <= $1)
   );
 
 -- name: GetOnHoldUsers :many
-SELECT * FROM users WHERE status = 'on_hold';
+-- A Gateway copy starts when its origin says: the plan's length isn't sent, and the
+-- origin hears of the first connection through the traffic it reads.
+SELECT * FROM users WHERE status = 'on_hold' AND synced_origin_id IS NULL;
 
 -- name: ApplyReviewedStatus :execrows
 -- Limits or expires a user the job read a moment ago, if that still holds: a
@@ -79,7 +87,7 @@ RETURNING u.*;
 
 -- name: ResetDuePeriodicUsers :many
 WITH due AS (
- SELECT * FROM users WHERE data_limit_reset_strategy != 'no_reset'
+ SELECT * FROM users WHERE data_limit_reset_strategy != 'no_reset' AND synced_origin_id IS NULL
  AND COALESCE(last_usage_reset_at,created_at) <= now() - CASE data_limit_reset_strategy
  WHEN 'day' THEN interval '1 day' WHEN 'week' THEN interval '1 week'
  WHEN 'month' THEN interval '1 month' WHEN 'year' THEN interval '1 year' ELSE interval '1000 years' END

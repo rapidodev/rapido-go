@@ -338,10 +338,14 @@ func NewRouter(h *Handler, logger *slog.Logger, allowedOrigins []string) *gin.En
 		api.GET("/settings/gateway", requireSudo, h.handleGetGatewaySettings)
 		api.PUT("/settings/gateway", requireSudo, h.handleUpdateGatewaySettings)
 		api.GET("/settings/gateway/peers", requireSudo, h.handleListGatewayPeers)
-		api.POST("/settings/gateway/peers", requireSudo, h.handleCreateGatewayPeer)
-		api.PUT("/settings/gateway/peers/:id", requireSudo, h.handleUpdateGatewayPeer)
-		api.DELETE("/settings/gateway/peers/:id", requireSudo, h.handleDeleteGatewayPeer)
+		// Owner only, like taking a backup away: switching a peer on hands it every
+		// user's credentials.
+		api.POST("/settings/gateway/peers", requireOwner, h.handleCreateGatewayPeer)
+		api.PUT("/settings/gateway/peers/:id", requireOwner, h.handleUpdateGatewayPeer)
+		api.DELETE("/settings/gateway/peers/:id", requireOwner, h.handleDeleteGatewayPeer)
 		api.POST("/settings/gateway/peers/:id/test", requireSudo, h.handleTestGatewayPeer)
+		api.GET("/settings/gateway/peers/:id/rejected", requireSudo, h.handleListGatewayRejected)
+		api.POST("/settings/gateway/peers/:id/retry", requireOwner, h.handleRetryGatewayRejected)
 
 		api.GET("/tickets", requireAdmin, h.handleListTickets)
 		api.GET("/tickets/:id", requireAdmin, h.handleGetTicket)
@@ -372,6 +376,8 @@ func NewRouter(h *Handler, logger *slog.Logger, allowedOrigins []string) *gin.En
 		api.GET("/internal/gateway/ping", h.requireGatewaySecret, h.handleGatewayPing)
 		api.POST("/internal/gateway/users/sync", h.requireGatewaySecret, h.handleGatewaySyncUser)
 		api.GET("/internal/gateway/status", h.requireGatewaySecret, h.handleGatewayStatus)
+		api.GET("/internal/gateway/usage", h.requireGatewaySecret, h.handleGatewayUsage)
+		api.POST("/internal/gateway/users/purge", h.requireGatewaySecret, h.handleGatewayPurge)
 	}
 
 	h.registerNodeInstallRoutes(r)

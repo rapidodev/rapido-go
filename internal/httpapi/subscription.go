@@ -402,7 +402,7 @@ func (h *Handler) forEachUserHost(ctx context.Context, user generated.User, fn f
 	// or interleaves with the admin's own local priority ordering. Reuses
 	// the exact same fn(...) callback local hosts use, so buildUserLinks/
 	// buildUserSingBoxOutbounds need no changes at all to pick these up.
-	for _, ph := range h.gatherPeerHosts(ctx, settingsByProtocol) {
+	for _, ph := range h.gatherPeerHosts(ctx, user.Username, settingsByProtocol) {
 		settings, ok := settingsByProtocol[ph.host.Protocol]
 		if !ok {
 			// gatherPeerHosts already filters to protocols this user has
@@ -415,6 +415,9 @@ func (h *Handler) forEachUserHost(ctx context.Context, user generated.User, fn f
 		remarkVars["TRANSPORT"] = ph.host.Network
 		remark := peerRemark(remarkVars, ph.peerName, ph.host.Remark)
 		address := remarkVars.Format(ph.host.Address)
+		if address == "" {
+			continue
+		}
 		eff := subscription.EffectiveInbound{
 			Tag: ph.host.Tag, Protocol: ph.host.Protocol, Network: ph.host.Network, HeaderType: ph.host.HeaderType,
 			Port: ph.host.Port, Address: ph.host.Address, SNI: ph.host.SNI, HostHeader: ph.host.HostHeader,

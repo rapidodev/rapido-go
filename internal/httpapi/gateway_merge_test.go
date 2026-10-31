@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/legendary1205/rapido-go/internal/cache"
+	"github.com/legendary1205/rapido-go/internal/db/generated"
 	"github.com/legendary1205/rapido-go/internal/gatewayclient"
 )
 
@@ -25,6 +26,16 @@ func seedPeerStatus(t *testing.T, handler *Handler, peerID int32, status gateway
 	}
 	if err := handler.store.Cache.Set(context.Background(), cache.GatewayPeerStatusKey(peerID), string(raw), 10*time.Minute); err != nil {
 		t.Fatalf("seed peer status cache: %v", err)
+	}
+}
+
+// markPeerHolds records that a peer accepted this user, which is what a pass does.
+func markPeerHolds(t *testing.T, handler *Handler, peerID int32, username string) {
+	t.Helper()
+	if err := handler.store.Queries.UpsertGatewayPeerUser(context.Background(), generated.UpsertGatewayPeerUserParams{
+		PeerID: peerID, Username: username, State: gatewayStateSynced, StateHash: "seeded",
+	}); err != nil {
+		t.Fatalf("mark peer holds %s: %v", username, err)
 	}
 }
 
@@ -89,6 +100,8 @@ func TestSubscriptionMergesPeerHostsAfterLocalHosts(t *testing.T) {
 
 	enabledPeerID := createTestGatewayPeer(t, router, token, "Enabled Peer", true)
 	disabledPeerID := createTestGatewayPeer(t, router, token, "Disabled Peer", false)
+	markPeerHolds(t, handler, enabledPeerID, "merge_carol")
+	markPeerHolds(t, handler, disabledPeerID, "merge_carol")
 
 	// The enabled peer offers a vless host (matches merge_carol's own
 	// protocol - must appear) and a trojan host (merge_carol has no trojan

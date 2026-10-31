@@ -42,10 +42,12 @@ GROUP BY nu.node_id;
 -- name: ListExpiredUsers :many
 -- 'limited' counts as expired here too, exactly as the real panel's
 -- get_expired_users_list does - both mean "this user can no longer connect
--- and is a candidate for cleanup".
+-- and is a candidate for cleanup". A Gateway copy goes when its origin says, or that
+-- panel would go on offering servers that refuse the user, with nothing telling it so.
 SELECT id, username, admin_id FROM users
 WHERE status IN ('expired', 'limited')
   AND expire IS NOT NULL AND expire >= $1 AND expire <= $2
+  AND synced_origin_id IS NULL
 ORDER BY id;
 
 -- name: ListExpiredUsersByAdmin :many
@@ -65,7 +67,9 @@ DELETE FROM users WHERE id IN (SELECT id FROM target);
 SELECT id FROM users WHERE admin_id = $1;
 
 -- name: ListAllUserIDs :many
-SELECT id FROM users;
+-- For resetting every user. A Gateway copy's counter is its origin's to read and its
+-- status the origin's to decide: resetting one would bring back a limited user.
+SELECT id FROM users WHERE synced_origin_id IS NULL;
 
 -- name: ResetUsersUsageByIDs :exec
 -- Mirrors reset_all_users_data_usage: zero the counter, and reactivate only

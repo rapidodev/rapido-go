@@ -73,7 +73,12 @@ func NormalizeBaseURL(raw string) (string, error) {
 // which panel answered, nothing a peer wouldn't already know about itself.
 type PingResult struct {
 	PanelName string `json:"panel_name"`
+	// Protocol is which of these calls the panel understands. Older ones send none.
+	Protocol int `json:"protocol"`
 }
+
+// ProtocolVersion 2 added the usage and purge calls, which a shared limit depends on.
+const ProtocolVersion = 2
 
 // Ping calls a peer's own ping endpoint using the secret THAT peer expects
 // (see the Gateway migration's own doc comment on why this is
@@ -117,6 +122,7 @@ func Ping(ctx context.Context, baseURL, secret string) (PingResult, error) {
 // - httpapi is the one importing this package, not the other way round).
 type UserSyncPayload struct {
 	OriginPanelName        string                     `json:"origin_panel_name"`
+	OriginID               string                     `json:"origin_id"`
 	Username               string                     `json:"username"`
 	Deleted                bool                       `json:"deleted"`
 	Status                 string                     `json:"status,omitempty"`
@@ -133,7 +139,15 @@ type UserSyncPayload struct {
 type SyncUserResult struct {
 	OK     bool   `json:"ok"`
 	Detail string `json:"detail"`
+	// UsedTraffic is the peer's counter for this user when it took them.
+	UsedTraffic int64 `json:"used_traffic"`
 }
+
+// RejectedError is a peer answering that it won't take this user, as opposed to not
+// answering, or to something being wrong with the call itself.
+type RejectedError struct{ Detail string }
+
+func (e *RejectedError) Error() string { return "peer rejected the sync: " + e.Detail }
 
 // SyncUser pushes one user's full state to a peer - create/update if
 // payload.Deleted is false, delete if true. Same secret/timeout/error
@@ -166,7 +180,10 @@ func SyncUser(ctx context.Context, baseURL, secret string, payload UserSyncPaylo
 		if result.Detail == "" {
 			result.Detail = fmt.Sprintf("peer responded with status %d", resp.StatusCode)
 		}
-		return result, fmt.Errorf("peer rejected the sync: %s", result.Detail)
+		if resp.StatusCode == http.StatusConflict || resp.StatusCode == http.StatusUnprocessableEntity {
+			return result, &RejectedError{Detail: result.Detail}
+		}
+		return result, fmt.Errorf("peer refused the call: %s", result.Detail)
 	}
 	if decodeErr != nil {
 		return result, fmt.Errorf("could not decode peer response: %w", decodeErr)
@@ -274,4 +291,78 @@ func Status(ctx context.Context, baseURL, secret string) (StatusResult, error) {
 		return StatusResult{}, fmt.Errorf("could not decode peer response: %w", err)
 	}
 	return result, nil
+}
+
+// PeerUsage is one of an origin's users as a peer has counted them: a running total for
+// that copy, which the origin compares with the total it read last.
+type PeerUsage struct {
+	ID          int64  `json:"id"`
+	Username    string `json:"username"`
+	UsedTraffic int64  `json:"used_traffic"`
+}
+
+// Usage reads a page of what a peer has counted for this origin's users, ordered by ID.
+func Usage(ctx context.Context, baseURL, secret, originID string, after int64, limit int) ([]PeerUsage, error) {
+	baseURL, err := NormalizeBaseURL(baseURL)
+	if err != nil {
+		return nil, err
+	}
+	query := url.Values{"origin": {originID}, "after": {strconv.FormatInt(after, 10)}, "limit": {strconv.Itoa(limit)}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/internal/gateway/usage?"+query.Encode(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("could not build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+secret)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("could not reach peer: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("peer responded with status %d", resp.StatusCode)
+	}
+	var result struct {
+		Users []PeerUsage `json:"users"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxGatewayResponseBytes)).Decode(&result); err != nil {
+		return nil, fmt.Errorf("could not decode peer response: %w", err)
+	}
+	return result.Users, nil
+}
+
+// Purge has a peer delete every copy of this origin's users, and returns how many it did.
+func Purge(ctx context.Context, baseURL, secret, originID string) (int64, error) {
+	baseURL, err := NormalizeBaseURL(baseURL)
+	if err != nil {
+		return 0, err
+	}
+	body, err := json.Marshal(map[string]string{"origin_id": originID})
+	if err != nil {
+		return 0, fmt.Errorf("could not encode payload: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/internal/gateway/users/purge", bytes.NewReader(body))
+	if err != nil {
+		return 0, fmt.Errorf("could not build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("could not reach peer: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("peer responded with status %d", resp.StatusCode)
+	}
+	var result struct {
+		Deleted int64 `json:"deleted"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxGatewayResponseBytes)).Decode(&result); err != nil {
+		return 0, fmt.Errorf("could not decode peer response: %w", err)
+	}
+	return result.Deleted, nil
 }

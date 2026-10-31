@@ -22,7 +22,7 @@ Go + PostgreSQL + Redis on the backend, [sing-box](https://github.com/SagerNet/s
 - **Six subscription formats** - v2ray share links, sing-box, Clash, Clash Meta, Outline (SIP008), v2ray-json. `GET /sub/:token` picks one from the client's User-Agent; `GET /sub/:token/<format>` forces it.
 - **Dashboard** - React/Vite/Tailwind, served by the panel itself; no extra web server.
 - **Notifications and a Telegram console** - Telegram, Discord and generic webhooks on user and login events, plus an interactive Telegram bot for admins: system status, user search and cards with QR codes, create/extend/disable/reset/delete, node and tunnel health, and database backups.
-- **Gateway (optional)** - merge several independent installs so one subscription link carries hosts from all of them.
+- **Gateway (optional)** - merge several independent installs so one subscription link carries hosts from all of them, with one traffic limit across them. A panel you add starts switched off. Starting it copies every user there, and only users it accepts are offered its servers. Both panels need this version.
 
 ### Architecture
 
@@ -263,7 +263,7 @@ Go و PostgreSQL و Redis در بک‌اند، [sing-box](https://github.com/Sag
 - **شش فرمت اشتراک** — v2ray، sing-box، Clash، Clash Meta، Outline و v2ray-json.
 - **داشبورد** — با React، که خود پنل سرو می‌کند؛ وب‌سرور جدا لازم نیست.
 - **اعلان‌ها و کنسول تلگرام** — تلگرام، دیسکورد و وب‌هوک؛ و یک ربات تلگرام تعاملی برای ادمین‌ها: وضعیت سیستم، جست‌وجوی کاربر و کارت کاربر با QR، ساخت/تمدید/غیرفعال/ریست/حذف، سلامت نودها و تونل‌ها، و بکاپ دیتابیس.
-- **Gateway (اختیاری)** — چند نصب مستقل را طوری ترکیب می‌کند که یک لینک اشتراک، هاست‌های همه‌شان را داشته باشد.
+- **Gateway (اختیاری)** — چند نصب مستقل را طوری ترکیب می‌کند که یک لینک اشتراک، هاست‌های همه‌شان را داشته باشد، با یک سهمیه‌ی حجم مشترک بین آن‌ها. پنلی که اضافه می‌کنید خاموش شروع می‌شود. با شروع آن همه‌ی کاربران به آنجا کپی می‌شوند و سرورهایش فقط به کاربرانی نشان داده می‌شود که آن پنل پذیرفته است. هر دو پنل باید همین نسخه را داشته باشند.
 
 ### پیش‌نیازها
 

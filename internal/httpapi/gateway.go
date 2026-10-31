@@ -5,14 +5,17 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/legendary1205/rapido-go/internal/cache"
 	"github.com/legendary1205/rapido-go/internal/db/generated"
 	"github.com/legendary1205/rapido-go/internal/gatewayclient"
 )
@@ -87,7 +90,7 @@ func (h *Handler) handleGatewayPing(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "could not load gateway settings: " + err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gatewayclient.PingResult{PanelName: settings.Name})
+	c.JSON(http.StatusOK, gatewayclient.PingResult{PanelName: settings.Name, Protocol: gatewayclient.ProtocolVersion})
 }
 
 // --- admin-facing settings -------------------------------------------------
@@ -162,23 +165,127 @@ type gatewayPeerDTO struct {
 	BaseURL string `json:"base_url"`
 	Secret  string `json:"secret"`
 	Enabled bool   `json:"enabled"`
+
+	// What the background job last learned about this peer, for the admin's page.
+	LastSeenAt *time.Time `json:"last_seen_at"`
+	LastError  string     `json:"last_error"`
+	// Crowdedness and Hosts are null until a pass has reached it, or once it has been
+	// unreachable long enough that its hosts stopped being offered.
+	Crowdedness *int                  `json:"crowdedness"`
+	Hosts       []gatewayPeerHostView `json:"hosts"`
+	// SyncedUsers and RejectedUsers are this panel's users it took and refused, out of
+	// TotalUsers.
+	SyncedUsers   int64 `json:"synced_users"`
+	RejectedUsers int64 `json:"rejected_users"`
+	TotalUsers    int64 `json:"total_users"`
+}
+
+// gatewayPeerHostView is a peer's host as its admin needs to recognize it.
+type gatewayPeerHostView struct {
+	Remark   string `json:"remark"`
+	Protocol string `json:"protocol"`
+	Network  string `json:"network"`
+	Security string `json:"security"`
+	Address  string `json:"address"`
+	Port     int    `json:"port"`
 }
 
 func toGatewayPeerDTO(p generated.GatewayPeer) gatewayPeerDTO {
-	return gatewayPeerDTO{ID: p.ID, Name: p.Name, BaseURL: p.BaseUrl, Secret: p.Secret, Enabled: p.Enabled}
+	return gatewayPeerDTO{
+		ID: p.ID, Name: p.Name, BaseURL: p.BaseUrl, Secret: p.Secret, Enabled: p.Enabled,
+		LastSeenAt: pgTimePtr(p.LastSeenAt), LastError: p.LastError,
+	}
 }
 
 func (h *Handler) handleListGatewayPeers(c *gin.Context) {
-	rows, err := h.store.Queries.ListGatewayPeers(c.Request.Context())
+	ctx := c.Request.Context()
+	rows, err := h.store.Queries.ListGatewayPeers(ctx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
 		return
 	}
 	out := make([]gatewayPeerDTO, 0, len(rows))
+	if len(rows) == 0 {
+		c.JSON(http.StatusOK, out)
+		return
+	}
+	counts, err := h.store.Queries.CountGatewayPeerUsers(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		return
+	}
+	total, err := h.store.Queries.CountLocalUsers(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		return
+	}
 	for _, r := range rows {
-		out = append(out, toGatewayPeerDTO(r))
+		dto := toGatewayPeerDTO(r)
+		dto.TotalUsers = total
+		for _, count := range counts {
+			if count.PeerID != r.ID {
+				continue
+			}
+			switch count.State {
+			case gatewayStateSynced:
+				dto.SyncedUsers = count.Users
+			case gatewayStateRejected:
+				dto.RejectedUsers = count.Users
+			}
+		}
+		// A miss is routine: never reached yet, or not lately.
+		if raw, err := h.store.Cache.Get(ctx, cache.GatewayPeerStatusKey(r.ID)); err == nil {
+			var status gatewayclient.StatusResult
+			if err := json.Unmarshal([]byte(raw), &status); err == nil {
+				dto.Crowdedness = &status.Crowdedness
+				dto.Hosts = make([]gatewayPeerHostView, 0, len(status.Hosts))
+				for _, host := range status.Hosts {
+					dto.Hosts = append(dto.Hosts, gatewayPeerHostView{
+						Remark: host.Remark, Protocol: host.Protocol, Network: host.Network,
+						Security: host.Security, Address: host.Address, Port: host.Port,
+					})
+				}
+			}
+		}
+		out = append(out, dto)
 	}
 	c.JSON(http.StatusOK, out)
+}
+
+// handleListGatewayRejected implements GET /api/settings/gateway/peers/:id/rejected
+// (sudo only): who a peer refused and why, which only an admin can sort out.
+func (h *Handler) handleListGatewayRejected(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": "invalid peer id"})
+		return
+	}
+	rows, err := h.store.Queries.ListGatewayRejectedUsers(c.Request.Context(), generated.ListGatewayRejectedUsersParams{PeerID: int32(id), Limit: 200})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		return
+	}
+	out := make([]gin.H, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, gin.H{"username": r.Username, "detail": r.Detail, "at": r.UpdatedAt.Time})
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+// handleRetryGatewayRejected implements POST /api/settings/gateway/peers/:id/retry
+// (owner only): after fixing what stood in the way, without waiting out the hourly retry.
+func (h *Handler) handleRetryGatewayRejected(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": "invalid peer id"})
+		return
+	}
+	cleared, err := h.store.Queries.ClearGatewayRejectedUsers(c.Request.Context(), int32(id))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"retrying": cleared})
 }
 
 type gatewayPeerRequest struct {
@@ -253,17 +360,35 @@ func (h *Handler) handleUpdateGatewayPeer(c *gin.Context) {
 	c.JSON(http.StatusOK, toGatewayPeerDTO(updated))
 }
 
+// handleDeleteGatewayPeer also has the peer delete its copies of this panel's users: from
+// here on nothing would limit them. A peer that can't be reached doesn't stop the removal,
+// which may be why it's being removed, but the admin is told what was left behind there.
 func (h *Handler) handleDeleteGatewayPeer(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 32)
 	if err != nil {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": "invalid peer id"})
 		return
 	}
-	if err := h.store.Queries.DeleteGatewayPeer(c.Request.Context(), int32(id)); err != nil {
+	ctx := c.Request.Context()
+	copiesLeft := false
+	var copiesRemoved int64
+	if peer, err := h.store.Queries.GetGatewayPeer(ctx, int32(id)); err == nil {
+		settings, err := h.ensureGatewaySettings(ctx)
+		if err == nil {
+			callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			copiesRemoved, err = gatewayclient.Purge(callCtx, peer.BaseUrl, peer.Secret, settings.InstanceID)
+			cancel()
+		}
+		if err != nil {
+			copiesLeft = true
+			h.logger.Warn("gateway: could not delete this panel's users from a removed peer", "peer", peer.Name, "error", err)
+		}
+	}
+	if err := h.store.Queries.DeleteGatewayPeer(ctx, int32(id)); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"deleted": true})
+	c.JSON(http.StatusOK, gin.H{"deleted": true, "copies_removed": copiesRemoved, "copies_left": copiesLeft})
 }
 
 // handleTestGatewayPeer implements POST /api/settings/gateway/peers/:id/test

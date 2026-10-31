@@ -17,9 +17,9 @@ SELECT * FROM users WHERE username = $1;
 -- (a replica has no local owning admin; policy/ownership belongs to the
 -- panel that actually owns the user).
 INSERT INTO users (
-    username, status, data_limit, data_limit_reset_strategy, expire, synced_from_panel_name
+    username, status, data_limit, data_limit_reset_strategy, expire, synced_from_panel_name, synced_origin_id
 ) VALUES (
-    $1, $2, $3, $4, $5, $6
+    $1, $2, $3, $4, $5, $6, $7
 )
 RETURNING *;
 
@@ -34,6 +34,7 @@ UPDATE users SET
     data_limit = $3,
     data_limit_reset_strategy = $4,
     expire = $5,
+    synced_origin_id = COALESCE(sqlc.narg(synced_origin_id), synced_origin_id),
     edit_at = now()
 WHERE id = $1
 RETURNING *;

@@ -5,7 +5,9 @@ import {
   useCreateGatewayPeerMutation,
   useDeleteGatewayPeerMutation,
   useGatewayPeersQuery,
+  useGatewayRejectedQuery,
   useGatewaySettingsQuery,
+  useRetryGatewayRejectedMutation,
   useTestGatewayPeerMutation,
   useUpdateGatewayPeerMutation,
   useUpdateGatewaySettingsMutation,
@@ -159,7 +161,9 @@ const PeerForm: FC<{ initial?: GatewayPeer; onClose: () => void }> = ({ initial,
 
   const submit = () => {
     setError("");
-    const body = { name, base_url: baseURL, secret, enabled: initial?.enabled ?? true };
+    // A new peer starts off: switching one on hands it every user's credentials, which
+    // deserves its own decision, after a look at what it offers.
+    const body = { name, base_url: baseURL, secret, enabled: initial?.enabled ?? false };
     const onError = (e: unknown) => setError(errorText(e, t("rapido.gateway.saveFailed")));
     if (editing) {
       update.mutate({ id: initial!.id, body }, { onSuccess: onClose, onError });
@@ -219,22 +223,140 @@ const PeerForm: FC<{ initial?: GatewayPeer; onClose: () => void }> = ({ initial,
 
 // ---------------------------------------------------------------------------
 
-const PeerRow: FC<{ peer: GatewayPeer; onEdit: () => void }> = ({ peer, onEdit }) => {
+// Who the peer refused and why, which only an admin can sort out, usually on that panel.
+const RejectedUsers: FC<{ peerId: number }> = ({ peerId }) => {
+  const { t } = useTranslation();
+  const { data: users, isLoading, isError } = useGatewayRejectedQuery(peerId, true);
+  const retry = useRetryGatewayRejectedMutation();
+  if (isLoading) return <p className="text-xs text-rapido-muted">{t("rapido.pleaseWait")}</p>;
+  if (isError) return <p className="text-xs text-red-400">{t("rapido.gateway.rejectedLoadFailed")}</p>;
+  return (
+    <div className="flex flex-col gap-2">
+      <ul className="flex max-h-48 flex-col gap-1 overflow-y-auto text-xs">
+        {(users ?? []).map((u) => (
+          <li key={u.username} className="flex flex-wrap gap-x-2">
+            <span dir="ltr" className="font-mono">{u.username}</span>
+            <span className="text-rapido-muted">{u.detail}</span>
+          </li>
+        ))}
+      </ul>
+      <Button variant="chip" className="self-start" disabled={retry.isPending} onClick={() => retry.mutate(peerId)}>
+        {t("rapido.gateway.retryRejected")}
+      </Button>
+    </div>
+  );
+};
+
+const PeerHosts: FC<{ peer: GatewayPeer }> = ({ peer }) => {
+  const { t } = useTranslation();
+  if (!peer.hosts) return <p className="text-xs text-rapido-muted">{t("rapido.gateway.hostsUnknown")}</p>;
+  if (peer.hosts.length === 0) return <p className="text-xs text-rapido-muted">{t("rapido.gateway.hostsNone")}</p>;
+  return (
+    <ul className="flex max-h-48 flex-col gap-1 overflow-y-auto text-xs">
+      {peer.hosts.map((host, i) => (
+        <li key={`${host.remark}-${i}`} className="flex flex-wrap items-center gap-x-2">
+          <span className="font-medium">{host.remark}</span>
+          <span dir="ltr" className="font-mono text-rapido-muted">
+            {host.protocol}/{host.network} {host.security} {host.address}:{host.port}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+};
+
+const PeerStatus: FC<{ peer: GatewayPeer }> = ({ peer }) => {
+  const { t } = useTranslation();
+  const [show, setShow] = useState<false | "hosts" | "rejected">(false);
+  const toggle = (what: "hosts" | "rejected") => setShow((s) => (s === what ? false : what));
+  const percent = peer.total_users > 0 ? Math.min(100, Math.round((peer.synced_users * 100) / peer.total_users)) : 0;
+  const settled = peer.synced_users + peer.rejected_users >= peer.total_users;
+
+  return (
+    <div className="mt-3 flex flex-col gap-2">
+      {peer.last_error && (
+        <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-400">
+          {peer.last_error}
+        </div>
+      )}
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-rapido-muted">
+        <span>
+          {peer.last_seen_at
+            ? t("rapido.gateway.lastSeen", { time: new Date(peer.last_seen_at).toLocaleString() })
+            : t("rapido.gateway.neverSeen")}
+        </span>
+        {peer.crowdedness !== null && <span>{t("rapido.gateway.crowdedness", { value: peer.crowdedness })}</span>}
+      </div>
+      {(peer.enabled || peer.synced_users > 0) && (
+        <div className="flex flex-col gap-1">
+          <div className="flex flex-wrap justify-between gap-2 text-xs">
+            <span>
+              {t("rapido.gateway.syncProgress", { synced: peer.synced_users, total: peer.total_users })}
+              {peer.enabled && !settled ? ` · ${t("rapido.gateway.syncing")}` : ""}
+            </span>
+            {peer.rejected_users > 0 && (
+              <span className="text-amber-400">{t("rapido.gateway.rejectedCount", { count: peer.rejected_users })}</span>
+            )}
+          </div>
+          <div className="h-1.5 overflow-hidden rounded-full bg-rapido-border">
+            <div
+              role="progressbar"
+              aria-valuenow={percent}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              className="h-full bg-rapido-accent"
+              style={{ width: `${percent}%` }}
+            />
+          </div>
+        </div>
+      )}
+      <div className="flex flex-wrap gap-1.5">
+        <Button variant="chip" onClick={() => toggle("hosts")}>
+          {t("rapido.gateway.showHosts", { count: peer.hosts?.length ?? 0 })}
+        </Button>
+        {peer.rejected_users > 0 && (
+          <Button variant="chip" tone="amber" onClick={() => toggle("rejected")}>
+            {t("rapido.gateway.showRejected")}
+          </Button>
+        )}
+      </div>
+      {show === "hosts" && <PeerHosts peer={peer} />}
+      {show === "rejected" && <RejectedUsers peerId={peer.id} />}
+    </div>
+  );
+};
+
+const PeerRow: FC<{ peer: GatewayPeer; onEdit: () => void; onCopiesLeft: (name: string) => void }> = ({ peer, onEdit, onCopiesLeft }) => {
   const { t } = useTranslation();
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmToggle, setConfirmToggle] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [deleteError, setDeleteError] = useState("");
+  const [toggleError, setToggleError] = useState("");
   const deletePeer = useDeleteGatewayPeerMutation();
   const testPeer = useTestGatewayPeerMutation();
+  const updatePeer = useUpdateGatewayPeerMutation();
 
   const remove = () => {
     setDeleteError("");
     deletePeer.mutate(peer.id, {
+      onSuccess: (result) => {
+        if (result?.copies_left) onCopiesLeft(peer.name);
+      },
       onError: (e) => {
         setDeleteError(errorText(e, t("rapido.gateway.deleteFailed")));
         setConfirmDelete(false);
       },
     });
+  };
+
+  const toggle = () => {
+    setToggleError("");
+    setConfirmToggle(false);
+    updatePeer.mutate(
+      { id: peer.id, body: { name: peer.name, base_url: peer.base_url, secret: peer.secret, enabled: !peer.enabled } },
+      { onError: (e) => setToggleError(errorText(e, t("rapido.gateway.saveFailed"))) }
+    );
   };
 
   const runTest = () => {
@@ -270,6 +392,8 @@ const PeerRow: FC<{ peer: GatewayPeer; onEdit: () => void }> = ({ peer, onEdit }
         </div>
       </div>
 
+      <PeerStatus peer={peer} />
+
       {testResult && (
         <div
           className={classNames(
@@ -283,13 +407,36 @@ const PeerRow: FC<{ peer: GatewayPeer; onEdit: () => void }> = ({ peer, onEdit }
         </div>
       )}
 
-      {deleteError && (
+      {(deleteError || toggleError) && (
         <div className="mt-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-400">
-          {deleteError}
+          {deleteError || toggleError}
+        </div>
+      )}
+
+      {confirmToggle && (
+        <div className="mt-3 flex flex-col gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs">
+          <span>
+            {peer.enabled
+              ? t("rapido.gateway.disableWarning")
+              : t("rapido.gateway.enableWarning", { count: peer.total_users, hosts: peer.hosts?.length ?? 0 })}
+          </span>
+          <div className="flex flex-wrap gap-1.5">
+            <Button variant="chip" tone={peer.enabled ? "amber" : "accent"} disabled={updatePeer.isPending} onClick={toggle}>
+              {peer.enabled ? t("rapido.gateway.disableConfirm") : t("rapido.gateway.enableConfirm")}
+            </Button>
+            <Button variant="chip" onClick={() => setConfirmToggle(false)}>
+              {t("cancel")}
+            </Button>
+          </div>
         </div>
       )}
 
       <div className="mt-3 flex flex-wrap items-center gap-1.5">
+        {!confirmToggle && (
+          <Button variant="chip" tone={peer.enabled ? "amber" : "accent"} onClick={() => setConfirmToggle(true)}>
+            {peer.enabled ? t("rapido.gateway.disable") : t("rapido.gateway.enable")}
+          </Button>
+        )}
         <Button variant="chip" disabled={testPeer.isPending} onClick={runTest}>
           {testPeer.isPending ? t("rapido.pleaseWait") : t("rapido.gateway.testConnection")}
         </Button>
@@ -322,10 +469,17 @@ export const GatewayAdmin: FC = () => {
   const { t } = useTranslation();
   const { data: peers, isLoading, isError } = useGatewayPeersQuery();
   const [formTarget, setFormTarget] = useState<false | "new" | GatewayPeer>(false);
+  const [copiesLeftOn, setCopiesLeftOn] = useState("");
 
   return (
     <div className="flex flex-col gap-4">
       <ThisPanelCard />
+
+      {copiesLeftOn && (
+        <div role="alert" className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-400">
+          {t("rapido.gateway.copiesLeft", { name: copiesLeftOn })}
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="text-sm text-rapido-muted">{t("rapido.gateway.peersSummary", { count: peers?.length ?? 0 })}</div>
@@ -358,7 +512,7 @@ export const GatewayAdmin: FC = () => {
       ) : (
         <div className="flex flex-col gap-3">
           {(peers ?? []).map((p) => (
-            <PeerRow key={p.id} peer={p} onEdit={() => setFormTarget(p)} />
+            <PeerRow key={p.id} peer={p} onEdit={() => setFormTarget(p)} onCopiesLeft={setCopiesLeftOn} />
           ))}
         </div>
       )}

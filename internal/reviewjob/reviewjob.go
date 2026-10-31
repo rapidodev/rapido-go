@@ -74,7 +74,7 @@ func reviewActiveUsers(ctx context.Context, q *generated.Queries, dispatcher *re
 	}
 
 	for _, user := range users {
-		limited := user.DataLimit.Valid && user.DataLimit.Int64 > 0 && user.UsedTraffic >= user.DataLimit.Int64
+		limited := user.DataLimit.Valid && user.DataLimit.Int64 > 0 && user.UsedTraffic >= user.DataLimit.Int64 && !user.SyncedOriginID.Valid
 		expired := user.Expire.Valid && user.Expire.Int32 != 0 && int64(user.Expire.Int32) <= now.Unix()
 
 		// A failure below costs this user this tick. Returning instead would

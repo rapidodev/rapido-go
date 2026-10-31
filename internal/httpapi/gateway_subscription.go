@@ -27,10 +27,10 @@ type gatewayPeerHost struct {
 // same reasoning host_metrics/crowdedness already follows one hop closer
 // to home) and keeps only hosts whose protocol this user actually has a
 // local proxy for (userProtocols is forEachUserHost's own
-// settingsByProtocol map, keyed by proxy type) - that's the only case
-// where the same uuid/password this user already has locally (see
-// gateway_sync.go's own cross-panel sync) will actually authenticate
-// against that peer's node at all.
+// settingsByProtocol map, keyed by proxy type), on peers that accepted
+// this user - the only case where the same uuid/password this user
+// already has locally (see gateway_sync.go's own cross-panel sync) will
+// actually authenticate against that peer's node at all.
 //
 // Sorted by (peer crowdedness ascending, then that peer's own host
 // priority, then a stable name/tag tiebreak) - peer hosts are ranked
@@ -40,7 +40,7 @@ type gatewayPeerHost struct {
 // local host, in the admin's own configured order, before calling this
 // at all) - an admin's manually-set local priority is never silently
 // touched by which peer happens to be less busy right now.
-func (h *Handler) gatherPeerHosts(ctx context.Context, userProtocols map[string]proxysettings.Settings) []gatewayPeerHost {
+func (h *Handler) gatherPeerHosts(ctx context.Context, username string, userProtocols map[string]proxysettings.Settings) []gatewayPeerHost {
 	if len(userProtocols) == 0 {
 		return nil
 	}
@@ -49,10 +49,18 @@ func (h *Handler) gatherPeerHosts(ctx context.Context, userProtocols map[string]
 		h.logger.Warn("gateway subscription merge: could not list peers", "error", err)
 		return nil
 	}
+	if len(peers) == 0 {
+		return nil
+	}
+	holding, err := h.gatewayPeersHoldingUser(ctx, username)
+	if err != nil {
+		h.logger.Warn("gateway subscription merge: could not read which peers hold this user", "error", err)
+		return nil
+	}
 
 	var out []gatewayPeerHost
 	for _, peer := range peers {
-		if !peer.Enabled {
+		if !peer.Enabled || !holding[peer.ID] {
 			continue
 		}
 		// A cache miss (peer never successfully refreshed yet, or its
