@@ -4,14 +4,22 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/legendary1205/rapido-go/internal/nodecore/spread"
 )
 
 // FallbackGroup describes one exit that must keep working when its WireGuard
 // tunnel dies. Group is a selector outbound with two members: Primary, bound
 // to Interface, and Fallback, the same exit over the default route. Routing
 // rules point at Group and never notice which member is live.
+//
+// A direct Primary is a spread outbound: when the host has more tunnels for
+// the same exit, named Interface-2, Interface-3 and so on, its users are shared
+// among the healthy ones, and the exit only falls back once none is left.
 type FallbackGroup struct {
 	Group     string
 	Primary   string
@@ -22,6 +30,48 @@ type FallbackGroup struct {
 // Health answers whether a tunnel is usable right now.
 type Health interface {
 	Up(iface string) bool
+}
+
+// confirmedHealth is a Health that also tells a tunnel seen working apart from
+// one never probed yet. Up gives the benefit of the doubt to an exit's own
+// tunnel on a fresh start; a tunnel joining an exit gets users only once it has
+// been seen to work.
+type confirmedHealth interface {
+	Confirmed(iface string) bool
+}
+
+// siblingSuffix matches what follows an exit's interface name in the name of
+// one of its extra tunnels: a dash and a number from 2 to 99.
+var siblingSuffix = regexp.MustCompile(`^-([2-9]|[1-9][0-9])$`)
+
+// Siblings returns the names among tunnels that serve the same exit as iface:
+// iface-2, iface-3 and so on, sorted as given.
+func Siblings(iface string, tunnels []string) []string {
+	var out []string
+	for _, name := range tunnels {
+		if rest, ok := strings.CutPrefix(name, iface); ok && siblingSuffix.MatchString(rest) {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func (n *Node) spreadOutbound(tag string) (*spread.Outbound, bool) {
+	raw, loaded := n.box.Outbound().Outbound(tag)
+	if !loaded {
+		return nil, false
+	}
+	sp, ok := raw.(*spread.Outbound)
+	return sp, ok
+}
+
+// SpreadMembers returns the tunnels a spread outbound shares its users among
+// now, or nil when tag is not a spread outbound.
+func (n *Node) SpreadMembers(tag string) []string {
+	if sp, ok := n.spreadOutbound(tag); ok {
+		return sp.Members()
+	}
+	return nil
 }
 
 type selectorGroup interface {
@@ -76,6 +126,10 @@ type Supervisor struct {
 	// "tunnel is down" about a tunnel this host never had is noise.
 	Foreign func(iface string) bool
 
+	// Tunnels, when set, lists the host's tunnel interfaces; an exit's extra
+	// tunnels are found among them (see Siblings). It is read once a round.
+	Tunnels func() []string
+
 	mu     sync.RWMutex
 	active map[string]bool
 }
@@ -89,9 +143,15 @@ func NewSupervisor(node *Node, groups []FallbackGroup, health Health, logger *sl
 
 // Reconcile makes one pass over every group.
 func (s *Supervisor) Reconcile() {
+	var tunnels []string
+	if s.Tunnels != nil {
+		tunnels = s.Tunnels()
+	}
 	for _, g := range s.groups {
+		up := s.healthyTunnels(g.Interface, tunnels)
+		s.spreadOver(g, up)
 		want := g.Primary
-		if !s.health.Up(g.Interface) {
+		if len(up) == 0 {
 			want = g.Fallback
 		}
 		current, err := s.node.SelectedOutbound(g.Group)
@@ -113,6 +173,40 @@ func (s *Supervisor) Reconcile() {
 			}
 		}
 		s.setActive(g.Interface, g.Group, want == g.Fallback)
+	}
+}
+
+// healthyTunnels returns the exit's own tunnel when it is up, followed by
+// those of its extra tunnels that have been seen working.
+func (s *Supervisor) healthyTunnels(iface string, tunnels []string) []string {
+	var up []string
+	if s.health.Up(iface) {
+		up = append(up, iface)
+	}
+	confirmed, strict := s.health.(confirmedHealth)
+	for _, sibling := range Siblings(iface, tunnels) {
+		if (strict && confirmed.Confirmed(sibling)) || (!strict && s.health.Up(sibling)) {
+			up = append(up, sibling)
+		}
+	}
+	return up
+}
+
+// spreadOver points a spread Primary at the healthy tunnels. With none it is
+// left alone: the selector is on the fallback then, and the last set is what
+// the exit comes back to.
+func (s *Supervisor) spreadOver(g FallbackGroup, up []string) {
+	sp, ok := s.node.spreadOutbound(g.Primary)
+	if !ok || len(up) == 0 {
+		return
+	}
+	changed, err := sp.SetMembers(up)
+	if err != nil {
+		s.logger.Error("fallback: spread exit over its tunnels", "exit", g.Group, "tunnels", strings.Join(up, ","), "error", err)
+		return
+	}
+	if changed && !(s.Foreign != nil && s.Foreign(g.Interface)) {
+		s.logger.Info("exit shared among its tunnels", "exit", g.Group, "tunnels", strings.Join(sp.Members(), ","))
 	}
 }
 

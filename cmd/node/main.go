@@ -39,6 +39,7 @@ import (
 	"github.com/legendary1205/rapido-go/internal/hostmetrics"
 	"github.com/legendary1205/rapido-go/internal/nodecore"
 	forkedshadowtls "github.com/legendary1205/rapido-go/internal/nodecore/shadowtls"
+	"github.com/legendary1205/rapido-go/internal/nodecore/spread"
 	"github.com/legendary1205/rapido-go/internal/nodecore/traffic"
 	"github.com/legendary1205/rapido-go/internal/nodelog"
 	"github.com/legendary1205/rapido-go/internal/tunnelhealth"
@@ -294,6 +295,7 @@ func (s *server) startSupervisorLocked(plan nodePlan) {
 	ctx, cancel := context.WithCancel(s.ctx)
 	sup := nodecore.NewSupervisor(s.node, plan.fallbacks, s.monitor, s.logger)
 	sup.Foreign = func(iface string) bool { return !slices.Contains(hostmetrics.TunnelNames(), iface) }
+	sup.Tunnels = hostmetrics.TunnelNames
 	s.supervisor, s.supCancel = sup, cancel
 	go sup.Run(ctx, fallbackCheckInterval)
 }
@@ -1436,8 +1438,16 @@ func buildCoreOptions(core *coreSpec, portsByTag map[string][]uint16) ([]sbox.Ou
 				return nil, nil, nil, nil, nil, err
 			}
 			primary, fallback := ob.Tag+fallbackPrimarySuffix, ob.Tag+fallbackFallbackSuffix
+			primaryOutbound := sbox.Outbound{Type: ob.Type, Tag: primary, Options: opts}
+			if direct, ok := opts.(*sbox.DirectOutboundOptions); ok {
+				// A direct exit can be served by more than one tunnel: the
+				// supervisor shares its users among the healthy ones.
+				primaryOutbound = sbox.Outbound{Type: spread.Type, Tag: primary, Options: &spread.Options{
+					Direct: *direct, Interface: ob.BindInterface,
+				}}
+			}
 			outbounds = append(outbounds,
-				sbox.Outbound{Type: ob.Type, Tag: primary, Options: opts},
+				primaryOutbound,
 				sbox.Outbound{Type: ob.Type, Tag: fallback, Options: plainOpts},
 				sbox.Outbound{Type: "selector", Tag: ob.Tag, Options: &sbox.SelectorOutboundOptions{
 					Outbounds: []string{primary, fallback},

@@ -41,6 +41,7 @@ import (
 	forkedshadowsocks "github.com/legendary1205/rapido-go/internal/nodecore/shadowsocks"
 	forkedshadowtls "github.com/legendary1205/rapido-go/internal/nodecore/shadowtls"
 	forkedsnell "github.com/legendary1205/rapido-go/internal/nodecore/snell"
+	"github.com/legendary1205/rapido-go/internal/nodecore/spread"
 	forkedtrojan "github.com/legendary1205/rapido-go/internal/nodecore/trojan"
 	forkedtuic "github.com/legendary1205/rapido-go/internal/nodecore/tuic"
 	forkedvless "github.com/legendary1205/rapido-go/internal/nodecore/vless"
@@ -99,6 +100,9 @@ func OutboundRegistry() *outbound.Registry {
 	tor.RegisterOutbound(registry)
 	group.RegisterSelector(registry)
 	group.RegisterURLTest(registry)
+	// An exit served by several tunnels; cmd/node builds it for every
+	// direct_fallback exit.
+	spread.Register(registry)
 	return registry
 }
 
