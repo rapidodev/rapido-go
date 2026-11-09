@@ -639,6 +639,7 @@ export const CoreConfigPanels: FC<{
             fields={(d: Item): FieldSpec[] => outboundFields(d, types)}
             normalize={normalize}
             withDefaults={outboundDefaults}
+            linkImport={!balancer}
             issues={(d) => outboundIssues(normalize(d), index ?? -1, otherTags(doc, "outbounds", index), targets)}
           />
         );
