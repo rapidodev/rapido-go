@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/legendary1205/rapido-go/internal/db/generated"
+	"github.com/legendary1205/rapido-go/internal/integrationsettings"
 	"github.com/legendary1205/rapido-go/internal/proxysettings"
 	"github.com/legendary1205/rapido-go/internal/subscription"
 )
@@ -244,6 +245,7 @@ func (h *Handler) loadSubscriptionUser(c *gin.Context) (generated.User, bool) {
 // that isn't already a structured document).
 func (h *Handler) writeSubscription(c *gin.Context, user generated.User, format string, recordUserAgent bool) {
 	ctx := c.Request.Context()
+	iranDirect := h.subscriptionIranDirect(ctx)
 
 	var raw []byte
 	var links []string
@@ -252,14 +254,14 @@ func (h *Handler) writeSubscription(c *gin.Context, user generated.User, format 
 	case "sing-box":
 		var outbounds, hidden []map[string]any
 		if outbounds, hidden, err = h.buildUserSingBoxOutbounds(ctx, user); err == nil {
-			raw, err = subscription.SingBoxConfig(outbounds, hidden)
+			raw, err = subscription.SingBoxConfig(outbounds, hidden, iranDirect)
 		}
 	case "clash", "clash-meta":
 		raw, err = h.buildUserClashConfig(ctx, user, format == "clash-meta")
 	case "outline":
 		raw, err = h.buildUserOutlineConfig(ctx, user)
 	case "v2ray-json":
-		raw, err = h.buildUserV2rayJSONConfig(ctx, user)
+		raw, err = h.buildUserV2rayJSONConfig(ctx, user, iranDirect)
 	default: // v2ray
 		links, err = h.buildUserLinks(ctx, user)
 	}
@@ -269,6 +271,9 @@ func (h *Handler) writeSubscription(c *gin.Context, user generated.User, format 
 	}
 
 	h.setSubscriptionHeaders(c, user)
+	if routing := routingProfileHeader(c.GetHeader("User-Agent"), format, iranDirect); routing != "" {
+		c.Header(subscription.HappRoutingHeader, routing)
+	}
 	if recordUserAgent {
 		h.recordSubUserAgent(ctx, user.ID, c.GetHeader("User-Agent"))
 	}
@@ -492,11 +497,11 @@ func (h *Handler) buildUserOutlineConfig(ctx context.Context, user generated.Use
 	return subscription.OutlineConfig(servers)
 }
 
-func (h *Handler) buildUserV2rayJSONConfig(ctx context.Context, user generated.User) ([]byte, error) {
+func (h *Handler) buildUserV2rayJSONConfig(ctx context.Context, user generated.User, iranDirect bool) ([]byte, error) {
 	template, _ := subscription.LoadJSONTemplate(h.v2rayTemplatePath)
 	var configs []map[string]any
 	err := h.forEachUserHost(ctx, user, func(protocol string, settings proxysettings.Settings, remark, address string, eff subscription.EffectiveInbound) {
-		cfg, err := subscription.V2rayJSONConfig(remark, address, eff, settings, template)
+		cfg, err := subscription.V2rayJSONConfig(remark, address, eff, settings, template, iranDirect)
 		if err == nil && cfg != nil {
 			configs = append(configs, cfg)
 		}
@@ -505,6 +510,38 @@ func (h *Handler) buildUserV2rayJSONConfig(ctx context.Context, user generated.U
 		return nil, err
 	}
 	return subscription.V2rayJSONArray(configs)
+}
+
+// subscriptionIranDirect is the "send Iranian sites and IPs direct" setting:
+// the dashboard's choice, else SUBSCRIPTION_IRAN_DIRECT. Should the settings
+// row be unreadable, the environment's value still answers - a subscription
+// is never refused over this.
+func (h *Handler) subscriptionIranDirect(ctx context.Context) bool {
+	row, err := h.store.CachedGetIntegrationSettings(ctx)
+	if err != nil {
+		h.logger.Warn("could not read the Iran direct setting, using the environment's", "error", err)
+		return h.envDefaults.SubscriptionIranDirect
+	}
+	return integrationsettings.Resolve(row, h.envDefaults).SubscriptionIranDirect
+}
+
+// routingProfileHeader is the routing header value for this fetch, or "" for
+// none. Only Happ and INCY read one, and only from a subscription that is not
+// JSON: Happ ignores routing profiles on a JSON subscription, whose own
+// routing block decides instead. INCY takes Happ's link as it is.
+func routingProfileHeader(userAgent, format string, iranDirect bool) string {
+	if !iranDirect {
+		return ""
+	}
+	switch format {
+	case "v2ray-json", "sing-box", "outline":
+		return ""
+	}
+	lower := strings.ToLower(userAgent)
+	if !strings.HasPrefix(lower, "happ/") && !strings.HasPrefix(lower, "incy/") {
+		return ""
+	}
+	return subscription.HappIranDirectRouting()
 }
 
 func (h *Handler) setSubscriptionHeaders(c *gin.Context, user generated.User) {

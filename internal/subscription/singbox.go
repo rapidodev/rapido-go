@@ -215,7 +215,11 @@ func singBoxTLS(in EffectiveInbound) map[string]any {
 // the document's outbounds array, same as every entry in outbounds, but
 // never in the selector's own tag list, so an admin's client never offers
 // it as something to pick directly.
-func SingBoxConfig(outbounds, hidden []map[string]any) ([]byte, error) {
+//
+// iranDirect adds Iranian sites and IPs going out "direct", Iranian names
+// resolving on "dns-direct" and the rule-sets that takes (see
+// addSingBoxIranDirect). With it off the document is what it always was.
+func SingBoxConfig(outbounds, hidden []map[string]any, iranDirect bool) ([]byte, error) {
 	// sing-box refuses a whole document over a repeated tag, and "proxy" and "direct"
 	// are the selector and the bypass below.
 	taken := map[string]bool{"proxy": true, "direct": true}
@@ -301,6 +305,9 @@ func SingBoxConfig(outbounds, hidden []map[string]any) ([]byte, error) {
 			"final": "proxy",
 		},
 		"outbounds": allOutbounds,
+	}
+	if iranDirect {
+		addSingBoxIranDirect(doc)
 	}
 	return json.MarshalIndent(doc, "", "  ")
 }

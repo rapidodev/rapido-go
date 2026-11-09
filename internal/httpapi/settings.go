@@ -100,7 +100,7 @@ func (h *Handler) handleSetupTelegramTopics(c *gin.Context) {
 		TelegramLoggerChannelID: int8FromPtr(&body.ChatID), TelegramLoggerTopicID: current.TelegramLoggerTopicID,
 		TelegramDefaultVlessFlow: current.TelegramDefaultVlessFlow,
 		WebhookAddresses:         current.WebhookAddresses, WebhookSecret: current.WebhookSecret, DiscordWebhookUrl: current.DiscordWebhookUrl,
-		TelegramTopicIds: encodedTopics,
+		TelegramTopicIds: encodedTopics, SubscriptionIranDirect: current.SubscriptionIranDirect,
 	}
 	if _, err := h.store.Queries.UpdateIntegrationSettings(ctx, params); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"detail": "Could not save topic ids"})
@@ -130,6 +130,7 @@ type integrationSettingsDTO struct {
 	WebhookAddresses         []string         `json:"webhook_addresses"`
 	WebhookSecret            *string          `json:"webhook_secret"`      // masked
 	DiscordWebhookURL        *string          `json:"discord_webhook_url"` // masked
+	SubscriptionIranDirect   bool             `json:"subscription_iran_direct"`
 	UpdatedAt                *time.Time       `json:"updated_at"`
 }
 
@@ -180,6 +181,7 @@ func toIntegrationSettingsDTO(vals integrationsettings.Values, row generated.Int
 		WebhookAddresses:         vals.WebhookAddresses,
 		WebhookSecret:            maskedPtr(vals.WebhookSecret),
 		DiscordWebhookURL:        maskedPtr(vals.DiscordWebhookURL),
+		SubscriptionIranDirect:   vals.SubscriptionIranDirect,
 	}
 	if row.UpdatedAt.Valid {
 		t := row.UpdatedAt.Time
@@ -255,6 +257,11 @@ func (h *Handler) handleUpdateIntegrationSettings(c *gin.Context) {
 		WebhookAddresses:         current.WebhookAddresses,
 		WebhookSecret:            current.WebhookSecret,
 		DiscordWebhookUrl:        current.DiscordWebhookUrl,
+		// Forum topic ids belong to the logger group: kept unless the group
+		// itself changes below. Leaving them out here cleared them on every
+		// save, whatever field the save was for.
+		TelegramTopicIds:       current.TelegramTopicIds,
+		SubscriptionIranDirect: current.SubscriptionIranDirect,
 	}
 
 	if raw, ok := body["reseller_api_secret"]; ok {
@@ -316,6 +323,9 @@ func (h *Handler) handleUpdateIntegrationSettings(c *gin.Context) {
 			return
 		}
 		params.TelegramLoggerChannelID = int8FromPtr(v)
+		if params.TelegramLoggerChannelID != current.TelegramLoggerChannelID {
+			params.TelegramTopicIds = nil
+		}
 	}
 	if raw, ok := body["telegram_logger_topic_id"]; ok {
 		var v *int64
@@ -364,6 +374,14 @@ func (h *Handler) handleUpdateIntegrationSettings(c *gin.Context) {
 			return
 		}
 		params.DiscordWebhookUrl = textFromPtr(v)
+	}
+	if raw, ok := body["subscription_iran_direct"]; ok {
+		var v *bool
+		if err := json.Unmarshal(raw, &v); err != nil {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": "invalid subscription_iran_direct"})
+			return
+		}
+		params.SubscriptionIranDirect = pgBoolFromPtr(v)
 	}
 
 	updated, err := h.store.Queries.UpdateIntegrationSettings(ctx, params)

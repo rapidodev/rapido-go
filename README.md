@@ -20,6 +20,7 @@ Go + PostgreSQL + Redis on the backend, [sing-box](https://github.com/SagerNet/s
 - **Live logs** - a Logs page in the dashboard (admins with sudo) streams the panel's, the background jobs' and every node's log as it is written; a node only ships its log while someone is watching. Routine client noise (dropped connections, failed handshakes, unknown UUIDs) never reaches a node's journal - it is summed into one line a minute.
 - **WireGuard exits that fail open** - an exit whose tunnel dies falls back to a direct connection by itself and returns when the tunnel recovers; tunnel health is probed for real and shown per tunnel in the dashboard.
 - **Six subscription formats** - v2ray share links, sing-box, Clash, Clash Meta, Outline (SIP008), v2ray-json. `GET /sub/:token` picks one from the client's User-Agent; `GET /sub/:token/<format>` forces it.
+- **Iranian sites and IPs go direct** - on by default, the subscription tells each app to send Iranian traffic out of the user's own connection, never through the VPN: Happ and INCY get a routing profile in the `routing` header of their share-link subscription, sing-box apps get route and DNS rules with Chocolate4U's Iran rule-sets, the built-in v2ray-json profile gets a routing block, and the built-in Clash template already has the rules. Operator templates are served as written. V2Box and v2RayTun cannot receive routing from a subscription; their users turn on the app's own bypass for Iran. Switch it on the dashboard's **Integrations** page or with `SUBSCRIPTION_IRAN_DIRECT`.
 - **Dashboard** - React/Vite/Tailwind, served by the panel itself; no extra web server.
 - **Notifications and a Telegram console** - Telegram, Discord and generic webhooks on user and login events, plus an interactive Telegram bot for admins: system status, user search and cards with QR codes, create/extend/disable/reset/delete, node and tunnel health, and database backups.
 - **Gateway (optional)** - merge several independent installs so one subscription link carries hosts from all of them, with one traffic limit across them. A panel you add starts switched off. Starting it copies every user there, and only users it accepts are offered its servers. Both panels need this version.
@@ -186,9 +187,10 @@ Everything is env-var driven (`internal/config/config.go`), and the installer wr
 | `CONFIG_LOAD_INDICATOR` | `true` | Append the live load (`🟢 23%`) to config names that carry no `{...}` variable. `{LOAD}` written in a remark is always honoured. |
 | `CONFIG_LOAD_CAPACITY` | `10000` | Fallback for nodes without their own capacity: open client connections that count as 100% load on a node (sized for a 16-core node). Set a node's own capacity on the Nodes page. |
 | `CONFIG_SORT_BY_LOAD` | `false` | List each user's emptiest configs first in subscriptions. |
+| `SUBSCRIPTION_IRAN_DIRECT` | `true` | Tell client apps to send Iranian sites and IPs direct instead of through the VPN (Happ/INCY routing profile, sing-box rules, built-in v2ray-json routing). The dashboard's Integrations page overrides it. |
 | `POSTGRES_SHARED_BUFFERS`, `POSTGRES_EFFECTIVE_CACHE_SIZE` | sized from RAM | Postgres memory in the compose stack (`256MB` / `1GB` if unset); the installer sets them from the server's RAM. |
 
-Telegram, Discord and webhook settings exist as env vars too, but are also editable live from the dashboard's **Integrations** page, which overrides them.
+Telegram, Discord and webhook settings, and `SUBSCRIPTION_IRAN_DIRECT`, exist as env vars too, but are also editable live from the dashboard's **Integrations** page, which overrides them.
 
 To add API replicas, set `PANEL_API_REPLICAS` in `.env` to the intended count and run `docker compose -f docker-compose.prod.yml --env-file .env up -d --scale panel=<count>`. Keep `POSTGRES_MAX_CONNECTIONS` equal to the Postgres `max_connections` setting. Each API pool is then capped to its share after reserving 10 connections for the backend and 20 for migrations and operations. The generated Caddyfile sends node usage reports to the backend singleton and other API traffic to the scalable panel service.
 
@@ -261,6 +263,7 @@ Go و PostgreSQL و Redis در بک‌اند، [sing-box](https://github.com/Sag
 - **لاگ زنده** — صفحه‌ی «لاگ‌ها» در داشبورد (ادمین سودو) لاگ پنل، کارهای پس‌زمینه و هر نود را همان لحظه نشان می‌دهد؛ نود فقط وقتی کسی تماشا می‌کند لاگش را می‌فرستد. نویز عادی کلاینت‌ها (اتصال قطع‌شده، handshake ناموفق، UUID ناشناس) به ژورنال نود نمی‌رسد و در یک خط در دقیقه جمع می‌شود.
 - **خروجی‌های وایرگارد که قطع نمی‌شوند** — اگر تونل یک خروجی بمیرد، خودش روی اتصال مستقیم می‌افتد و با برگشتن تونل به آن برمی‌گردد؛ سلامت هر تونل واقعاً تست می‌شود و در داشبورد جدا نشان داده می‌شود.
 - **شش فرمت اشتراک** — v2ray، sing-box، Clash، Clash Meta، Outline و v2ray-json.
+- **سایت‌ها و IPهای ایرانی مستقیم** — به‌طور پیش‌فرض روشن است: اشتراک به هر برنامه می‌گوید ترافیک ایرانی را از اینترنت خود کاربر بفرستد، نه از VPN. Happ و INCY در هدر `routing` اشتراک لینکی‌شان یک پروفایل مسیریابی می‌گیرند، برنامه‌های sing-box قوانین مسیر و DNS با rule-setهای ایرانی Chocolate4U، پروفایل داخلی v2ray-json بخش routing، و قالب داخلی Clash از قبل این قوانین را دارد. قالب‌های خود اپراتور دست‌نخورده می‌مانند. V2Box و v2RayTun از اشتراک مسیریابی نمی‌گیرند و کاربرانشان باید عبور مستقیم ایران را در خود برنامه روشن کنند. از صفحه‌ی **Integrations** داشبورد یا با `SUBSCRIPTION_IRAN_DIRECT` عوضش کنید.
 - **داشبورد** — با React، که خود پنل سرو می‌کند؛ وب‌سرور جدا لازم نیست.
 - **اعلان‌ها و کنسول تلگرام** — تلگرام، دیسکورد و وب‌هوک؛ و یک ربات تلگرام تعاملی برای ادمین‌ها: وضعیت سیستم، جست‌وجوی کاربر و کارت کاربر با QR، ساخت/تمدید/غیرفعال/ریست/حذف، سلامت نودها و تونل‌ها، و بکاپ دیتابیس.
 - **Gateway (اختیاری)** — چند نصب مستقل را طوری ترکیب می‌کند که یک لینک اشتراک، هاست‌های همه‌شان را داشته باشد، با یک سهمیه‌ی حجم مشترک بین آن‌ها. پنلی که اضافه می‌کنید خاموش شروع می‌شود. با شروع آن همه‌ی کاربران به آنجا کپی می‌شوند و سرورهایش فقط به کاربرانی نشان داده می‌شود که آن پنل پذیرفته است. هر دو پنل باید همین نسخه را داشته باشند.
@@ -385,7 +388,7 @@ bash migrate-from-rapido.sh --target https://newpanel.example.com --user admin -
 
 ### پیکربندی
 
-همه‌چیز با متغیر محیطی تنظیم می‌شود و اسکریپت نصب، فایل `.env` آماده برایتان می‌نویسد. تنها متغیر الزامی `DATABASE_URL` است؛ بقیه مقدار پیش‌فرض کارا دارند. تنظیمات تلگرام، دیسکورد و وب‌هوک را می‌توانید زنده از صفحه‌ی **Integrations** داشبورد هم عوض کنید که بر متغیرهای محیطی اولویت دارد.
+همه‌چیز با متغیر محیطی تنظیم می‌شود و اسکریپت نصب، فایل `.env` آماده برایتان می‌نویسد. تنها متغیر الزامی `DATABASE_URL` است؛ بقیه مقدار پیش‌فرض کارا دارند. تنظیمات تلگرام، دیسکورد و وب‌هوک، و `SUBSCRIPTION_IRAN_DIRECT` (ارسال مستقیم سایت‌ها و IPهای ایرانی؛ پیش‌فرض `true`)، را می‌توانید زنده از صفحه‌ی **Integrations** داشبورد هم عوض کنید که بر متغیرهای محیطی اولویت دارد.
 
 متغیرهای شاخص خلوتی: `CONFIG_LOAD_INDICATOR` (پیش‌فرض `true`)، `CONFIG_LOAD_CAPACITY` (مقدار پیش‌فرض ظرفیت برای نودهایی که ظرفیت اختصاصی ندارند: تعداد اتصال باز کاربران که یک نود را ۱۰۰٪ پر حساب می‌کند؛ پیش‌فرض `10000`، مناسب یک نود ۱۶ هسته‌ای؛ ظرفیت هر نود را می‌توانید در صفحه‌ی نودها جدا تنظیم کنید) و `CONFIG_SORT_BY_LOAD` (پیش‌فرض `false`).
 

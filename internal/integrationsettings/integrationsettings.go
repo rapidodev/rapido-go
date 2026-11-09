@@ -36,11 +36,16 @@ type Values struct {
 	WebhookAddresses  []string
 	WebhookSecret     string
 	DiscordWebhookURL string
+
+	// SubscriptionIranDirect has subscriptions send Iranian sites and IPs
+	// out of the user's own connection instead of through the VPN.
+	SubscriptionIranDirect bool
 }
 
 // Resolve merges a raw integration_settings row over env, field by field:
 // "" / nil / empty-slice on the DB side all mean "not set, use env" -
-// matching settings.py's `value not in (None, "", [])` check exactly.
+// matching settings.py's `value not in (None, "", [])` check exactly. A
+// boolean column is "not set" only when NULL: false is a real choice.
 func Resolve(row generated.IntegrationSetting, env Values) Values {
 	out := env
 
@@ -82,6 +87,9 @@ func Resolve(row generated.IntegrationSetting, env Values) Values {
 	}
 	if addrs := decodeStrings(row.WebhookAddresses); len(addrs) > 0 {
 		out.WebhookAddresses = addrs
+	}
+	if row.SubscriptionIranDirect.Valid {
+		out.SubscriptionIranDirect = row.SubscriptionIranDirect.Bool
 	}
 
 	return out

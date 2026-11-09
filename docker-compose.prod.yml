@@ -177,6 +177,9 @@ services:
       USE_CUSTOM_JSON_FOR_STREISAND: ${USE_CUSTOM_JSON_FOR_STREISAND:-false}
       USE_CUSTOM_JSON_FOR_HAPP: ${USE_CUSTOM_JSON_FOR_HAPP:-false}
       USE_CUSTOM_JSON_FOR_NPVTUNNEL: ${USE_CUSTOM_JSON_FOR_NPVTUNNEL:-false}
+      # Send Iranian sites and IPs direct in subscriptions (see .env.prod.example);
+      # the dashboard's Integrations page overrides it.
+      SUBSCRIPTION_IRAN_DIRECT: ${SUBSCRIPTION_IRAN_DIRECT:-true}
       # Which config is emptier: every config name in a subscription gets its
       # live load appended (`🇩🇪 Germany 🟢 23%`) when the nodes report it.
       # CAPACITY is the fallback number of open client connections that counts

@@ -36,7 +36,11 @@ const v2rayJSONEmail = "https://github.com/legendary1205/rapido"
 // list (EffectiveInbound.RandomUserAgent exists but isn't acted on here
 // either - the same scope cut SingBoxConfig's own doc comment commits to,
 // applied consistently for this format's fallback).
-func V2rayJSONConfig(remark, address string, in EffectiveInbound, settings proxysettings.Settings, template map[string]any) (map[string]any, error) {
+//
+// iranDirect gives that fallback a routing block sending Iranian sites and
+// IPs out "direct" (see irandirect.go). It never touches a template: the
+// operator's own routing is theirs to write.
+func V2rayJSONConfig(remark, address string, in EffectiveInbound, settings proxysettings.Settings, template map[string]any, iranDirect bool) (map[string]any, error) {
 	switch in.Network {
 	case "kcp", "splithttp", "xhttp":
 		return nil, nil
@@ -124,6 +128,9 @@ func V2rayJSONConfig(remark, address string, in EffectiveInbound, settings proxy
 			{"tag": "direct", "protocol": "freedom"},
 			{"tag": "block", "protocol": "blackhole"},
 		},
+	}
+	if iranDirect {
+		config["routing"] = v2rayJSONIranRouting()
 	}
 	return config, nil
 }

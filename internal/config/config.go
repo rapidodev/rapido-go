@@ -158,6 +158,12 @@ type Config struct {
 	WebhookSecret     string
 	DiscordWebhookURL string
 
+	// SubscriptionIranDirect (SUBSCRIPTION_IRAN_DIRECT, default true) has
+	// subscriptions tell client apps to send Iranian sites and IPs out of the
+	// user's own connection rather than through the VPN - see
+	// internal/subscription/irandirect.go for what each format gets.
+	SubscriptionIranDirect bool
+
 	// LoginNotifyWhitelist mirrors LOGIN_NOTIFY_WHITE_LIST: client IPs that
 	// never get a "login succeeded" report (a failed login is always
 	// reported regardless). Static/env-only, like the Notify* flags below -
@@ -225,6 +231,7 @@ func Load() (*Config, error) {
 	cfg.UseCustomJSONForStreisand = getBool("USE_CUSTOM_JSON_FOR_STREISAND", false)
 	cfg.UseCustomJSONForHapp = getBool("USE_CUSTOM_JSON_FOR_HAPP", false)
 	cfg.UseCustomJSONForNPVTunnel = getBool("USE_CUSTOM_JSON_FOR_NPVTUNNEL", false)
+	cfg.SubscriptionIranDirect = getBool("SUBSCRIPTION_IRAN_DIRECT", true)
 
 	cfg.NotifyStatusChange = getBool("NOTIFY_STATUS_CHANGE", true)
 	cfg.NotifyUserCreated = getBool("NOTIFY_USER_CREATED", true)

@@ -60,3 +60,22 @@ func TestOriginsAreTrimmedAndEmptyEntriesRemoved(t *testing.T) {
 		t.Fatal("configured browser origins did not preserve the explicit allowlist")
 	}
 }
+
+func TestIranianTrafficGoesDirectUnlessTurnedOff(t *testing.T) {
+	configTestEnvironment(t)
+	t.Setenv("SUBSCRIPTION_IRAN_DIRECT", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.SubscriptionIranDirect {
+		t.Fatal("SUBSCRIPTION_IRAN_DIRECT should default to on")
+	}
+	t.Setenv("SUBSCRIPTION_IRAN_DIRECT", "false")
+	if cfg, err = Load(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SubscriptionIranDirect {
+		t.Fatal("SUBSCRIPTION_IRAN_DIRECT=false was ignored")
+	}
+}
