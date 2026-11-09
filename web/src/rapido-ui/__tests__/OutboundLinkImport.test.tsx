@@ -40,6 +40,7 @@ beforeEach(async () => {
     if (url === "/settings/xray-config") return opts?.method === "PUT" ? { ...doc, ...(opts.body as object) } : doc;
     if (url === "/inbounds") return { vless: [{ tag: "main", protocol: "vless", port: 20100, ports: [20100] }] };
     if (url === "/monitoring") return { hosts: [] };
+    if (url === "/nodes") return [];
     return {};
   });
 });

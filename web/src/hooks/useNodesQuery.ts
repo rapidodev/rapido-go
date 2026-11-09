@@ -19,8 +19,12 @@ export const useNodesQuery = (enabled = true) =>
     // A node mid-handshake settles within seconds; poll only while one
     // actually is connecting, so a healthy fleet makes no background
     // requests at all (mirrors the old dashboard's own hasPending gate).
-    refetchInterval: (query) =>
-      (query.state.data ?? []).some((n) => n.status === "connecting") ? 3000 : false,
+    // Anything but a list (an error page through a proxy, say) is no reason to
+    // poll, and must not throw: this runs inside every page that lists nodes.
+    refetchInterval: (query) => {
+      const nodes = query.state.data;
+      return Array.isArray(nodes) && nodes.some((n) => n.status === "connecting") ? 3000 : false;
+    },
     enabled,
   });
 
