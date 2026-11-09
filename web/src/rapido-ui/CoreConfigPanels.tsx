@@ -62,7 +62,7 @@ import { FormChoices, ItemForm, issueMessage } from "./CoreConfigForm";
 import { DataTable, DataTableColumn } from "./DataTable";
 import { Input } from "./Input";
 import { Modal } from "./Modal";
-import { OutboundTestCell, OutboundTestControls, useOutboundTests } from "./OutboundTests";
+import { OutboundTestCell, OutboundTestControls, OutboundTestTarget, useOutboundTests } from "./OutboundTests";
 import { Select } from "./Select";
 
 // The Core Config page's tabs: one form-driven view per section of the document,
@@ -277,6 +277,13 @@ const PortsSummary: FC<{ ports: readonly number[] }> = ({ ports }) => {
 
 const emptyChoices: FormChoices = { outboundTargets: [], balancerMembers: [], inboundTags: [], portsOf: () => [] };
 
+/** JSON with every object's keys in order: two items are the same outbound whatever order a form or
+ * the code view left their keys in. */
+const canonical = (value: unknown): string =>
+  JSON.stringify(value, (_, v: unknown) =>
+    isObject(v) ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, v[k]])) : v
+  );
+
 type TunnelHealth = { up: number; total: number; fallback: number; detail: string[] };
 
 export const CoreConfigPanels: FC<{
@@ -288,12 +295,15 @@ export const CoreConfigPanels: FC<{
   inboundPorts: Record<string, number[]> | undefined;
   /** Inbounds the server already has: their tag is locked, since hosts hang off it. */
   serverInboundTags: ReadonlySet<string>;
+  /** The outbounds as last saved, which is what the nodes run. One the document holds exactly so is
+   * tested by tag; one that is new or changed, as a draft. Absent: every outbound goes by tag. */
+  savedOutbounds?: readonly unknown[];
   inboundActions?: ReactNode;
   /** The code view. Stays mounted across tabs, so what is being typed there survives a look elsewhere. */
   advanced: ReactNode;
   /** Shown on the form tabs while the document doesn't parse. */
   invalidNotice: ReactNode;
-}> = ({ doc, issues, tab, onTab, onChange, inboundPorts, serverInboundTags, inboundActions, advanced, invalidNotice }) => {
+}> = ({ doc, issues, tab, onTab, onChange, inboundPorts, serverInboundTags, savedOutbounds, inboundActions, advanced, invalidNotice }) => {
   const { t: rawT } = useTranslation();
   const t = rawT as Translate;
   const [editing, setEditing] = useState<Editing | null>(null);
@@ -314,8 +324,14 @@ export const CoreConfigPanels: FC<{
   // Outbound tests run on the nodes; which ones to ask is picked here.
   const tests = useOutboundTests();
   const [testNode, setTestNode] = useState(0);
-  const { data: nodeList } = useNodesQuery(tab === "outbounds");
+  const { data: nodeList } = useNodesQuery(tab === "outbounds" || editing?.section === "outbounds");
   const nodes = Array.isArray(nodeList) ? nodeList : [];
+  const saved = useMemo(() => {
+    if (!savedOutbounds) return null;
+    const byTag = new Map<string, string>();
+    for (const o of savedOutbounds) if (isObject(o)) byTag.set(str(o.tag), canonical(o));
+    return byTag;
+  }, [savedOutbounds]);
   const tunnels = useMemo(() => {
     const byName = new Map<string, TunnelHealth>();
     for (const host of monitoring?.hosts ?? []) {
@@ -518,6 +534,29 @@ export const CoreConfigPanels: FC<{
     { key: "used", header: t("rapido.coreForm.colUsedBy"), cell: ({ item }) => <Muted>{usedBy(str(item.tag))}</Muted> },
   ];
 
+  // What the nodes run is the saved outbound: a row still exactly that is tested by its tag, so its
+  // tunnel and fallback show; anything else is tested as it stands, alone.
+  const testTarget = (row: Row): OutboundTestTarget => {
+    const tag = str(row.item.tag);
+    return saved === null || saved.get(tag) === canonical(row.item) ? tag : { tag, draft: row.item };
+  };
+
+  // A draft the server would refuse is not sent: the row says to fix it instead.
+  const runTests = (rows: Row[], all: boolean) => {
+    const send: OutboundTestTarget[] = [];
+    const held: OutboundTestTarget[] = [];
+    const seen = new Set<string>();
+    for (const row of rows) {
+      const tag = str(row.item.tag);
+      if (tag === "" || seen.has(tag)) continue;
+      seen.add(tag);
+      const target = testTarget(row);
+      (typeof target !== "string" && issuesFor("outbound")(row.index).length > 0 ? held : send).push(target);
+    }
+    if (held.length > 0) tests.refuse(held, t("rapido.coreForm.testFixFirst"));
+    if (send.length > 0) void (all ? tests.testAll(send, testNode) : tests.test(send, testNode));
+  };
+
   const testOutbound = (row: Row) => {
     const tag = str(row.item.tag);
     return (
@@ -525,7 +564,7 @@ export const CoreConfigPanels: FC<{
         label={t("rapido.coreForm.testOne")}
         icon={BoltIcon}
         disabled={tag === "" || tests.byTag[tag]?.running === true}
-        onClick={() => void tests.test([tag], testNode)}
+        onClick={() => runTests([row], false)}
       />
     );
   };
@@ -668,6 +707,7 @@ export const CoreConfigPanels: FC<{
             normalize={normalize}
             withDefaults={outboundDefaults}
             linkImport={!balancer}
+            draftTest={balancer ? undefined : { nodes, nodeId: testNode, onNode: setTestNode }}
             issues={(d) => outboundIssues(normalize(d), index ?? -1, otherTags(doc, "outbounds", index), targets)}
           />
         );
@@ -830,7 +870,7 @@ export const CoreConfigPanels: FC<{
               onNode={setTestNode}
               testing={tests.testingAll}
               disabled={plainRows.length === 0}
-              onTestAll={() => void tests.testAll([...new Set(plainRows.map((row) => str(row.item.tag)).filter(Boolean))], testNode)}
+              onTestAll={() => runTests(plainRows, true)}
             />
           }
           rowActions={testOutbound}

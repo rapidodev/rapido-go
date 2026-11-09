@@ -1,4 +1,5 @@
 import { FC, Fragment, ReactNode, useMemo, useState } from "react";
+import { BoltIcon } from "@heroicons/react/24/outline";
 import { useTranslation } from "react-i18next";
 import { ConfigIssue, Item, asList, asStrings, isObject, parseDocObject, str } from "utils/coreConfigRules";
 import { FieldSpec, splitList } from "utils/coreConfigFields";
@@ -11,12 +12,14 @@ import {
 } from "utils/coreConfigGenerate";
 import { formatInboundPorts, parseInboundPortInput } from "utils/inboundPorts";
 import { SHADOWTLS_INNER_KEY_BYTES } from "types/Inbound";
+import { Node } from "types/Node";
 import { Button } from "./Button";
 import { Checkbox } from "./Checkbox";
 import { Input } from "./Input";
 import { JsonEditor } from "./JsonEditor";
 import { Modal } from "./Modal";
 import { OutboundLinkImport } from "./OutboundLinkImport";
+import { OutboundTestCell, OutboundTestNodeSelect, useOutboundTests } from "./OutboundTests";
 import { Segmented } from "./Segmented";
 import { Select } from "./Select";
 import { ltrIsolate } from "./bidi";
@@ -210,11 +213,29 @@ export type ItemFormProps = {
   note?: ReactNode;
   /** A plain outbound: its JSON tab offers a share-link box that fills the editor in. */
   linkImport?: boolean;
+  /** A plain outbound can be tested as it stands, before it is saved, from these nodes. */
+  draftTest?: DraftTest;
   onSave: (item: Item) => void;
   onClose: () => void;
 };
 
-export const ItemForm: FC<ItemFormProps> = ({ title, initial, fields, issues, normalize, withDefaults, choices, note, linkImport, onSave, onClose }) => {
+/** Where the dialog's Test runs: the page's own node choice, shared with its table. */
+export type DraftTest = { nodes: readonly Node[]; nodeId: number; onNode: (id: number) => void };
+
+export const ItemForm: FC<ItemFormProps> = ({
+  title,
+  initial,
+  fields,
+  issues,
+  normalize,
+  withDefaults,
+  choices,
+  note,
+  linkImport,
+  draftTest,
+  onSave,
+  onClose,
+}) => {
   const { t: rawT } = useTranslation();
   const t = rawT as Translate;
   const [draft, setDraft] = useState<Item>(initial);
@@ -227,6 +248,8 @@ export const ItemForm: FC<ItemFormProps> = ({ title, initial, fields, issues, no
   const [epoch, setEpoch] = useState(0);
   const [realityPublic, setRealityPublic] = useState<string | null>(null);
   const [realityFailed, setRealityFailed] = useState(false);
+  const tests = useOutboundTests();
+  const [testedTag, setTestedTag] = useState<string | null>(null);
 
   const specs = useMemo(() => fields(draft), [fields, draft]);
   const problems = useMemo(() => issues(draft), [issues, draft]);
@@ -279,16 +302,33 @@ export const ItemForm: FC<ItemFormProps> = ({ title, initial, fields, issues, no
     setAttempted(false);
   };
 
-  const save = () => {
+  /** What Save would hand back, from whichever tab is showing; null when it isn't ready. */
+  const ready = (): Item | null => {
     const current = mode === "json" ? parseJson() : draft;
-    if (!current) return;
+    if (!current) return null;
     if (mode === "json") setDraft(current);
     if (issues(current).length > 0 || (mode === "form" && Object.values(badPorts).some(Boolean))) {
       setAttempted(true);
-      return;
+      return null;
     }
-    onSave(normalize(current));
+    return normalize(current);
   };
+
+  const save = () => {
+    const item = ready();
+    if (item) onSave(item);
+  };
+
+  // The draft goes exactly as Save would store it, checked the same way first.
+  const testDraft = () => {
+    if (!draftTest) return;
+    const item = ready();
+    if (!item) return;
+    const tag = str(item.tag);
+    setTestedTag(tag);
+    void tests.test([{ tag, draft: item }], draftTest.nodeId);
+  };
+  const testState = testedTag === null ? undefined : tests.byTag[testedTag];
 
   const generate = async (spec: FieldSpec) => {
     switch (spec.generate) {
@@ -510,6 +550,30 @@ export const ItemForm: FC<ItemFormProps> = ({ title, initial, fields, issues, no
           {looseProblems.map((issue) => (
             <p key={`${issue.kind}-${issue.field ?? ""}-${issue.value ?? ""}`}>{issueMessage(t, issue)}</p>
           ))}
+        </div>
+      )}
+
+      {draftTest && (
+        <div className="mt-3 flex flex-col gap-2 rounded-lg border border-rapido-border p-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="chip"
+              tone="accent"
+              className="inline-flex items-center gap-1"
+              disabled={testState?.running === true}
+              onClick={testDraft}
+            >
+              <BoltIcon className="h-3.5 w-3.5" aria-hidden="true" />
+              {testState?.running ? t("rapido.coreForm.testRunning") : t("rapido.coreForm.testDraft")}
+            </Button>
+            <OutboundTestNodeSelect nodes={draftTest.nodes} nodeId={draftTest.nodeId} onNode={draftTest.onNode} />
+            <span className="text-xs text-rapido-muted">{t("rapido.coreForm.testDraftHint")}</span>
+          </div>
+          {testState && (
+            <div data-testid="draft-test-result">
+              <OutboundTestCell state={testState} />
+            </div>
+          )}
         </div>
       )}
 

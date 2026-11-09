@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -597,6 +598,18 @@ type outboundSpec struct {
 	TLSServerName string `json:"tls_server_name,omitempty"`
 	TLSInsecure   bool   `json:"tls_insecure,omitempty"`
 
+	// The rest of a share link: see buildOutboundTLS and buildOutboundTransport.
+	// The panel only sends them to an agent that pulls with schema 5.
+	TLSALPN              []string `json:"tls_alpn,omitempty"`
+	TLSFingerprint       string   `json:"tls_fingerprint,omitempty"`
+	TLSECHConfig         string   `json:"tls_ech_config,omitempty"`
+	RealityPublicKey     string   `json:"reality_public_key,omitempty"`
+	RealityShortID       string   `json:"reality_short_id,omitempty"`
+	TransportType        string   `json:"transport_type,omitempty"`
+	TransportPath        string   `json:"transport_path,omitempty"`
+	TransportHost        string   `json:"transport_host,omitempty"`
+	TransportServiceName string   `json:"transport_service_name,omitempty"`
+
 	BindInterface string `json:"bind_interface,omitempty"`
 	// DirectFallback keeps this outbound working when its BindInterface is
 	// down: traffic is sent over a plain direct connection until the
@@ -625,7 +638,7 @@ type routingRuleSpec struct {
 	Network       []string `json:"network,omitempty"`
 	Protocol      []string `json:"protocol,omitempty"`
 
-	// The matchers a pull with schema=4 announces this agent understands.
+	// The matchers a pull with schema=4 (or later) announces this agent understands.
 	DomainRegex       []string `json:"domain_regex,omitempty"`
 	SourceIPCIDR      []string `json:"source_ip_cidr,omitempty"`
 	SourceIPIsPrivate bool     `json:"source_ip_is_private,omitempty"`
@@ -1227,11 +1240,73 @@ const (
 // transport level - the admin never gets a toggle to disable it, unlike
 // the classic TCP protocols (vmess/trojan/vless) where TLS is genuinely
 // optional and ob.TLSEnabled reflects a real admin choice.
+//
+// On top of that: ALPN, a uTLS fingerprint, ECH, and REALITY, which turns TLS on
+// by itself and imitates chrome when no fingerprint is given - it rides on uTLS
+// and needs one. uTLS and REALITY exist only in a build with -tags with_utls,
+// which is how the node is built; without it sing-box refuses them at start.
 func buildOutboundTLS(ob outboundSpec, forceEnabled bool) *sbox.OutboundTLSOptions {
-	if !forceEnabled && !ob.TLSEnabled {
+	reality := ob.RealityPublicKey != ""
+	if !forceEnabled && !ob.TLSEnabled && !reality {
 		return nil
 	}
-	return &sbox.OutboundTLSOptions{Enabled: true, ServerName: ob.TLSServerName, Insecure: ob.TLSInsecure}
+	tls := &sbox.OutboundTLSOptions{Enabled: true, ServerName: ob.TLSServerName, Insecure: ob.TLSInsecure, ALPN: ob.TLSALPN}
+	fingerprint := ob.TLSFingerprint
+	if reality {
+		tls.Reality = &sbox.OutboundRealityOptions{Enabled: true, PublicKey: ob.RealityPublicKey, ShortID: ob.RealityShortID}
+		if fingerprint == "" {
+			fingerprint = "chrome"
+		}
+	}
+	if fingerprint != "" {
+		tls.UTLS = &sbox.OutboundUTLSOptions{Enabled: true, Fingerprint: fingerprint}
+	}
+	if ob.TLSECHConfig != "" {
+		tls.ECH = &sbox.OutboundECHOptions{Enabled: true, Config: echConfigPEM(ob.TLSECHConfig)}
+	}
+	return tls
+}
+
+// echConfigPEM turns the base64 ECHConfigList the panel stores into the PEM
+// block sing-box reads a config from. What isn't base64 is passed on as it is,
+// for sing-box to refuse with its own reason.
+func echConfigPEM(list string) []string {
+	trimmed := strings.TrimRight(list, "=")
+	raw, err := base64.RawStdEncoding.DecodeString(trimmed)
+	if err != nil {
+		raw, err = base64.RawURLEncoding.DecodeString(trimmed)
+	}
+	if err != nil {
+		return []string{list}
+	}
+	return []string{strings.TrimSpace(string(pem.EncodeToMemory(&pem.Block{Type: "ECH CONFIGS", Bytes: raw})))}
+}
+
+// buildOutboundTransport is the V2Ray transport a vless/vmess/trojan outbound
+// wraps the protocol in; nil runs it straight over TCP. "http" is HTTP/2, which
+// may name several hosts, comma-separated, as Xray's h2 does.
+func buildOutboundTransport(ob outboundSpec) (*sbox.V2RayTransportOptions, error) {
+	switch ob.TransportType {
+	case "":
+		return nil, nil
+	case "ws":
+		ws := sbox.V2RayWebsocketOptions{Path: ob.TransportPath}
+		if ob.TransportHost != "" {
+			ws.Headers = badoption.HTTPHeader{"Host": badoption.Listable[string]{ob.TransportHost}}
+		}
+		return &sbox.V2RayTransportOptions{Type: "ws", WebsocketOptions: ws}, nil
+	case "grpc":
+		return &sbox.V2RayTransportOptions{Type: "grpc", GRPCOptions: sbox.V2RayGRPCOptions{ServiceName: ob.TransportServiceName}}, nil
+	case "httpupgrade":
+		return &sbox.V2RayTransportOptions{Type: "httpupgrade", HTTPUpgradeOptions: sbox.V2RayHTTPUpgradeOptions{Path: ob.TransportPath, Host: ob.TransportHost}}, nil
+	case "http":
+		h := sbox.V2RayHTTPOptions{Path: ob.TransportPath}
+		if ob.TransportHost != "" {
+			h.Host = strings.Split(ob.TransportHost, ",")
+		}
+		return &sbox.V2RayTransportOptions{Type: "http", HTTPOptions: h}, nil
+	}
+	return nil, fmt.Errorf("outbound %s: unsupported transport %q", ob.Tag, ob.TransportType)
 }
 
 // resolveOutboundTag maps a Core Config outbound_tag reference (which uses
@@ -1277,23 +1352,8 @@ func leafOutboundOptions(ob outboundSpec, bind string) (any, error) {
 		return &sbox.HTTPOutboundOptions{DialerOptions: dialerOptions, ServerOptions: server, Username: ob.Username, Password: ob.Password}, nil
 	case "shadowsocks":
 		return &sbox.ShadowsocksOutboundOptions{DialerOptions: dialerOptions, ServerOptions: server, Method: ob.Method, Password: ob.Password}, nil
-	case "vmess":
-		return &sbox.VMessOutboundOptions{
-			DialerOptions: dialerOptions, ServerOptions: server,
-			UUID: ob.UUID, Security: ob.Security,
-			OutboundTLSOptionsContainer: sbox.OutboundTLSOptionsContainer{TLS: buildOutboundTLS(ob, false)},
-		}, nil
-	case "trojan":
-		return &sbox.TrojanOutboundOptions{
-			DialerOptions: dialerOptions, ServerOptions: server, Password: ob.Password,
-			OutboundTLSOptionsContainer: sbox.OutboundTLSOptionsContainer{TLS: buildOutboundTLS(ob, false)},
-		}, nil
-	case "vless":
-		return &sbox.VLESSOutboundOptions{
-			DialerOptions: dialerOptions, ServerOptions: server,
-			UUID: ob.UUID, Flow: ob.Flow,
-			OutboundTLSOptionsContainer: sbox.OutboundTLSOptionsContainer{TLS: buildOutboundTLS(ob, false)},
-		}, nil
+	case "vmess", "trojan", "vless":
+		return streamOutboundOptions(ob, dialerOptions, server)
 	case "hysteria2":
 		// QUIC-based - TLS is mandatory at the transport level, not an
 		// admin-toggleable option like the classic TCP protocols above.
@@ -1365,6 +1425,36 @@ func leafOutboundOptions(ob outboundSpec, bind string) (any, error) {
 		}, nil
 	}
 	return nil, fmt.Errorf("unknown outbound type: %s", ob.Type)
+}
+
+// streamOutboundOptions builds the three TCP protocols whose TLS and transport
+// are configurable: TLS (or REALITY) is optional, and a V2Ray transport may sit
+// between it and the protocol.
+func streamOutboundOptions(ob outboundSpec, dialerOptions sbox.DialerOptions, server sbox.ServerOptions) (any, error) {
+	transport, err := buildOutboundTransport(ob)
+	if err != nil {
+		return nil, err
+	}
+	tls := sbox.OutboundTLSOptionsContainer{TLS: buildOutboundTLS(ob, false)}
+	switch ob.Type {
+	case "vmess":
+		return &sbox.VMessOutboundOptions{
+			DialerOptions: dialerOptions, ServerOptions: server,
+			UUID: ob.UUID, Security: ob.Security,
+			OutboundTLSOptionsContainer: tls, Transport: transport,
+		}, nil
+	case "trojan":
+		return &sbox.TrojanOutboundOptions{
+			DialerOptions: dialerOptions, ServerOptions: server, Password: ob.Password,
+			OutboundTLSOptionsContainer: tls, Transport: transport,
+		}, nil
+	default:
+		return &sbox.VLESSOutboundOptions{
+			DialerOptions: dialerOptions, ServerOptions: server,
+			UUID: ob.UUID, Flow: ob.Flow,
+			OutboundTLSOptionsContainer: tls, Transport: transport,
+		}, nil
+	}
 }
 
 // Suffixes of the two outbounds a direct_fallback outbound is built from.
@@ -1754,7 +1844,7 @@ type pulledConfig struct {
 // implement that just answers 200 with the full body, which the version
 // comparison below handles exactly as it always did.
 func (s *server) pullOnce(ctx context.Context, client *http.Client, cfg config) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.PanelURL+"/api/internal/node-config?schema=4", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.PanelURL+"/api/internal/node-config?schema=5", nil)
 	if err != nil {
 		s.logger.Error("pull config: build request", "error", err)
 		return

@@ -60,6 +60,43 @@ describe("useOutboundTests", () => {
   });
 });
 
+describe("draft tests", () => {
+  it("sends a draft whole beside the tags, and marks its state as a draft's", async () => {
+    fetchMock.mockImplementation(async (_url: string, opts: { body: { tags?: string[]; outbounds?: { tag: string }[] } }) => ({
+      url: "",
+      nodes: [],
+      results: [
+        ...(opts.body.tags ?? []).map((tag) => ({ ...base, tag, delay_ms: 50, status_code: 204 })),
+        ...(opts.body.outbounds ?? []).map((o) => ({ ...base, tag: o.tag, delay_ms: 90, status_code: 204, draft: true })),
+      ],
+    }));
+    const { result } = renderHook(() => useOutboundTests());
+    const draft = { tag: "new", type: "vless", server: "h", server_port: 443, uuid: "u" };
+
+    await act(() => result.current.test(["exit", { tag: "new", draft }], 2));
+
+    expect(fetchMock.mock.calls[0][1]).toEqual({ method: "POST", body: { tags: ["exit"], outbounds: [draft], node_id: 2 } });
+    expect(result.current.byTag.exit).toEqual({ running: false, results: [{ ...base, tag: "exit", delay_ms: 50, status_code: 204 }] });
+    expect(result.current.byTag.new).toEqual({ running: false, draft: true, results: [{ ...base, tag: "new", delay_ms: 90, status_code: 204, draft: true }] });
+
+    await act(() => result.current.test([{ tag: "alone", draft: { tag: "alone", type: "direct" } }], 0));
+    expect(fetchMock.mock.calls[1][1]).toEqual({ method: "POST", body: { outbounds: [{ tag: "alone", type: "direct" }] } });
+  });
+
+  it("can hold a draft back with the reason, sending nothing", () => {
+    const { result } = renderHook(() => useOutboundTests());
+    act(() => result.current.refuse([{ tag: "bad", draft: { tag: "bad" } }], "Fix this outbound's problems first."));
+    expect(result.current.byTag.bad).toEqual({ running: false, draft: true, error: "Fix this outbound's problems first." });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("labels a draft's result", () => {
+    render(<OutboundTestCell state={{ running: false, draft: true, results: [{ ...base, tag: "new", delay_ms: 90, status_code: 204, draft: true }] }} />);
+    expect(screen.getByText("draft")).toHaveAttribute("title", expect.stringContaining("tested on its own"));
+    expect(screen.getByText("90ms (204)")).toBeInTheDocument();
+  });
+});
+
 describe("OutboundTestCell", () => {
   it("shows nothing before a test", () => {
     render(<OutboundTestCell />);

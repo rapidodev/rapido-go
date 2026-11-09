@@ -1,6 +1,7 @@
 package xrayimport
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -272,8 +273,7 @@ func parseOutbound(ob xrayOutbound) (*Outbound, string) {
 		out.UUID = s.Vnext[0].Users[0].ID
 		out.Flow = s.Vnext[0].Users[0].Flow
 		out.Security = s.Vnext[0].Users[0].Security
-		applyOutboundTLS(out, ob.StreamSettings)
-		return out, ""
+		return applyOutboundStream(out, ob.StreamSettings)
 	case "trojan", "shadowsocks", "socks", "http":
 		out.Type = ob.Protocol
 		var s xrayOutboundServerSettings
@@ -285,6 +285,9 @@ func parseOutbound(ob xrayOutbound) (*Outbound, string) {
 		out.Password = s.Servers[0].Password
 		out.Method = s.Servers[0].Method
 		out.Username = s.Servers[0].User
+		if ob.Protocol == "trojan" {
+			return applyOutboundStream(out, ob.StreamSettings)
+		}
 		applyOutboundTLS(out, ob.StreamSettings)
 		return out, ""
 	case "":
@@ -294,12 +297,139 @@ func parseOutbound(ob xrayOutbound) (*Outbound, string) {
 	}
 }
 
+// applyOutboundTLS is the TLS a socks, http or shadowsocks outbound brings: its
+// server name, and nothing else.
 func applyOutboundTLS(out *Outbound, stream xrayStreamSettings) {
 	if stream.Security != "tls" || stream.TLSSettings == nil {
 		return
 	}
 	out.TLSEnabled = true
 	out.TLSServerName = stream.TLSSettings.ServerName
+}
+
+// applyOutboundStream reads the security and transport of a vless, vmess or
+// trojan outbound. What only narrows how it connects (an unknown fingerprint,
+// spiderX) is dropped with a warning; what would make it connect some other way
+// (a transport or a security this panel can't build) skips the outbound, as
+// saving it without would give a server it can't talk to.
+func applyOutboundStream(out *Outbound, stream xrayStreamSettings) (*Outbound, string) {
+	var warnings []string
+	warn := func(format string, args ...any) {
+		warnings = append(warnings, fmt.Sprintf("outbound %q: ", out.Tag)+fmt.Sprintf(format, args...))
+	}
+	skip := func(format string, args ...any) (*Outbound, string) {
+		return nil, fmt.Sprintf("outbound %q: ", out.Tag) + fmt.Sprintf(format, args...) + ", skipped"
+	}
+	fingerprint := func(fp string) string {
+		if fp == "" || fp == "none" {
+			return ""
+		}
+		if !validHostFingerprint[fp] {
+			warn("fingerprint %q isn't one this panel knows, dropped", fp)
+			return ""
+		}
+		return fp
+	}
+
+	switch stream.Security {
+	case "", "none":
+	case "tls":
+		tls := stream.TLSSettings
+		if tls == nil {
+			tls = &xrayTLSSettings{}
+		}
+		out.TLSEnabled = true
+		out.TLSServerName = tls.ServerName
+		out.TLSInsecure = tls.AllowInsecure
+		out.TLSALPN = tls.Alpn
+		out.TLSFingerprint = fingerprint(tls.Fingerprint)
+		if tls.ECHConfigList != "" {
+			if isECHConfigList(tls.ECHConfigList) {
+				out.TLSECHConfig = tls.ECHConfigList
+			} else {
+				warn("echConfigList isn't an ECHConfigList in base64 (a DNS lookup can't be carried over), dropped")
+			}
+		}
+	case "reality":
+		rl := stream.RealitySettings
+		if rl == nil || rl.PublicKey == "" {
+			return skip("REALITY without a publicKey can't be connected to")
+		}
+		out.TLSEnabled = true
+		out.TLSServerName = rl.ServerName
+		if out.TLSServerName == "" && len(rl.ServerNames) > 0 {
+			out.TLSServerName = rl.ServerNames[0]
+		}
+		out.RealityPublicKey = rl.PublicKey
+		out.RealityShortID = rl.ShortID
+		if out.RealityShortID == "" && len(rl.ShortIds) > 0 {
+			out.RealityShortID = rl.ShortIds[0]
+		}
+		out.TLSFingerprint = fingerprint(rl.Fingerprint)
+		if rl.SpiderX != "" {
+			warn("REALITY spiderX has no equivalent here and was dropped")
+		}
+	default:
+		return skip("security %q isn't supported here", stream.Security)
+	}
+
+	switch stream.Network {
+	case "", "tcp", "raw":
+	case "ws":
+		out.TransportType = "ws"
+		if ws := stream.WSSettings; ws != nil {
+			out.TransportPath, out.TransportHost = ws.Path, ws.Host
+			if out.TransportHost == "" {
+				out.TransportHost = headerHost(ws.Headers)
+			}
+		}
+	case "grpc":
+		out.TransportType = "grpc"
+		if g := stream.GRPCSettings; g != nil {
+			out.TransportServiceName = g.ServiceName
+			if g.MultiMode {
+				warn("gRPC multiMode has no equivalent here; it connects in the usual gun mode, which the same server takes")
+			}
+		}
+	case "httpupgrade":
+		out.TransportType = "httpupgrade"
+		if hu := stream.HTTPUpgradeSettings; hu != nil {
+			out.TransportPath, out.TransportHost = hu.Path, hu.Host
+		}
+	case "h2", "http":
+		out.TransportType = "http"
+		if h := stream.HTTPSettings; h != nil {
+			out.TransportPath, out.TransportHost = h.Path, strings.Join(h.Host, ",")
+		}
+	default:
+		return skip("transport %q isn't supported here", stream.Network)
+	}
+	return out, strings.Join(warnings, "; ")
+}
+
+// headerHost is the Host entry of a ws transport's headers, in any case.
+func headerHost(raw json.RawMessage) string {
+	var headers map[string]any
+	if json.Unmarshal(raw, &headers) != nil {
+		return ""
+	}
+	for name, value := range headers {
+		if s, ok := value.(string); ok && strings.EqualFold(name, "host") {
+			return s
+		}
+	}
+	return ""
+}
+
+// isECHConfigList reports whether s is the base64 of an ECHConfigList: a
+// two-byte length and exactly that many bytes after it.
+func isECHConfigList(s string) bool {
+	s = strings.TrimRight(s, "=")
+	raw, err := base64.RawStdEncoding.DecodeString(s)
+	if err != nil {
+		raw, err = base64.RawURLEncoding.DecodeString(s)
+	}
+	return err == nil && len(raw) >= 6 && int(raw[0])<<8|int(raw[1]) == len(raw)-2
 }
 
 func appendWarning(existing, next string) string {

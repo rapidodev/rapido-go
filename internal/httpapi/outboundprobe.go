@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"slices"
@@ -27,6 +28,9 @@ const (
 	// outboundProbeMaxTags caps one request; the dashboard tests a long list in
 	// batches of fewer.
 	outboundProbeMaxTags = 16
+	// outboundProbeMaxDrafts caps the drafts of one request: a node takes 8, as
+	// each costs it a core of its own.
+	outboundProbeMaxDrafts = 8
 	// outboundProbeNodeParallel is how many nodes are asked at once.
 	outboundProbeNodeParallel = 8
 	// outboundProbeNodeTimeout bounds the call to one node. The node keeps its
@@ -44,14 +48,18 @@ var outboundProbeSlots = make(chan struct{}, 4)
 
 // outboundTester runs outbound tests on one node.
 type outboundTester interface {
-	TestOutbounds(ctx context.Context, node generated.Node, tags []string) (nodecontrol.OutboundTestResponse, error)
+	TestOutbounds(ctx context.Context, node generated.Node, req nodecontrol.OutboundTestRequest) (nodecontrol.OutboundTestResponse, error)
 }
 
 type controlPlaneTester struct{ client *nodecontrol.Client }
 
-func (t controlPlaneTester) TestOutbounds(ctx context.Context, node generated.Node, tags []string) (nodecontrol.OutboundTestResponse, error) {
-	return t.client.TestOutbounds(ctx, node.Address, int(node.ApiPort), tags)
+func (t controlPlaneTester) TestOutbounds(ctx context.Context, node generated.Node, req nodecontrol.OutboundTestRequest) (nodecontrol.OutboundTestResponse, error) {
+	return t.client.TestOutbounds(ctx, node.Address, int(node.ApiPort), req)
 }
+
+// errDraftsNeedNewerAgent is what a node that predates draft tests is reported
+// with: it ignores the drafts, and refuses a request with nothing else in it.
+var errDraftsNeedNewerAgent = errors.New("the node agent is too old to test an unsaved outbound; update it")
 
 // nodeControlCache holds the control-plane client, built from the CA in the
 // `tls` table and rebuilt if that ever changes (a restored backup).
@@ -86,6 +94,9 @@ func (h *Handler) nodeControl(ctx context.Context) (outboundTester, error) {
 
 type outboundProbeRequest struct {
 	Tags []string `json:"tags"`
+	// Outbounds are drafts: outbounds as the core config holds them, saved or
+	// not, each tested alone on the node in a core of its own.
+	Outbounds []outboundDTO `json:"outbounds,omitempty"`
 	// NodeID picks one node; 0 means every connected node.
 	NodeID int32 `json:"node_id"`
 }
@@ -112,10 +123,10 @@ type outboundProbeResponse struct {
 }
 
 // handleTestOutbounds implements POST /api/core/outbounds/test (sudo only):
-// test the outbounds named by tags on one node (node_id) or on every connected
-// node. It changes nothing, which is why it lives outside
-// /api/settings/core-config: that prefix runs in a locked transaction, and a
-// test holds its request for seconds.
+// test the outbounds named by tags, and the drafts sent whole, on one node
+// (node_id) or on every connected node. It changes nothing, which is why it
+// lives outside /api/settings/core-config: that prefix runs in a locked
+// transaction, and a test holds its request for seconds.
 func (h *Handler) handleTestOutbounds(c *gin.Context) {
 	var req outboundProbeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -129,8 +140,13 @@ func (h *Handler) handleTestOutbounds(c *gin.Context) {
 			tags = append(tags, tag)
 		}
 	}
-	if len(tags) == 0 || len(tags) > outboundProbeMaxTags {
-		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": "tags: give 1 to " + strconv.Itoa(outboundProbeMaxTags) + " outbound tags"})
+	if len(tags) > outboundProbeMaxTags || (len(tags) == 0 && len(req.Outbounds) == 0) {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": "tags: give 1 to " + strconv.Itoa(outboundProbeMaxTags) + " outbound tags, or outbounds to test as drafts"})
+		return
+	}
+	drafts, msg := draftOutbounds(req.Outbounds, tags)
+	if msg != "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"detail": msg})
 		return
 	}
 
@@ -155,7 +171,7 @@ func (h *Handler) handleTestOutbounds(c *gin.Context) {
 		c.JSON(http.StatusTooManyRequests, gin.H{"detail": "Other outbound tests are still running; try again in a moment"})
 		return
 	}
-	c.JSON(http.StatusOK, probeOutbounds(ctx, tester, nodes, tags))
+	c.JSON(http.StatusOK, probeOutbounds(ctx, tester, nodes, outboundProbe{tags: tags, drafts: drafts}))
 }
 
 // outboundProbeNodes is the node asked for, or every connected node.
@@ -189,14 +205,68 @@ func (h *Handler) outboundProbeNodes(ctx context.Context, id int32) ([]generated
 	return nodes, 0, ""
 }
 
+// outboundProbe is what one request tests: running outbounds by tag, and drafts.
+type outboundProbe struct {
+	tags   []string
+	drafts []outboundDTO
+}
+
+// draftOutbounds checks drafts exactly as saving them would (validateCoreConfig,
+// on the drafts as a config of their own), and refuses what a node can't test
+// alone: a group, which only picks among other outbounds, and tor, which would
+// start a process there. A tag can't also be asked for by name in the same
+// request, since results are told apart by tag.
+func draftOutbounds(drafts []outboundDTO, tags []string) ([]outboundDTO, string) {
+	if len(drafts) > outboundProbeMaxDrafts {
+		return nil, "outbounds: give at most " + strconv.Itoa(outboundProbeMaxDrafts) + " outbounds to test as drafts"
+	}
+	for _, ob := range drafts {
+		switch {
+		case ob.Type == "selector" || ob.Type == "urltest":
+			return nil, "outbound " + ob.Tag + ": a draft is tested alone, so it has to dial by itself, not pick among other outbounds"
+		case ob.Type == "tor":
+			return nil, "outbound " + ob.Tag + ": a tor outbound can't be tested as a draft; save it and test it by tag"
+		case slices.Contains(tags, ob.Tag):
+			return nil, "outbounds: " + ob.Tag + " is asked for both by tag and as a draft"
+		}
+	}
+	if msg := validateCoreConfig(coreConfigDTO{Outbounds: drafts}); msg != "" {
+		return nil, msg
+	}
+	return drafts, ""
+}
+
+// request is what each node is sent: the drafts as node-config sends an
+// outbound, the JSON of outboundDTO.
+func (p outboundProbe) request() (nodecontrol.OutboundTestRequest, error) {
+	req := nodecontrol.OutboundTestRequest{Tags: p.tags}
+	for _, ob := range p.drafts {
+		raw, err := json.Marshal(ob)
+		if err != nil {
+			return req, err
+		}
+		req.Outbounds = append(req.Outbounds, raw)
+	}
+	return req, nil
+}
+
 // probeOutbounds asks every node, a few at a time, and lays the answers out by
-// tag, then node, in the order given.
-func probeOutbounds(ctx context.Context, tester outboundTester, nodes []generated.Node, tags []string) outboundProbeResponse {
+// tag, then node, in the order given: the tags first, then the drafts.
+func probeOutbounds(ctx context.Context, tester outboundTester, nodes []generated.Node, probe outboundProbe) outboundProbeResponse {
 	answers := make([]nodecontrol.OutboundTestResponse, len(nodes))
 	failures := make([]error, len(nodes))
+	req, err := probe.request()
+	if err != nil {
+		for i := range failures {
+			failures[i] = err
+		}
+	}
 	slots := make(chan struct{}, outboundProbeNodeParallel)
 	var wg sync.WaitGroup
 	for i, node := range nodes {
+		if failures[i] != nil {
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -209,7 +279,10 @@ func probeOutbounds(ctx context.Context, tester outboundTester, nodes []generate
 			}
 			call, cancel := context.WithTimeout(ctx, outboundProbeNodeTimeout)
 			defer cancel()
-			answers[i], failures[i] = tester.TestOutbounds(call, node, tags)
+			answers[i], failures[i] = tester.TestOutbounds(call, node, req)
+			if len(probe.tags) == 0 && refusedForNoTags(failures[i]) {
+				failures[i] = errDraftsNeedNewerAgent
+			}
 		}()
 	}
 	wg.Wait()
@@ -230,18 +303,36 @@ func probeOutbounds(ctx context.Context, tester outboundTester, nodes []generate
 			byNode[i][r.Tag] = r
 		}
 	}
-	resp.Results = make([]outboundProbeResult, 0, len(tags)*len(nodes))
-	for _, tag := range tags {
+	resp.Results = make([]outboundProbeResult, 0, (len(probe.tags)+len(probe.drafts))*len(nodes))
+	lay := func(tag string, draft bool) {
 		for i, node := range nodes {
 			r, ok := byNode[i][tag]
 			switch {
 			case failures[i] != nil:
 				r = nodecontrol.OutboundTestResult{Tag: tag, Error: resp.Nodes[i].Error}
+			case !ok && draft:
+				// An agent from before drafts tests the tags and leaves the rest out.
+				r = nodecontrol.OutboundTestResult{Tag: tag, Error: errDraftsNeedNewerAgent.Error()}
 			case !ok:
 				r = nodecontrol.OutboundTestResult{Tag: tag, Error: "the node did not answer for this outbound"}
 			}
+			// Whatever the node said: a result is about the draft when the draft was asked for.
+			r.Draft = draft
 			resp.Results = append(resp.Results, outboundProbeResult{NodeID: node.ID, Node: node.Name, OutboundTestResult: r})
 		}
 	}
+	for _, tag := range probe.tags {
+		lay(tag, false)
+	}
+	for _, ob := range probe.drafts {
+		lay(ob.Tag, true)
+	}
 	return resp
+}
+
+// refusedForNoTags is how an agent from before drafts answers a request that
+// only has drafts: it doesn't see them, and finds no tags.
+func refusedForNoTags(err error) bool {
+	var status *nodecontrol.StatusError
+	return errors.As(err, &status) && status.Code == http.StatusUnprocessableEntity && strings.HasPrefix(status.Detail, "tags:")
 }

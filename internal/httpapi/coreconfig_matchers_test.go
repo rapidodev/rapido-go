@@ -67,7 +67,8 @@ func TestValidateCoreConfigChecksGroupOptionsAndDNSPort(t *testing.T) {
 		{"tolerance", group(outboundDTO{Tag: "g", Type: "urltest", Outbounds: []string{"a"}, Tolerance: 70000}), "tolerance must be"},
 		{"selector default", group(outboundDTO{Tag: "g", Type: "selector", Outbounds: []string{"a"}, Default: "a"}), ""},
 		{"selector default not a member", group(outboundDTO{Tag: "g", Type: "selector", Outbounds: []string{"a"}, Default: "b"}), "default must be"},
-		{"vless flow", coreConfigDTO{Outbounds: []outboundDTO{{Tag: "v", Type: "vless", Server: "s", ServerPort: 1, UUID: "u", Flow: "xtls-rprx-vision"}}}, ""},
+		{"vless flow", coreConfigDTO{Outbounds: []outboundDTO{{Tag: "v", Type: "vless", Server: "s", ServerPort: 1, UUID: "u", Flow: "xtls-rprx-vision", TLSEnabled: true}}}, ""},
+		{"vless flow without tls", coreConfigDTO{Outbounds: []outboundDTO{{Tag: "v", Type: "vless", Server: "s", ServerPort: 1, UUID: "u", Flow: "xtls-rprx-vision"}}}, "needs TLS or REALITY"},
 		{"unknown flow", coreConfigDTO{Outbounds: []outboundDTO{{Tag: "v", Type: "vless", Server: "s", ServerPort: 1, UUID: "u", Flow: "xtls-rprx-origin"}}}, "unsupported flow"},
 		{"dns port", coreConfigDTO{DNSServers: []dnsServerDTO{{Tag: "d", Type: "udp", Address: "1.1.1.1", Port: 70000}}}, "invalid port 70000"},
 		{"dns default port", coreConfigDTO{DNSServers: []dnsServerDTO{{Tag: "d", Type: "udp", Address: "1.1.1.1"}}}, ""},
@@ -108,7 +109,8 @@ func TestParseNodeConfigSchema(t *testing.T) {
 		"2":    {compact: true},
 		"3":    {compact: true, delta: true},
 		"4":    {compact: true, delta: true, extendedRules: true},
-		"5":    {compact: true, delta: true, extendedRules: true},
+		"5":    {compact: true, delta: true, extendedRules: true, streamOutbounds: true},
+		"6":    {compact: true, delta: true, extendedRules: true, streamOutbounds: true},
 	}
 	for raw, want := range cases {
 		if got := parseNodeConfigSchema(raw); got != want {
@@ -120,7 +122,7 @@ func TestParseNodeConfigSchema(t *testing.T) {
 func TestNodeConfigSchemaCacheKeysKeepVariantsApart(t *testing.T) {
 	p := nodeProfile{}
 	seen := map[string]string{}
-	for _, raw := range []string{"", "3", "4"} {
+	for _, raw := range []string{"", "3", "4", "5"} {
 		key := parseNodeConfigSchema(raw).cacheKey(p)
 		if other, dup := seen[key]; dup {
 			t.Fatalf("schema %q and %q share cache key %q", raw, other, key)

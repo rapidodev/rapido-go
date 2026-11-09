@@ -1,0 +1,900 @@
+{
+  "dns": {
+    "servers": [
+      "1.1.1.1",
+      "8.8.8.8"
+    ]
+  },
+  "inbounds": [
+    {
+      "port": "20000,20004,20008,20012,20016,20020,20024,20028,20032,20036,20040,20044,20048,20052,20056,20060,20064,20068,20072,20076,20080,20084,20088,20092,20096,20100,20104,20108,20112,20116,20120,20124,20128,20132,20136,20140,20144,20148,20152,20156,20160,20164,20168,20172,20176,20180,20184,20188,20192,20196",
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "email": "alice",
+            "id": "8f8a4c1e-1e2a-4b8a-9b1a-0000000000a1"
+          }
+        ],
+        "decryption": "none"
+      },
+      "sniffing": {
+        "destOverride": [
+          "http",
+          "tls"
+        ],
+        "enabled": true
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "none",
+        "tcpSettings": {
+          "header": {
+            "type": "none"
+          }
+        }
+      },
+      "tag": "main"
+    }
+  ],
+  "log": {
+    "loglevel": "warning"
+  },
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-00"
+        }
+      },
+      "tag": "exit-00"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-01"
+        }
+      },
+      "tag": "exit-01"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-02"
+        }
+      },
+      "tag": "exit-02"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-03"
+        }
+      },
+      "tag": "exit-03"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-04"
+        }
+      },
+      "tag": "exit-04"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-05"
+        }
+      },
+      "tag": "exit-05"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-06"
+        }
+      },
+      "tag": "exit-06"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-07"
+        }
+      },
+      "tag": "exit-07"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-08"
+        }
+      },
+      "tag": "exit-08"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-09"
+        }
+      },
+      "tag": "exit-09"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-10"
+        }
+      },
+      "tag": "exit-10"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-11"
+        }
+      },
+      "tag": "exit-11"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-12"
+        }
+      },
+      "tag": "exit-12"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-13"
+        }
+      },
+      "tag": "exit-13"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-14"
+        }
+      },
+      "tag": "exit-14"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-15"
+        }
+      },
+      "tag": "exit-15"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-16"
+        }
+      },
+      "tag": "exit-16"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-17"
+        }
+      },
+      "tag": "exit-17"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-18"
+        }
+      },
+      "tag": "exit-18"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-19"
+        }
+      },
+      "tag": "exit-19"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-20"
+        }
+      },
+      "tag": "exit-20"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-21"
+        }
+      },
+      "tag": "exit-21"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-22"
+        }
+      },
+      "tag": "exit-22"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-23"
+        }
+      },
+      "tag": "exit-23"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-24"
+        }
+      },
+      "tag": "exit-24"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-25"
+        }
+      },
+      "tag": "exit-25"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-26"
+        }
+      },
+      "tag": "exit-26"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-27"
+        }
+      },
+      "tag": "exit-27"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-28"
+        }
+      },
+      "tag": "exit-28"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-29"
+        }
+      },
+      "tag": "exit-29"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-30"
+        }
+      },
+      "tag": "exit-30"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-31"
+        }
+      },
+      "tag": "exit-31"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-32"
+        }
+      },
+      "tag": "exit-32"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-33"
+        }
+      },
+      "tag": "exit-33"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-34"
+        }
+      },
+      "tag": "exit-34"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-35"
+        }
+      },
+      "tag": "exit-35"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-36"
+        }
+      },
+      "tag": "exit-36"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-37"
+        }
+      },
+      "tag": "exit-37"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-38"
+        }
+      },
+      "tag": "exit-38"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-39"
+        }
+      },
+      "tag": "exit-39"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-40"
+        }
+      },
+      "tag": "exit-40"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-41"
+        }
+      },
+      "tag": "exit-41"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-42"
+        }
+      },
+      "tag": "exit-42"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-43"
+        }
+      },
+      "tag": "exit-43"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-44"
+        }
+      },
+      "tag": "exit-44"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-45"
+        }
+      },
+      "tag": "exit-45"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-46"
+        }
+      },
+      "tag": "exit-46"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-47"
+        }
+      },
+      "tag": "exit-47"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-48"
+        }
+      },
+      "tag": "exit-48"
+    },
+    {
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": {
+          "interface": "wg-49"
+        }
+      },
+      "tag": "exit-49"
+    }
+  ],
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20000",
+        "outboundTag": "exit-00",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20004",
+        "outboundTag": "exit-01",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20008",
+        "outboundTag": "exit-02",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20012",
+        "outboundTag": "exit-03",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20016",
+        "outboundTag": "exit-04",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20020",
+        "outboundTag": "exit-05",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20024",
+        "outboundTag": "exit-06",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20028",
+        "outboundTag": "exit-07",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20032",
+        "outboundTag": "exit-08",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20036",
+        "outboundTag": "exit-09",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20040",
+        "outboundTag": "exit-10",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20044",
+        "outboundTag": "exit-11",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20048",
+        "outboundTag": "exit-12",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20052",
+        "outboundTag": "exit-13",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20056",
+        "outboundTag": "exit-14",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20060",
+        "outboundTag": "exit-15",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20064",
+        "outboundTag": "exit-16",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20068",
+        "outboundTag": "exit-17",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20072",
+        "outboundTag": "exit-18",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20076",
+        "outboundTag": "exit-19",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20080",
+        "outboundTag": "exit-20",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20084",
+        "outboundTag": "exit-21",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20088",
+        "outboundTag": "exit-22",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20092",
+        "outboundTag": "exit-23",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20096",
+        "outboundTag": "exit-24",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20100",
+        "outboundTag": "exit-25",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20104",
+        "outboundTag": "exit-26",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20108",
+        "outboundTag": "exit-27",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20112",
+        "outboundTag": "exit-28",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20116",
+        "outboundTag": "exit-29",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20120",
+        "outboundTag": "exit-30",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20124",
+        "outboundTag": "exit-31",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20128",
+        "outboundTag": "exit-32",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20132",
+        "outboundTag": "exit-33",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20136",
+        "outboundTag": "exit-34",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20140",
+        "outboundTag": "exit-35",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20144",
+        "outboundTag": "exit-36",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20148",
+        "outboundTag": "exit-37",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20152",
+        "outboundTag": "exit-38",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20156",
+        "outboundTag": "exit-39",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20160",
+        "outboundTag": "exit-40",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20164",
+        "outboundTag": "exit-41",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20168",
+        "outboundTag": "exit-42",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20172",
+        "outboundTag": "exit-43",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20176",
+        "outboundTag": "exit-44",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20180",
+        "outboundTag": "exit-45",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20184",
+        "outboundTag": "exit-46",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20188",
+        "outboundTag": "exit-47",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20192",
+        "outboundTag": "exit-48",
+        "type": "field"
+      },
+      {
+        "inboundTag": [
+          "main"
+        ],
+        "localPort": "20196",
+        "outboundTag": "exit-49",
+        "type": "field"
+      }
+    ]
+  }
+}

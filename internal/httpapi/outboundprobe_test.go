@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -23,6 +26,7 @@ import (
 type fakeTester struct {
 	mu      sync.Mutex
 	asked   map[string][]string
+	drafts  map[string][]json.RawMessage
 	replies map[string][]nodecontrol.OutboundTestResult
 	errs    map[string]error
 	hold    time.Duration
@@ -30,7 +34,7 @@ type fakeTester struct {
 	now, max atomic.Int32
 }
 
-func (f *fakeTester) TestOutbounds(ctx context.Context, node generated.Node, tags []string) (nodecontrol.OutboundTestResponse, error) {
+func (f *fakeTester) TestOutbounds(ctx context.Context, node generated.Node, req nodecontrol.OutboundTestRequest) (nodecontrol.OutboundTestResponse, error) {
 	n := f.now.Add(1)
 	defer f.now.Add(-1)
 	for {
@@ -43,7 +47,11 @@ func (f *fakeTester) TestOutbounds(ctx context.Context, node generated.Node, tag
 	if f.asked == nil {
 		f.asked = map[string][]string{}
 	}
-	f.asked[node.Name] = tags
+	f.asked[node.Name] = req.Tags
+	if f.drafts == nil {
+		f.drafts = map[string][]json.RawMessage{}
+	}
+	f.drafts[node.Name] = req.Outbounds
 	f.mu.Unlock()
 	if f.hold > 0 {
 		time.Sleep(f.hold)
@@ -76,7 +84,7 @@ func TestProbeOutboundsLaysOutEveryNodeForEveryTag(t *testing.T) {
 		},
 		errs: map[string]error{"fr": errors.New("cannot reach the node's control port 192.0.2.3:62051: connection refused")},
 	}
-	resp := probeOutbounds(context.Background(), fake, probeNodes("de", "nl", "fr"), []string{"exit-de", "blackhole"})
+	resp := probeOutbounds(context.Background(), fake, probeNodes("de", "nl", "fr"), outboundProbe{tags: []string{"exit-de", "blackhole"}})
 
 	if resp.URL != "https://www.gstatic.com/generate_204" {
 		t.Errorf("url = %q", resp.URL)
@@ -123,7 +131,7 @@ func TestProbeOutboundsAsksABoundedNumberOfNodesAtOnce(t *testing.T) {
 	for i := range outboundProbeNodeParallel + 5 {
 		names = append(names, "node-"+string(rune('a'+i)))
 	}
-	resp := probeOutbounds(context.Background(), fake, probeNodes(names...), []string{"exit"})
+	resp := probeOutbounds(context.Background(), fake, probeNodes(names...), outboundProbe{tags: []string{"exit"}})
 	if len(resp.Results) != len(names) {
 		t.Fatalf("%d results, want %d", len(resp.Results), len(names))
 	}
@@ -135,7 +143,7 @@ func TestProbeOutboundsAsksABoundedNumberOfNodesAtOnce(t *testing.T) {
 func TestProbeOutboundsGivesUpWhenTheRequestEnds(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	resp := probeOutbounds(ctx, blockingTester{}, probeNodes("de"), []string{"exit"})
+	resp := probeOutbounds(ctx, blockingTester{}, probeNodes("de"), outboundProbe{tags: []string{"exit"}})
 	if len(resp.Results) != 1 || resp.Results[0].Error == "" {
 		t.Errorf("results = %+v, want an error once the request is over", resp.Results)
 	}
@@ -144,7 +152,7 @@ func TestProbeOutboundsGivesUpWhenTheRequestEnds(t *testing.T) {
 // blockingTester honours ctx the way the real client does.
 type blockingTester struct{}
 
-func (b blockingTester) TestOutbounds(ctx context.Context, node generated.Node, tags []string) (nodecontrol.OutboundTestResponse, error) {
+func (b blockingTester) TestOutbounds(ctx context.Context, node generated.Node, req nodecontrol.OutboundTestRequest) (nodecontrol.OutboundTestResponse, error) {
 	<-ctx.Done()
 	return nodecontrol.OutboundTestResponse{}, ctx.Err()
 }
@@ -230,6 +238,23 @@ func TestOutboundTestRouteAsksTheConnectedNodes(t *testing.T) {
 	if resp := doRequest(t, router, "POST", "/api/core/outbounds/test", token, map[string]any{"tags": []string{"exit"}, "node_id": 9999}); resp.Code != http.StatusNotFound {
 		t.Errorf("unknown node: %d, want 404", resp.Code)
 	}
+
+	// A draft goes to the node whole, checked first as saving would check it.
+	fake.asked, fake.drafts = nil, nil
+	fake.replies["de"] = []nodecontrol.OutboundTestResult{{Tag: "new", DelayMS: 180, StatusCode: 204, Draft: true}}
+	resp = doRequest(t, router, "POST", "/api/core/outbounds/test", token, map[string]any{"outbounds": []outboundDTO{realityDraft("new")}, "node_id": de.ID})
+	if resp.Code != http.StatusOK || len(fake.drafts["de"]) != 1 {
+		t.Fatalf("draft: %d %s, sent %s", resp.Code, resp.Raw, fake.drafts["de"])
+	}
+	if r := resp.Body["results"].([]any)[0].(map[string]any); r["draft"] != true || r["delay_ms"] != float64(180) {
+		t.Errorf("draft result = %v", r)
+	}
+	broken := realityDraft("new")
+	broken.RealityPublicKey = "not-a-key"
+	resp = doRequest(t, router, "POST", "/api/core/outbounds/test", token, map[string]any{"outbounds": []outboundDTO{broken}})
+	if detail, _ := resp.Body["detail"].(string); resp.Code != http.StatusUnprocessableEntity || !strings.Contains(detail, "reality_public_key") {
+		t.Errorf("broken draft: %d %s, want 422 naming the key", resp.Code, resp.Raw)
+	}
 }
 
 // With no fake, the route talks to the node over mutual TLS as the panel's CA,
@@ -279,5 +304,87 @@ func TestOutboundTestRouteUsesTheControlPlane(t *testing.T) {
 	}
 	if !sawPanel.Load() {
 		t.Error("the node did not see the panel's CA identity")
+	}
+}
+
+// realityDraft is an outbound to another provider's REALITY server, the shape a
+// pasted share link fills in.
+func realityDraft(tag string) outboundDTO {
+	return outboundDTO{
+		Tag: tag, Type: "vless", Server: "203.0.113.9", ServerPort: 443,
+		UUID: "1b0f8d6e-3c2a-4e5f-9a7b-0c1d2e3f4a5b", Flow: "xtls-rprx-vision", TLSEnabled: true,
+		TLSServerName: "www.example.com", RealityPublicKey: "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0", RealityShortID: "0123abcd",
+	}
+}
+
+func TestDraftOutboundsAreCheckedAsSavingWouldCheckThem(t *testing.T) {
+	if _, msg := draftOutbounds([]outboundDTO{realityDraft("new")}, []string{"exit"}); msg != "" {
+		t.Fatalf("a valid draft was refused: %s", msg)
+	}
+	bad := realityDraft("new")
+	bad.RealityShortID = "abc"
+	many := make([]outboundDTO, outboundProbeMaxDrafts+1)
+	for i := range many {
+		many[i] = outboundDTO{Tag: "d" + strconv.Itoa(i), Type: "direct"}
+	}
+	for name, tc := range map[string]struct {
+		drafts []outboundDTO
+		tags   []string
+		want   string
+	}{
+		"what saving refuses": {[]outboundDTO{bad}, nil, "reality_short_id"},
+		"a reserved tag":      {[]outboundDTO{{Tag: "direct", Type: "direct"}}, nil, "reserved"},
+		"two of one tag":      {[]outboundDTO{{Tag: "a", Type: "direct"}, {Tag: "a", Type: "direct"}}, nil, "duplicate"},
+		"a group":             {[]outboundDTO{{Tag: "g", Type: "urltest", Outbounds: []string{"direct"}}}, nil, "dial by itself"},
+		"tor":                 {[]outboundDTO{{Tag: "t", Type: "tor"}}, nil, "tor"},
+		"a tag also by name":  {[]outboundDTO{{Tag: "exit", Type: "direct"}}, []string{"exit"}, "both by tag and as a draft"},
+		"too many":            {many, nil, "at most 8"},
+	} {
+		if _, msg := draftOutbounds(tc.drafts, tc.tags); !strings.Contains(msg, tc.want) {
+			t.Errorf("%s: %q, want it to say %q", name, msg, tc.want)
+		}
+	}
+}
+
+func TestProbeOutboundsSendsDraftsAsNodeConfigDoesAndLabelsThem(t *testing.T) {
+	draft := realityDraft("new")
+	fake := &fakeTester{
+		replies: map[string][]nodecontrol.OutboundTestResult{
+			"de": {{Tag: "exit", DelayMS: 74, StatusCode: 204}, {Tag: "new", DelayMS: 180, StatusCode: 204, Draft: true}},
+			// An agent from before drafts: it tests the tag and leaves the draft out.
+			"nl": {{Tag: "exit", DelayMS: 90, StatusCode: 204}},
+		},
+	}
+	resp := probeOutbounds(context.Background(), fake, probeNodes("de", "nl"), outboundProbe{tags: []string{"exit"}, drafts: []outboundDTO{draft}})
+
+	want, _ := json.Marshal(draft)
+	if got := fake.drafts["de"]; len(got) != 1 || string(got[0]) != string(want) {
+		t.Fatalf("the node was sent %s, want the outbound as node-config sends it: %s", got, want)
+	}
+	if !slices.Equal(fake.asked["de"], []string{"exit"}) {
+		t.Errorf("tags sent = %v", fake.asked["de"])
+	}
+	if len(resp.Results) != 4 {
+		t.Fatalf("results = %+v", resp.Results)
+	}
+	if r := resp.Results[0]; r.Tag != "exit" || r.Draft {
+		t.Errorf("first = %+v, want exit by tag", r)
+	}
+	if r := resp.Results[2]; r.Tag != "new" || r.Node != "de" || !r.Draft || r.DelayMS != 180 {
+		t.Errorf("draft on de = %+v", r)
+	}
+	if r := resp.Results[3]; r.Tag != "new" || r.Node != "nl" || !r.Draft || r.Error != errDraftsNeedNewerAgent.Error() {
+		t.Errorf("draft on the old agent = %+v, want it called too old", r)
+	}
+}
+
+func TestProbeOutboundsCallsAnAgentThatRefusesOnlyDraftsTooOld(t *testing.T) {
+	fake := &fakeTester{errs: map[string]error{"de": &nodecontrol.StatusError{Code: http.StatusUnprocessableEntity, Detail: "tags: give 1 to 64 outbound tags"}}}
+	resp := probeOutbounds(context.Background(), fake, probeNodes("de"), outboundProbe{drafts: []outboundDTO{{Tag: "new", Type: "direct"}}})
+	if len(resp.Results) != 1 || resp.Results[0].Error != errDraftsNeedNewerAgent.Error() || !resp.Results[0].Draft {
+		t.Errorf("results = %+v", resp.Results)
+	}
+	if resp.Nodes[0].Error != errDraftsNeedNewerAgent.Error() {
+		t.Errorf("node = %+v", resp.Nodes[0])
 	}
 }

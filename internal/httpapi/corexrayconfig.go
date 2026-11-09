@@ -296,10 +296,31 @@ func coreOutboundsToExport(in []outboundDTO) []xrayimport.Outbound {
 			Username: ob.Username, Password: ob.Password, Outbounds: ob.Outbounds,
 			UUID: ob.UUID, Flow: ob.Flow, Method: ob.Method, Security: ob.Security, CongestionControl: ob.CongestionControl,
 			TLSEnabled: ob.TLSEnabled, TLSServerName: ob.TLSServerName, TLSInsecure: ob.TLSInsecure,
+			TLSALPN: ob.TLSALPN, TLSFingerprint: ob.TLSFingerprint, TLSECHConfig: ob.TLSECHConfig,
+			RealityPublicKey: ob.RealityPublicKey, RealityShortID: ob.RealityShortID,
+			TransportType: ob.TransportType, TransportPath: ob.TransportPath,
+			TransportHost: ob.TransportHost, TransportServiceName: ob.TransportServiceName,
 			BindInterface: ob.BindInterface,
 		}
 	}
 	return out
+}
+
+// outboundFromImport is coreOutboundsToExport's inverse, for one outbound an
+// Xray file brought in.
+func outboundFromImport(ob xrayimport.Outbound) outboundDTO {
+	return outboundDTO{
+		Tag: ob.Tag, Type: ob.Type, Server: ob.Server, ServerPort: ob.ServerPort,
+		Username: ob.Username, Password: ob.Password, Outbounds: ob.Outbounds,
+		UUID: ob.UUID, Flow: ob.Flow, Method: ob.Method, Security: ob.Security,
+		CongestionControl: ob.CongestionControl,
+		TLSEnabled:        ob.TLSEnabled, TLSServerName: ob.TLSServerName, TLSInsecure: ob.TLSInsecure,
+		TLSALPN: ob.TLSALPN, TLSFingerprint: ob.TLSFingerprint, TLSECHConfig: ob.TLSECHConfig,
+		RealityPublicKey: ob.RealityPublicKey, RealityShortID: ob.RealityShortID,
+		TransportType: ob.TransportType, TransportPath: ob.TransportPath,
+		TransportHost: ob.TransportHost, TransportServiceName: ob.TransportServiceName,
+		BindInterface: ob.BindInterface,
+	}
 }
 
 func coreRoutingRulesToExport(in []routingRuleDTO) []xrayimport.RoutingRule {

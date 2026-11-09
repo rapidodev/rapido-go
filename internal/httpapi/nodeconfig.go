@@ -475,6 +475,9 @@ type nodeConfigSchema struct {
 	delta   bool
 	// extendedRules: the routing-rule matchers ruleUsesExtendedMatchers names (4+).
 	extendedRules bool
+	// streamOutbounds: the outbound TLS and transport fields
+	// outboundUsesStreamFields names (5+).
+	streamOutbounds bool
 }
 
 func parseNodeConfigSchema(raw string) nodeConfigSchema {
@@ -482,7 +485,7 @@ func parseNodeConfigSchema(raw string) nodeConfigSchema {
 	if err != nil {
 		return nodeConfigSchema{}
 	}
-	return nodeConfigSchema{compact: n >= 2, delta: n >= 3, extendedRules: n >= 4}
+	return nodeConfigSchema{compact: n >= 2, delta: n >= 3, extendedRules: n >= 4, streamOutbounds: n >= 5}
 }
 
 // cacheKey files a rendered payload by everything that shapes its bytes.
@@ -494,7 +497,36 @@ func (s nodeConfigSchema) cacheKey(p nodeProfile) string {
 	if s.extendedRules {
 		key += "/rules2"
 	}
+	if s.streamOutbounds {
+		key += "/ob2"
+	}
 	return key
+}
+
+// outboundsFor turns what an agent can't build into a block outbound of the same
+// tag. An older agent would drop the REALITY, transport or fingerprint it
+// doesn't know and dial the server some other way, which at best fails and at
+// worst hands the server's own credentials to whatever answers; refusing the
+// traffic fails closed, and keeping the tag keeps every rule and group that
+// names it valid. A config using none of these is returned untouched.
+func (s nodeConfigSchema) outboundsFor(core coreConfigDTO) coreConfigDTO {
+	if s.streamOutbounds {
+		return core
+	}
+	var kept []outboundDTO
+	for i, ob := range core.Outbounds {
+		if !outboundUsesStreamFields(ob) {
+			continue
+		}
+		if kept == nil {
+			kept = append(make([]outboundDTO, 0, len(core.Outbounds)), core.Outbounds...)
+		}
+		kept[i] = outboundDTO{Tag: ob.Tag, Type: "block"}
+	}
+	if kept != nil {
+		core.Outbounds = kept
+	}
+	return core
 }
 
 // rulesFor leaves out the rules an agent can't honour. An older agent ignores a
@@ -525,7 +557,7 @@ func (s nodeConfigSchema) rulesFor(core coreConfigDTO) coreConfigDTO {
 func (s *nodeConfigSnapshot) renderSchema(p nodeProfile, schema nodeConfigSchema) (nodeConfigResponse, []byte, error) {
 	compact := schema.compact
 	inbounds := p.filterInbounds(s.inbounds)
-	core := schema.rulesFor(p.CoreOverrides.apply(s.core))
+	core := schema.outboundsFor(schema.rulesFor(p.CoreOverrides.apply(s.core)))
 	payload := nodeConfigResponse{Inbounds: inbounds, Core: core}
 
 	// emptyUsers matches what the spec form emits for an inbound with no users.

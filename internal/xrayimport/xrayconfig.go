@@ -55,14 +55,50 @@ type xrayStreamSettings struct {
 	RealitySettings *xrayRealitySettings `json:"realitySettings"`
 	TCPSettings     *xrayTCPSettings     `json:"tcpSettings"`
 	Sockopt         *xraySockopt         `json:"sockopt"`
+
+	// The transports an outbound can carry here (see parseOutboundTransport).
+	WSSettings          *xrayWSSettings          `json:"wsSettings"`
+	GRPCSettings        *xrayGRPCSettings        `json:"grpcSettings"`
+	HTTPUpgradeSettings *xrayHTTPUpgradeSettings `json:"httpupgradeSettings"`
+	HTTPSettings        *xrayHTTPSettings        `json:"httpSettings"`
 }
 
 type xrayTLSSettings struct {
-	ServerName   string            `json:"serverName"`
-	Fingerprint  string            `json:"fingerprint"`
-	Alpn         []string          `json:"alpn"`
-	MinVersion   string            `json:"minVersion"`
-	Certificates []xrayCertificate `json:"certificates"`
+	ServerName    string            `json:"serverName"`
+	AllowInsecure bool              `json:"allowInsecure"`
+	Fingerprint   string            `json:"fingerprint"`
+	Alpn          []string          `json:"alpn"`
+	MinVersion    string            `json:"minVersion"`
+	Certificates  []xrayCertificate `json:"certificates"`
+	// ECHConfigList is an ECHConfigList in base64, or a DNS server to look one
+	// up from; only the first is carried over.
+	ECHConfigList string `json:"echConfigList"`
+}
+
+type xrayWSSettings struct {
+	Path string `json:"path"`
+	// Host is newer Xray's place for the Host header; older ones only read it
+	// from headers.
+	Host string `json:"host"`
+	// Raw, so an inbound's headers of some other shape can't fail the whole
+	// file: only an outbound's Host is read from them.
+	Headers json.RawMessage `json:"headers"`
+}
+
+type xrayGRPCSettings struct {
+	ServiceName string `json:"serviceName"`
+	MultiMode   bool   `json:"multiMode"`
+}
+
+type xrayHTTPUpgradeSettings struct {
+	Path string `json:"path"`
+	Host string `json:"host"`
+}
+
+// xrayHTTPSettings is the h2 transport's; host is a list there.
+type xrayHTTPSettings struct {
+	Path string       `json:"path"`
+	Host stringOrList `json:"host"`
 }
 
 type xrayCertificate struct {
@@ -71,11 +107,20 @@ type xrayCertificate struct {
 	Key         []string `json:"key"`
 }
 
+// xrayRealitySettings holds both sides' fields: an inbound's private key, short
+// ids, names and target, and an outbound's public key, short id, name and
+// fingerprint.
 type xrayRealitySettings struct {
 	PrivateKey  string   `json:"privateKey"`
 	ShortIds    []string `json:"shortIds"`
 	ServerNames []string `json:"serverNames"`
 	Dest        string   `json:"dest"`
+
+	PublicKey   string `json:"publicKey"`
+	ShortID     string `json:"shortId"`
+	ServerName  string `json:"serverName"`
+	Fingerprint string `json:"fingerprint"`
+	SpiderX     string `json:"spiderX"`
 }
 
 type xrayTCPSettings struct {

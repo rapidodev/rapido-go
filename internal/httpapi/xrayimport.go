@@ -213,14 +213,7 @@ func (h *Handler) mergeCoreConfigForImport(ctx context.Context, parsed xrayimpor
 		if existingOutboundTags[ob.Tag] {
 			continue
 		}
-		merged.Outbounds = append(merged.Outbounds, outboundDTO{
-			Tag: ob.Tag, Type: ob.Type, Server: ob.Server, ServerPort: ob.ServerPort,
-			Username: ob.Username, Password: ob.Password, Outbounds: ob.Outbounds,
-			UUID: ob.UUID, Flow: ob.Flow, Method: ob.Method, Security: ob.Security,
-			CongestionControl: ob.CongestionControl,
-			TLSEnabled:        ob.TLSEnabled, TLSServerName: ob.TLSServerName, TLSInsecure: ob.TLSInsecure,
-			BindInterface: ob.BindInterface,
-		})
+		merged.Outbounds = append(merged.Outbounds, outboundFromImport(ob))
 		existingOutboundTags[ob.Tag] = true
 	}
 

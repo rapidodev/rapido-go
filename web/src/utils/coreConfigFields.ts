@@ -3,11 +3,14 @@ import {
   DNS_SERVER_TYPES,
   NETWORK_TYPES,
   OUTBOUND_GROUP_TYPES,
+  OUTBOUND_TRANSPORTS,
   OUTBOUND_TYPES,
   PROTOCOL_TYPES,
   SHADOWSOCKS_METHODS,
   SHADOWTLS_VERSIONS,
   SNELL_OBFS_MODES,
+  STREAM_OUTBOUND_TYPES,
+  TLS_FINGERPRINTS,
   VLESS_FLOWS,
   VMESS_SECURITY_TYPES,
 } from "types/CoreConfig";
@@ -67,6 +70,46 @@ const tlsFields = (toggle: boolean, enabled: boolean): FieldSpec[] => {
   return [{ key: "tls_enabled", kind: "bool", wide: true }, ...(enabled ? details : [])];
 };
 
+const alpnField: FieldSpec = { key: "tls_alpn", kind: "list", placeholder: "h2, http/1.1", hint: "tlsAlpn" };
+
+/** TLS as another provider's server wants it, for vless/vmess/trojan: the plain TLS fields, then
+ * what a share link adds - a fingerprint, ALPN, ECH and REALITY. REALITY turns TLS on by itself,
+ * so its fields stay in view whenever one of them is set. */
+const securityFields = (o: Item): FieldSpec[] => {
+  const reality = str(o.reality_public_key) !== "";
+  const on = o.tls_enabled === true || reality;
+  const group = "security";
+  const fields: FieldSpec[] = [{ key: "tls_enabled", kind: "bool", wide: true, group, groupHint: "outboundSecurity" }];
+  if (!on) return fields;
+  return [
+    ...fields,
+    { key: "tls_server_name", kind: "text", placeholder: "example.com", group, hint: reality ? "realityServerName" : undefined },
+    { key: "tls_fingerprint", kind: "select", optional: true, options: TLS_FINGERPRINTS, group, hint: reality ? "realityFingerprint" : "tlsFingerprint" },
+    { ...alpnField, group },
+    { key: "tls_insecure", kind: "bool", group },
+    { key: "tls_ech_config", kind: "text", wide: true, group, placeholder: "AEX+DQBB...", hint: "echConfig" },
+    { key: "reality_public_key", kind: "text", wide: true, group, hint: "realityPublicKey" },
+    { key: "reality_short_id", kind: "text", group, placeholder: "0123abcd" },
+  ];
+};
+
+/** The V2Ray transport, for vless/vmess/trojan: what it is, then where its requests go. */
+const transportFields = (o: Item): FieldSpec[] => {
+  const type = str(o.transport_type);
+  const group = "transport";
+  const fields: FieldSpec[] = [
+    { key: "transport_type", kind: "select", optional: true, options: OUTBOUND_TRANSPORTS, group, hint: "transportType" },
+  ];
+  if (type === "grpc") fields.push({ key: "transport_service_name", kind: "text", group, placeholder: "grpc-service" });
+  else if (type !== "") {
+    fields.push(
+      { key: "transport_path", kind: "text", group, placeholder: "/ray" },
+      { key: "transport_host", kind: "text", group, placeholder: "cdn.example.com", hint: type === "http" ? "transportHosts" : undefined }
+    );
+  }
+  return fields;
+};
+
 const password: FieldSpec = { key: "password", kind: "secret", required: true };
 const uuid: FieldSpec = { key: "uuid", kind: "secret", required: true, placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" };
 
@@ -96,7 +139,6 @@ export const outboundFields = (o: Item, types: readonly string[] = OUTBOUND_TYPE
       { key: "server_port", kind: "number", required: true, min: 1, max: 65535, placeholder: "443" }
     );
   }
-  const tlsOn = o.tls_enabled === true;
   switch (type) {
     case "socks":
     case "http":
@@ -109,20 +151,22 @@ export const outboundFields = (o: Item, types: readonly string[] = OUTBOUND_TYPE
       fields.push({ key: "method", kind: "select", required: true, options: SHADOWSOCKS_METHODS }, password);
       break;
     case "vmess":
-      fields.push(uuid, { key: "security", kind: "select", label: "vmessSecurity", required: true, options: VMESS_SECURITY_TYPES }, ...tlsFields(true, tlsOn));
+      fields.push(uuid, { key: "security", kind: "select", label: "vmessSecurity", required: true, options: VMESS_SECURITY_TYPES });
       break;
     case "trojan":
-      fields.push(password, ...tlsFields(true, tlsOn));
+      fields.push(password);
       break;
     case "vless":
-      fields.push(uuid, { key: "flow", kind: "select", optional: true, options: VLESS_FLOWS }, ...tlsFields(true, tlsOn));
+      fields.push(uuid, { key: "flow", kind: "select", optional: true, options: VLESS_FLOWS });
       break;
     case "hysteria2":
+      fields.push(password, ...tlsFields(false, true), alpnField);
+      break;
     case "anytls":
       fields.push(password, ...tlsFields(false, true));
       break;
     case "tuic":
-      fields.push(uuid, password, { key: "congestion_control", kind: "select", optional: true, options: CONGESTION_CONTROL_TYPES }, ...tlsFields(false, true));
+      fields.push(uuid, password, { key: "congestion_control", kind: "select", optional: true, options: CONGESTION_CONTROL_TYPES }, ...tlsFields(false, true), alpnField);
       break;
     case "hysteria":
       fields.push(
@@ -152,6 +196,8 @@ export const outboundFields = (o: Item, types: readonly string[] = OUTBOUND_TYPE
     fields.push({ key: "bind_interface", kind: "text", placeholder: "wg0", hint: "bindInterface" });
     if (str(o.bind_interface).trim() !== "") fields.push({ key: "direct_fallback", kind: "bool", hint: "directFallback", wide: true });
   }
+  // Last, under their own headings, so nothing above them reads as part of a group.
+  if ((STREAM_OUTBOUND_TYPES as readonly string[]).includes(type)) fields.push(...securityFields(o), ...transportFields(o));
   return fields;
 };
 
@@ -274,6 +320,8 @@ const OUTBOUND_KEYS = [
   "server", "server_port", "username", "password", "outbounds", "uuid", "flow", "method", "security",
   "congestion_control", "version", "psk", "obfs_mode", "obfs_host", "obfs", "up_mbps", "down_mbps",
   "executable_path", "data_directory", "tls_enabled", "tls_server_name", "tls_insecure", "bind_interface", "direct_fallback",
+  "tls_alpn", "tls_fingerprint", "tls_ech_config", "reality_public_key", "reality_short_id",
+  "transport_type", "transport_path", "transport_host", "transport_service_name",
   "url", "interval", "tolerance", "default",
 ];
 const RULE_KEYS = ["inbound_port"];

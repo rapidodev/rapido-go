@@ -18,6 +18,8 @@ export type OutboundTestResult = {
   /** For an exit with a direct fallback: the member in use, and whether it is the plain direct one. */
   via?: string;
   fallback: boolean;
+  /** Set when the outbound was sent whole as a draft and tested alone, rather than by tag. */
+  draft?: boolean;
 };
 
 export type OutboundTestResponse = {

@@ -65,6 +65,20 @@ type Outbound struct {
 	TLSServerName string
 	TLSInsecure   bool
 
+	// What another provider's server needs on top of plain TLS - see
+	// outboundDTO for each. They come from and go to streamSettings: security
+	// tls or reality with tlsSettings/realitySettings, and network ws, grpc,
+	// httpupgrade or h2 with its own settings block.
+	TLSALPN              []string
+	TLSFingerprint       string
+	TLSECHConfig         string
+	RealityPublicKey     string
+	RealityShortID       string
+	TransportType        string
+	TransportPath        string
+	TransportHost        string
+	TransportServiceName string
+
 	BindInterface string
 }
 

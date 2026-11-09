@@ -6,11 +6,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -187,11 +189,12 @@ func TestOutboundTestOverTheControlPlane(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.CloseIdleConnections()
-	resp, err := client.TestOutbounds(context.Background(), addr.IP.String(), addr.Port, []string{"exit", "gone"})
+	draft, _ := json.Marshal(outboundSpec{Tag: "new", Type: "direct"})
+	resp, err := client.TestOutbounds(context.Background(), addr.IP.String(), addr.Port, nodecontrol.OutboundTestRequest{Tags: []string{"exit", "gone"}, Outbounds: []json.RawMessage{draft}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.URL != outboundTestURL || len(resp.Results) != 2 {
+	if resp.URL != outboundTestURL || len(resp.Results) != 3 {
 		t.Fatalf("resp = %+v", resp)
 	}
 	if r := resp.Results[0]; r.Tag != "exit" || r.StatusCode != http.StatusNoContent {
@@ -199,6 +202,9 @@ func TestOutboundTestOverTheControlPlane(t *testing.T) {
 	}
 	if r := resp.Results[1]; r.Tag != "gone" || r.Skipped != outboundSkipMissing {
 		t.Errorf("gone = %+v", r)
+	}
+	if r := resp.Results[2]; r.Tag != "new" || !r.Draft || r.StatusCode != http.StatusNoContent {
+		t.Errorf("new = %+v, want the draft measured", r)
 	}
 }
 
@@ -218,6 +224,129 @@ func TestOutboundTestRunsAtMostItsParallelLimit(t *testing.T) {
 	rec, results := testOutbounds(t, srv, outboundTestRequest{Tags: tags})
 	if rec.Code != http.StatusOK || len(results) != count {
 		t.Fatalf("status = %d, %d results, want 200 and %d", rec.Code, len(results), count)
+	}
+	for _, r := range results {
+		if r.StatusCode != http.StatusNoContent {
+			t.Errorf("%s = %+v, want 204", r.Tag, r)
+		}
+	}
+	if got := inFlightMax.Load(); got > outboundTestParallel || got < 2 {
+		t.Errorf("%d tests ran at once, want several but at most %d", got, outboundTestParallel)
+	}
+}
+
+// A draft is built and measured alone, beside the running core and without it:
+// the core keeps running the outbounds it had, and its users see nothing.
+func TestOutboundTestMeasuresDraftsBesideTheRunningCore(t *testing.T) {
+	generate204(t, 0)
+	srv := newTestServer(t)
+	startCore(t, srv, outboundSpec{Tag: "exit", Type: "direct"})
+	running := srv.node
+	closed := freeTCPPort(t)
+
+	rec, results := testOutbounds(t, srv, outboundTestRequest{
+		Tags: []string{"exit"},
+		Outbounds: []outboundSpec{
+			{Tag: "new", Type: "direct"},
+			{Tag: "dead", Type: "socks", Server: "127.0.0.1", ServerPort: int(closed)},
+			{Tag: "nothing", Type: "block"},
+			{Tag: "pinned", Type: "direct", BindInterface: "rapido-test-gone0", DirectFallback: true},
+			{Tag: "unbuildable", Type: "shadowsocks", Server: "127.0.0.1", ServerPort: 1, Method: "rc4", Password: "x"},
+		},
+	})
+	if rec.Code != http.StatusOK || len(results) != 6 {
+		t.Fatalf("status = %d %s", rec.Code, rec.Body)
+	}
+	if r := results[0]; r.Tag != "exit" || r.Draft || r.StatusCode != http.StatusNoContent {
+		t.Errorf("exit = %+v, want the running outbound measured", r)
+	}
+	if r := results[1]; r.Tag != "new" || !r.Draft || r.StatusCode != http.StatusNoContent || r.Error != "" {
+		t.Errorf("new = %+v, want a draft measurement", r)
+	}
+	if r := results[2]; r.Tag != "dead" || !r.Draft || r.Error == "" {
+		t.Errorf("dead = %+v, want the failed dial", r)
+	}
+	if r := results[3]; r.Tag != "nothing" || !r.Draft || r.Skipped != outboundSkipBlock {
+		t.Errorf("nothing = %+v, want skipped as block", r)
+	}
+	// Alone means no fallback: a draft pinned to an interface is reported on it,
+	// never on a direct member. (Whether the dial then fails can't be seen here:
+	// sing-box doesn't bind a socket to loopback, where the test URL is.)
+	if r := results[4]; !r.Draft || r.Interface != "rapido-test-gone0" || r.InterfaceHere || r.Via != "" || r.Fallback {
+		t.Errorf("pinned = %+v, want it reported on its own interface, with no fallback", r)
+	}
+	if r := results[5]; !r.Draft || !strings.HasPrefix(r.Error, "this node can't build the outbound: ") {
+		t.Errorf("unbuildable = %+v, want the core's refusal", r)
+	}
+
+	srv.mu.Lock()
+	same := srv.node == running
+	srv.mu.Unlock()
+	if !same {
+		t.Fatal("testing drafts replaced the running core")
+	}
+	if err := running.CanURLTest("new"); !errors.Is(err, nodecore.ErrNoOutbound) {
+		t.Errorf("the draft leaked into the running core: %v", err)
+	}
+	if _, results := testOutbounds(t, srv, outboundTestRequest{Tags: []string{"exit"}}); len(results) != 1 || results[0].StatusCode != http.StatusNoContent {
+		t.Errorf("the running core no longer answers: %+v", results)
+	}
+}
+
+func TestOutboundTestTakesDraftsWithoutARunningCore(t *testing.T) {
+	generate204(t, 0)
+	srv := newTestServer(t)
+	rec, results := testOutbounds(t, srv, outboundTestRequest{Outbounds: []outboundSpec{{Tag: "new", Type: "direct"}}})
+	if rec.Code != http.StatusOK || len(results) != 1 || results[0].StatusCode != http.StatusNoContent || !results[0].Draft {
+		t.Fatalf("status = %d, results = %+v", rec.Code, results)
+	}
+	if rec, _ := testOutbounds(t, srv, outboundTestRequest{Tags: []string{"exit"}, Outbounds: []outboundSpec{{Tag: "new", Type: "direct"}}}); rec.Code != http.StatusConflict {
+		t.Errorf("a tag with no core: %d, want 409", rec.Code)
+	}
+}
+
+func TestOutboundTestRefusesDraftsItCannotTellApartOrBuildAlone(t *testing.T) {
+	srv := newTestServer(t)
+	startCore(t, srv, outboundSpec{Tag: "exit", Type: "direct"})
+	many := make([]outboundSpec, outboundTestMaxDrafts+1)
+	for i := range many {
+		many[i] = outboundSpec{Tag: fmt.Sprintf("d%d", i), Type: "direct"}
+	}
+	for name, req := range map[string]outboundTestRequest{
+		"no tag":          {Outbounds: []outboundSpec{{Type: "direct"}}},
+		"one tag twice":   {Outbounds: []outboundSpec{{Tag: "a", Type: "direct"}, {Tag: "a", Type: "direct"}}},
+		"by tag as well":  {Tags: []string{"exit"}, Outbounds: []outboundSpec{{Tag: "exit", Type: "direct"}}},
+		"a group":         {Outbounds: []outboundSpec{{Tag: "g", Type: "selector", Outbounds: []string{"direct"}}}},
+		"tor":             {Outbounds: []outboundSpec{{Tag: "t", Type: "tor"}}},
+		"too many":        {Outbounds: many},
+		"nothing to test": {},
+	} {
+		if rec, _ := testOutbounds(t, srv, req); rec.Code != http.StatusUnprocessableEntity {
+			t.Errorf("%s: %d %s, want 422", name, rec.Code, rec.Body)
+		}
+	}
+}
+
+// Drafts share the node's test slots with everything else: a full batch of them
+// beside running outbounds still never runs more than the limit at once.
+func TestOutboundTestRunsDraftsWithinTheParallelLimit(t *testing.T) {
+	inFlightMax := generate204(t, 150*time.Millisecond)
+	srv := newTestServer(t)
+	var running []outboundSpec
+	var tags []string
+	for i := range 4 {
+		tag := fmt.Sprintf("exit-%d", i)
+		running = append(running, outboundSpec{Tag: tag, Type: "direct"})
+		tags = append(tags, tag)
+	}
+	startCore(t, srv, running...)
+	var drafts []outboundSpec
+	for i := range outboundTestMaxDrafts {
+		drafts = append(drafts, outboundSpec{Tag: fmt.Sprintf("draft-%d", i), Type: "direct"})
+	}
+	rec, results := testOutbounds(t, srv, outboundTestRequest{Tags: tags, Outbounds: drafts})
+	if rec.Code != http.StatusOK || len(results) != len(tags)+len(drafts) {
+		t.Fatalf("status = %d, %d results", rec.Code, len(results))
 	}
 	for _, r := range results {
 		if r.StatusCode != http.StatusNoContent {

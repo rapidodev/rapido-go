@@ -71,6 +71,17 @@ export const SNELL_OBFS_MODES = ["none", "http", "tls"] as const;
 export const SHADOWTLS_VERSIONS = [1, 2, 3] as const;
 export const VLESS_FLOWS = ["xtls-rprx-vision"] as const;
 
+/** The ClientHellos an outbound's uTLS can imitate (validTLSFingerprints in outboundstream.go). */
+export const TLS_FINGERPRINTS = ["chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq", "random", "randomized"] as const;
+/** What REALITY imitates when no fingerprint is set: it needs one. */
+export const REALITY_DEFAULT_FINGERPRINT = "chrome";
+/** The V2Ray transports an outbound can wrap its protocol in; "http" is HTTP/2 (Xray's h2). */
+export const OUTBOUND_TRANSPORTS = ["ws", "grpc", "httpupgrade", "http"] as const;
+/** The types that take a fingerprint, ECH, REALITY and a transport. */
+export const STREAM_OUTBOUND_TYPES = ["vless", "vmess", "trojan"] as const;
+/** The types that take an ALPN list: those above, and the QUIC ones whose TLS is always on. */
+export const ALPN_OUTBOUND_TYPES = ["vless", "vmess", "trojan", "hysteria2", "tuic"] as const;
+
 // The two tags a node always has even with zero custom outbounds configured
 // (cmd/node/main.go's buildOptions always emits both) - reserved, so an
 // admin can never define a custom outbound under either name (see
@@ -126,6 +137,24 @@ export type Outbound = {
   tls_enabled?: boolean;
   tls_server_name?: string;
   tls_insecure?: boolean;
+
+  /** What another provider's server needs on top of plain TLS - only on the
+   * types that use each (STREAM_OUTBOUND_TYPES, and ALPN_OUTBOUND_TYPES for the
+   * ALPN list). REALITY turns TLS on by itself, needs tls_server_name, and
+   * imitates chrome when tls_fingerprint is unset. */
+  tls_alpn?: string[];
+  tls_fingerprint?: (typeof TLS_FINGERPRINTS)[number];
+  /** An ECHConfigList in base64. */
+  tls_ech_config?: string;
+  reality_public_key?: string;
+  reality_short_id?: string;
+  transport_type?: (typeof OUTBOUND_TRANSPORTS)[number];
+  /** ws / httpupgrade / http. */
+  transport_path?: string;
+  /** ws / httpupgrade; http takes several, comma-separated. */
+  transport_host?: string;
+  /** grpc. */
+  transport_service_name?: string;
 
   /** Binds this outbound's dialer to a specific network interface (e.g. a
    * WireGuard tunnel device name) - the sing-box equivalent of Xray's

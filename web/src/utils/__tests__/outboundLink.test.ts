@@ -8,9 +8,12 @@ import ru from "../../../public/statics/locales/ru.json";
 import zh from "../../../public/statics/locales/zh.json";
 import { OUTBOUND_TYPES_PLAIN, normalizeOutbound } from "../coreConfigFields";
 import { validateCoreConfigDoc } from "../coreConfigRules";
-import { ImportedOutbound, LINK_ERROR_KINDS, LinkError, isIPv6, parseOutboundLink } from "../outboundLink";
+import { ImportedOutbound, LINK_ERROR_KINDS, LINK_NOTE_KINDS, LinkError, isIPv6, parseOutboundLink } from "../outboundLink";
 
 const UUID = "1b0f8d6e-3c2a-4e5f-9a7b-0c1d2e3f4a5b";
+// An X25519 public key, and an ECHConfigList for cloudflare-ech.com, both as links carry them.
+const PBK = "tNusmlSozuXV95B7bOpp7J_vPBWfCis3SChNyuEL9BA";
+const ECH = "AE3+DQBJAAAgACAXs75gt43sJfOCELDz/NA22JSJrfmuEAMbYx9uuadRagAMAAEAAQABAAIAAQADABJjbG91ZGZsYXJlLWVjaC5jb20AAA==";
 
 const ok = (link: string): ImportedOutbound => {
   const result = parseOutboundLink(link);
@@ -47,7 +50,7 @@ const VMESS = {
 };
 
 describe("vless", () => {
-  it("takes the id, the address, vision and TLS, and names what it leaves out", () => {
+  it("takes the id, the address, vision and TLS with its fingerprint and ALPN", () => {
     const got = ok(
       `vless://${UUID}@example.com:443?encryption=none&flow=xtls-rprx-vision&security=tls&sni=sni.example.com&fp=chrome&alpn=h2%2Chttp%2F1.1&type=tcp&headerType=none&host=&path=#%D8%A2%D9%84%D9%85%D8%A7%D9%86%20DE`
     );
@@ -59,9 +62,26 @@ describe("vless", () => {
       flow: "xtls-rprx-vision",
       tls_enabled: true,
       tls_server_name: "sni.example.com",
+      tls_fingerprint: "chrome",
+      tls_alpn: ["h2", "http/1.1"],
     });
     expect(got.name).toBe("آلمان DE");
-    expect(got.ignored).toEqual(["fp", "alpn"]);
+    expect(got.ignored).toEqual([]);
+    expect(got.notes).toEqual([]);
+  });
+
+  it("leaves out a fingerprint the outbound can't imitate, by name", () => {
+    const got = ok(`vless://${UUID}@h.example:443?security=tls&fp=hellochrome_120`);
+    expect(got.outbound).not.toHaveProperty("tls_fingerprint");
+    expect(got.ignored).toEqual(["fp"]);
+  });
+
+  it("takes an ECH config list, and explains one it can't use", () => {
+    expect(ok(`vless://${UUID}@h.example:443?security=tls&sni=i.example&ech=${encodeURIComponent(ECH)}`).outbound.tls_ech_config).toBe(ECH);
+    const lookup = ok(`vless://${UUID}@h.example:443?security=tls&ech=cloudflare-ech.com%2Bhttps%3A%2F%2F1.1.1.1%2Fdns-query`);
+    expect(lookup.outbound).not.toHaveProperty("tls_ech_config");
+    expect(lookup.notes).toEqual(["echNotConfig"]);
+    expect(lookup.ignored).toEqual([]);
   });
 
   it("leaves TLS off without security, and the TLS-only settings then mean nothing", () => {
@@ -90,17 +110,20 @@ describe("vless", () => {
   });
 
   it("reports settings it doesn't know rather than dropping them silently", () => {
-    expect(ok(`vless://${UUID}@h.example:443?security=tls&packetEncoding=xudp&ech=abc`).ignored).toEqual(["packetEncoding", "ech"]);
+    expect(ok(`vless://${UUID}@h.example:443?security=tls&packetEncoding=xudp`).ignored).toEqual(["packetEncoding"]);
   });
 
   it.each([
-    ["REALITY", `vless://${UUID}@h.example:443?security=reality&pbk=abc&sid=01&sni=www.example.com&fp=chrome`, { kind: "reality" }],
+    ["REALITY with a key that isn't one", `vless://${UUID}@h.example:443?security=reality&pbk=abc&sid=01&sni=www.example.com&fp=chrome`, { kind: "realityKey" }],
+    ["REALITY without a key", `vless://${UUID}@h.example:443?security=reality&sni=www.example.com`, { kind: "realityKey" }],
+    ["REALITY with an odd short id", `vless://${UUID}@h.example:443?security=reality&pbk=${PBK}&sid=abc&sni=www.example.com`, { kind: "realityShortId" }],
+    ["REALITY without sni", `vless://${UUID}@h.example:443?security=reality&pbk=${PBK}&sid=01`, { kind: "realityServerName" }],
     ["another security", `vless://${UUID}@h.example:443?security=xtls`, { kind: "security", value: "xtls" }],
-    ["WebSocket", `vless://${UUID}@h.example:443?type=ws&path=%2Fws&host=h.example`, { kind: "transport", value: "ws" }],
-    ["gRPC", `vless://${UUID}@h.example:443?type=grpc&serviceName=svc`, { kind: "transport", value: "grpc" }],
-    ["HTTPUpgrade", `vless://${UUID}@h.example:443?type=httpupgrade&path=%2F`, { kind: "transport", value: "httpupgrade" }],
-    ["HTTP/2", `vless://${UUID}@h.example:443?type=h2&path=%2F`, { kind: "transport", value: "h2" }],
     ["XHTTP", `vless://${UUID}@h.example:443?type=xhttp`, { kind: "transport", value: "xhttp" }],
+    ["SplitHTTP", `vless://${UUID}@h.example:443?type=splithttp&path=%2F`, { kind: "transport", value: "splithttp" }],
+    ["mKCP", `vless://${UUID}@h.example:443?type=kcp&seed=x`, { kind: "transport", value: "kcp" }],
+    ["mkcp by that name", `vless://${UUID}@h.example:443?type=mkcp`, { kind: "transport", value: "mkcp" }],
+    ["QUIC", `vless://${UUID}@h.example:443?type=quic`, { kind: "transport", value: "quic" }],
     ["an HTTP header", `vless://${UUID}@h.example:80?type=tcp&headerType=http&host=a.example`, { kind: "header", value: "http" }],
     ["another flow", `vless://${UUID}@h.example:443?security=tls&flow=xtls-rprx-vision-udp443`, { kind: "flow", value: "xtls-rprx-vision-udp443" }],
     ["VLESS encryption", `vless://${UUID}@h.example:443?encryption=mlkem768x25519plus.native.0rtt.abc`, { kind: "encryption", value: "mlkem768x25519plus.native.0rtt.abc" }],
@@ -123,6 +146,81 @@ describe("vless", () => {
   });
 });
 
+describe("REALITY", () => {
+  it("takes the key, the short id, the name and the fingerprint, and says what spx was", () => {
+    const got = ok(
+      `vless://${UUID}@203.0.113.9:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.example.com&fp=chrome&pbk=${PBK}&sid=0123abcd&spx=%2F&type=tcp&headerType=none#NL`
+    );
+    expect(got.outbound).toEqual({
+      type: "vless",
+      server: "203.0.113.9",
+      server_port: 443,
+      uuid: UUID,
+      flow: "xtls-rprx-vision",
+      tls_enabled: true,
+      tls_server_name: "www.example.com",
+      tls_fingerprint: "chrome",
+      reality_public_key: PBK,
+      reality_short_id: "0123abcd",
+    });
+    expect(got.notes).toEqual(["spiderX"]);
+    expect(got.ignored).toEqual([]);
+  });
+
+  it("leaves the fingerprint to the default when the link names none, and ALPN and insecure out", () => {
+    const got = ok(`vless://${UUID}@h.example:443?security=reality&sni=www.example.com&pbk=${PBK}&alpn=h2&allowInsecure=1`);
+    expect(got.outbound).not.toHaveProperty("tls_fingerprint");
+    expect(got.outbound).not.toHaveProperty("tls_alpn");
+    expect(got.outbound).not.toHaveProperty("tls_insecure");
+    expect(got.outbound).not.toHaveProperty("reality_short_id");
+    expect(got.notes).toEqual(["realityAlpn"]);
+  });
+
+  it("goes under gRPC, and on trojan", () => {
+    const got = ok(`trojan://pw@h.example:443?security=reality&sni=www.example.com&pbk=${PBK}&sid=ab&type=grpc&serviceName=svc&mode=multi`);
+    expect(got.outbound).toMatchObject({ type: "trojan", reality_public_key: PBK, transport_type: "grpc", transport_service_name: "svc" });
+    expect(got.notes).toEqual(["grpcMulti"]);
+  });
+});
+
+describe("transports", () => {
+  it("takes WebSocket with its path and host, under TLS", () => {
+    const got = ok(
+      `vless://${UUID}@cdn.example.com:443?security=tls&sni=cdn.example.com&alpn=http%2F1.1&fp=firefox&type=ws&path=%2Fray%3Fed%3D2048&host=cdn.example.com&headerType=none`
+    );
+    expect(got.outbound).toEqual({
+      type: "vless",
+      server: "cdn.example.com",
+      server_port: 443,
+      uuid: UUID,
+      tls_enabled: true,
+      tls_server_name: "cdn.example.com",
+      tls_fingerprint: "firefox",
+      tls_alpn: ["http/1.1"],
+      transport_type: "ws",
+      transport_path: "/ray?ed=2048",
+      transport_host: "cdn.example.com",
+    });
+    expect(got.ignored).toEqual([]);
+  });
+
+  it("puts a path that leaves out its first slash at the root", () => {
+    expect(ok(`vless://${UUID}@h.example:80?type=ws&path=ray`).outbound.transport_path).toBe("/ray");
+  });
+
+  it.each([
+    ["gRPC", `vless://${UUID}@h.example:443?type=grpc&serviceName=svc&mode=gun`, { transport_type: "grpc", transport_service_name: "svc" }],
+    ["HTTPUpgrade", `vless://${UUID}@h.example:80?type=httpupgrade&path=%2Fup&host=h.example`, { transport_type: "httpupgrade", transport_path: "/up", transport_host: "h.example" }],
+    ["HTTP/2 as h2", `vless://${UUID}@h.example:443?security=tls&type=h2&path=%2Fh2&host=a.example%2Cb.example`, { transport_type: "http", transport_path: "/h2", transport_host: "a.example,b.example" }],
+    ["HTTP/2 as http", `vless://${UUID}@h.example:443?security=tls&type=http&path=%2Fh2`, { transport_type: "http", transport_path: "/h2" }],
+    ["gRPC on trojan", "trojan://pw@h.example:443?type=grpc&serviceName=x", { transport_type: "grpc", transport_service_name: "x" }],
+  ])("takes %s", (_, link, fields) => {
+    const got = ok(link);
+    expect(got.outbound).toMatchObject(fields);
+    expect(got.ignored).toEqual([]);
+  });
+});
+
 describe("vmess", () => {
   it("reads the v2 JSON form", () => {
     const got = ok(vmessLink({ ...VMESS, fp: "chrome" }));
@@ -134,9 +232,26 @@ describe("vmess", () => {
       security: "auto",
       tls_enabled: true,
       tls_server_name: "sni.example.com",
+      tls_fingerprint: "chrome",
     });
     expect(got.name).toBe("آلمان ۱");
-    expect(got.ignored).toEqual(["fp"]);
+    expect(got.ignored).toEqual([]);
+  });
+
+  it("reads WebSocket, where type means nothing, and gRPC, whose service name is in path", () => {
+    const ws = ok(vmessLink({ ...VMESS, net: "ws", path: "/ws", host: "cdn.example.com", type: "none" }));
+    expect(ws.outbound).toMatchObject({ transport_type: "ws", transport_path: "/ws", transport_host: "cdn.example.com" });
+    expect(ws.ignored).toEqual([]);
+    const grpc = ok(vmessLink({ ...VMESS, net: "grpc", path: "svc", type: "multi", host: "ignored.example" }));
+    expect(grpc.outbound).toMatchObject({ transport_type: "grpc", transport_service_name: "svc" });
+    expect(grpc.outbound).not.toHaveProperty("transport_path");
+    expect(grpc.notes).toEqual(["grpcMulti"]);
+    expect(grpc.ignored).toEqual([]);
+  });
+
+  it("reads REALITY", () => {
+    const got = ok(vmessLink({ ...VMESS, tls: "reality", pbk: PBK, sid: "ab", sni: "www.example.com" }));
+    expect(got.outbound).toMatchObject({ tls_enabled: true, reality_public_key: PBK, reality_short_id: "ab", tls_server_name: "www.example.com" });
   });
 
   it("takes numbers as numbers, a missing cipher as auto, and no TLS", () => {
@@ -164,12 +279,12 @@ describe("vmess", () => {
   });
 
   it.each([
-    ["WebSocket", { ...VMESS, net: "ws", path: "/ws" }, { kind: "transport", value: "ws" }],
-    ["gRPC", { ...VMESS, net: "grpc" }, { kind: "transport", value: "grpc" }],
+    ["mKCP", { ...VMESS, net: "kcp" }, { kind: "transport", value: "kcp" }],
+    ["XHTTP", { ...VMESS, net: "xhttp" }, { kind: "transport", value: "xhttp" }],
     ["an HTTP header", { ...VMESS, type: "http" }, { kind: "header", value: "http" }],
     ["an alterId", { ...VMESS, aid: "64" }, { kind: "alterId", value: "64" }],
     ["an unknown cipher", { ...VMESS, scy: "rc4" }, { kind: "vmessSecurity", value: "rc4" }],
-    ["REALITY", { ...VMESS, tls: "reality" }, { kind: "reality" }],
+    ["REALITY without a key", { ...VMESS, tls: "reality" }, { kind: "realityKey" }],
     ["another version", { ...VMESS, v: "1" }, { kind: "vmessVersion", value: "1" }],
     ["no server", { ...VMESS, add: "" }, { kind: "address" }],
     ["a server with a port in it", { ...VMESS, add: "de.example.com:443" }, { kind: "address" }],
@@ -214,8 +329,8 @@ describe("trojan", () => {
   });
 
   it.each([
-    ["gRPC", "trojan://pw@h.example:443?type=grpc&serviceName=x", { kind: "transport", value: "grpc" }],
-    ["REALITY", "trojan://pw@h.example:443?security=reality&pbk=k", { kind: "reality" }],
+    ["QUIC", "trojan://pw@h.example:443?type=quic", { kind: "transport", value: "quic" }],
+    ["REALITY with a key that isn't one", "trojan://pw@h.example:443?security=reality&pbk=k", { kind: "realityKey" }],
     ["a flow", "trojan://pw@h.example:443?flow=xtls-rprx-direct", { kind: "flow", value: "xtls-rprx-direct" }],
     ["no password", "trojan://@h.example:443", { kind: "noPassword" }],
     ["a broken escape", "trojan://pw%zz@h.example:443", { kind: "encoding" }],
@@ -305,8 +420,10 @@ describe("hysteria2", () => {
     expect(got.ignored).toEqual([]);
   });
 
-  it("names the bandwidth hints and ALPN it leaves out", () => {
-    expect(ok("hy2://pw@h.example:443?alpn=h3&upmbps=100&downmbps=500").ignored).toEqual(["alpn", "upmbps", "downmbps"]);
+  it("takes ALPN, and names the bandwidth hints and fingerprint it leaves out", () => {
+    const got = ok("hy2://pw@h.example:443?alpn=h3&upmbps=100&downmbps=500&fp=chrome");
+    expect(got.outbound.tls_alpn).toEqual(["h3"]);
+    expect(got.ignored).toEqual(["upmbps", "downmbps", "fp"]);
   });
 
   it.each([
@@ -346,8 +463,10 @@ describe("what isn't a link it can import", () => {
       `trojan://${secret}@h.example:443?security=reality`,
       `ss://${utf8Base64(`aes-256-gcm:${secret}`)}@h.example:8388/?plugin=v2ray-plugin%3Bpath%3D%2F${secret}`,
       `hy2://${secret}@h.example:443?obfs=salamander&obfs-password=${secret}`,
-      `vless://${secret}@h.example:443?type=ws`,
-      vmessLink({ ...VMESS, id: secret, net: "grpc" }),
+      `vless://${secret}@h.example:443?type=xhttp`,
+      `vless://${UUID}@h.example:443?security=reality&pbk=${PBK}&sid=${secret}&sni=s.example`,
+      `vless://${UUID}@h.example:443?security=reality&pbk=${secret}&sni=s.example`,
+      vmessLink({ ...VMESS, id: secret, net: "kcp" }),
     ]) {
       expect(JSON.stringify(refused(link))).not.toContain(secret);
     }
@@ -383,7 +502,15 @@ describe("every outbound it makes", () => {
     "trojan://pw@h.example:443?sni=s.example",
     "trojan://pw@h.example:80?security=none",
     `ss://${base64Url("2022-blake3-aes-128-gcm:a2V5a2V5a2V5a2V5a2V5aw==")}@h.example:8388`,
-    "hy2://pw@h.example:443?sni=s.example&insecure=1",
+    "hy2://pw@h.example:443?sni=s.example&insecure=1&alpn=h3",
+    `vless://${UUID}@203.0.113.9:443?flow=xtls-rprx-vision&security=reality&sni=www.example.com&fp=chrome&pbk=${PBK}&sid=0123abcd&spx=%2F`,
+    `vless://${UUID}@203.0.113.9:443?security=reality&sni=www.example.com&pbk=${PBK}&type=grpc&serviceName=svc`,
+    `vless://${UUID}@cdn.example.com:443?security=tls&sni=cdn.example.com&fp=firefox&alpn=http%2F1.1&type=ws&path=%2Fray&host=cdn.example.com`,
+    `vless://${UUID}@h.example:80?type=httpupgrade&path=%2Fup&host=h.example`,
+    `vless://${UUID}@h.example:443?security=tls&type=h2&path=%2Fh2&host=a.example%2Cb.example`,
+    `trojan://pw@h.example:443?sni=i.example&ech=${encodeURIComponent(ECH)}`,
+    vmessLink({ ...VMESS, net: "ws", path: "/ws", host: "cdn.example.com" }),
+    vmessLink({ ...VMESS, net: "grpc", path: "svc" }),
   ];
 
   it("reads the server's own field list", () => {
@@ -406,6 +533,7 @@ describe("messages", () => {
     const locales: Record<string, Record<string, string>> = { en, fa, ru, zh };
     for (const [lang, dict] of Object.entries(locales)) {
       for (const kind of LINK_ERROR_KINDS) expect(dict[`rapido.coreForm.link.error.${kind}`], `${lang} ${kind}`).toBeTruthy();
+      for (const kind of LINK_NOTE_KINDS) expect(dict[`rapido.coreForm.link.note.${kind}`], `${lang} ${kind}`).toBeTruthy();
     }
   });
 });

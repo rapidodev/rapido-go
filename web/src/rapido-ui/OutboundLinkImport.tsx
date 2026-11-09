@@ -2,7 +2,7 @@ import { FC, useState } from "react";
 import { ArrowDownTrayIcon } from "@heroicons/react/24/outline";
 import { useTranslation } from "react-i18next";
 import { Item } from "utils/coreConfigRules";
-import { LinkError, parseOutboundLink } from "utils/outboundLink";
+import { LinkError, LinkNoteKind, parseOutboundLink } from "utils/outboundLink";
 import { Button } from "./Button";
 import { Input } from "./Input";
 import { autoIsolate, ltrIsolate } from "./bidi";
@@ -20,7 +20,7 @@ export const OutboundLinkImport: FC<{ onImport: (outbound: Item) => void }> = ({
   const t = rawT as Translate;
   const [link, setLink] = useState("");
   const [error, setError] = useState<LinkError | null>(null);
-  const [filled, setFilled] = useState<{ name: string; ignored: string[] } | null>(null);
+  const [filled, setFilled] = useState<{ name: string; ignored: string[]; notes: LinkNoteKind[] } | null>(null);
 
   const fill = () => {
     const result = parseOutboundLink(link);
@@ -31,7 +31,7 @@ export const OutboundLinkImport: FC<{ onImport: (outbound: Item) => void }> = ({
     }
     onImport(result.value.outbound);
     setError(null);
-    setFilled({ name: result.value.name, ignored: result.value.ignored });
+    setFilled({ name: result.value.name, ignored: result.value.ignored, notes: result.value.notes });
     // The link holds the credentials, which are in the editor now.
     setLink("");
   };
@@ -88,6 +88,11 @@ export const OutboundLinkImport: FC<{ onImport: (outbound: Item) => void }> = ({
       {filled && filled.ignored.length > 0 && (
         <p className="text-xs text-amber-400">{t("rapido.coreForm.link.ignored", { keys: ltrIsolate(filled.ignored.join(", ")) })}</p>
       )}
+      {filled?.notes.map((note) => (
+        <p key={note} className="text-xs text-amber-400">
+          {t(`rapido.coreForm.link.note.${note}`)}
+        </p>
+      ))}
     </div>
   );
 };

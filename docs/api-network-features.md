@@ -904,14 +904,17 @@ days and events older than 90 days hourly; the digest job checks every 10 minute
 
 ### `POST /api/core/outbounds/test`
 
-Measures outbounds of the core the nodes are running now (not unsaved edits): each node makes one `HEAD` request to
+Measures outbounds from the nodes, either of the core they are running now (by tag) or as drafts sent whole (see
+below): each node makes one `HEAD` request to
 `https://www.gstatic.com/generate_204` through the outbound and times it, from the dial to the response headers. The
 panel asks the node on its control port (`api_port`, default 62051) over the same mutual TLS the node already requires,
 so that port must be reachable from the panel; a node that cannot be reached gets an `error` on every result.
 
-Body: `tags` (1 to 16 outbound tags, required) and `node_id` (optional; absent or 0 = every node whose status is
-`connected`). Errors: **422** bad body, **404** unknown node, **409** the node is disabled or no node is connected,
-**429** other tests are still running in this panel process.
+Body: `tags` (up to 16 outbound tags of the running core), `outbounds` (up to 8 drafts, below) and `node_id`
+(optional; absent or 0 = every node whose status is `connected`). At least one tag or draft is required. Errors:
+**422** bad body, a draft refused (below), or a tag asked for both by name and as a draft; **404** unknown node,
+**409** the node is disabled or no node is connected, **429** other tests are still running in this panel process. A
+node with no core running answers drafts but not tags.
 
 Limits: a node runs at most 8 tests at once, each up to 5 s, and answers within 18 s; the panel asks up to 8 nodes at
 once and runs up to 4 test requests at once.
@@ -939,3 +942,76 @@ tunnel is down or not on that node.
   ]
 }
 ```
+
+#### Testing an outbound before it is saved
+
+Each entry of `outbounds` is one outbound in the core config's own form (the same fields `PUT /api/settings/xray-config`
+takes), saved or not. The panel checks the drafts exactly as saving them would, as a config of their own, and refuses
+the request with that message (**422**) if they don't pass; it also refuses a `selector` or `urltest` group (a draft is
+tested alone, so it has to dial by itself) and `tor` (it would start a process on the node). A `block` draft comes back
+`skipped: "block"`.
+
+Each node builds every draft into a throwaway core holding only that outbound: no inbound, nothing of the running core,
+closed after its one test. It runs within the same limits as the other tests (the same 8 slots, 5 s each, 18 s per
+request), goes out over the node's ordinary network, or the interface the draft itself names in `bind_interface`, and
+has no fallback: a draft pinned to a tunnel that node lacks fails there. The result has the same shape, with
+`"draft": true`; a draft the node can't build has an `error` starting `this node can't build the outbound:`. A node
+agent from before drafts gets `the node agent is too old to test an unsaved outbound; update it` for each draft.
+
+<!-- example:outbound_test_draft_request -->
+```json
+{
+  "node_id": 1,
+  "tags": ["exit-de"],
+  "outbounds": [
+    {
+      "tag": "provider-nl",
+      "type": "vless",
+      "server": "203.0.113.20",
+      "server_port": 443,
+      "uuid": "1b0f8d6e-3c2a-4e5f-9a7b-0c1d2e3f4a5b",
+      "flow": "xtls-rprx-vision",
+      "tls_enabled": true,
+      "tls_server_name": "www.example.com",
+      "tls_fingerprint": "chrome",
+      "reality_public_key": "tNusmlSozuXV95B7bOpp7J_vPBWfCis3SChNyuEL9BA",
+      "reality_short_id": "0123abcd"
+    }
+  ]
+}
+```
+
+<!-- example:outbound_test_draft -->
+```json
+{
+  "url": "https://www.gstatic.com/generate_204",
+  "nodes": [{ "id": 1, "name": "de-1" }],
+  "results": [
+    { "node_id": 1, "node": "de-1", "tag": "exit-de", "delay_ms": 74, "status_code": 204, "interface": "wg-de", "interface_here": true, "via": "exit-de~wg", "fallback": false },
+    { "node_id": 1, "node": "de-1", "tag": "provider-nl", "delay_ms": 212, "status_code": 204, "interface_here": false, "fallback": false, "draft": true }
+  ]
+}
+```
+
+#### Outbounds to another provider's server
+
+An outbound of type `vless`, `vmess` or `trojan` can carry what another provider's share link holds; `hysteria2` and
+`tuic` take only `tls_alpn`. Every field is optional, and a node agent older than these fields is sent such an outbound
+as a `block` outbound of the same tag (so it refuses that traffic rather than dialing the server some other way).
+
+| field | sing-box (node) | Xray JSON (`/api/core/config`) |
+| --- | --- | --- |
+| `tls_alpn` (list) | `tls.alpn` | `tlsSettings.alpn` |
+| `tls_fingerprint`: chrome, firefox, safari, ios, android, edge, 360, qq, random, randomized | `tls.utls` | `tlsSettings.fingerprint`, or `realitySettings.fingerprint` |
+| `tls_ech_config`: an ECHConfigList in base64 | `tls.ech.config`, as an `ECH CONFIGS` PEM block | `tlsSettings.echConfigList` |
+| `reality_public_key` (43 characters of base64url), `reality_short_id` (hex, even length, at most 16) | `tls.reality` | `security: "reality"`, `realitySettings.publicKey`, `.shortId`, `.serverName` |
+| `transport_type`: `ws`, `grpc`, `httpupgrade`, or `http` (HTTP/2) | `transport` | `network`: `ws`, `grpc`, `httpupgrade`, `h2` |
+| `transport_path` (ws, httpupgrade, http; starts with `/`) | `transport.path` | `wsSettings.path`, `httpupgradeSettings.path`, `httpSettings.path` |
+| `transport_host` (ws, httpupgrade; http takes several, comma-separated) | `transport.headers.Host` (ws), `transport.host` (httpupgrade, http) | `wsSettings.headers.Host` (`wsSettings.host` read too), `httpupgradeSettings.host`, `httpSettings.host` |
+| `transport_service_name` (grpc) | `transport.service_name` | `grpcSettings.serviceName` |
+
+REALITY turns TLS on whatever `tls_enabled` says, needs `tls_server_name` (one of the names the server's REALITY settings
+list), and imitates `chrome` when `tls_fingerprint` is empty, since it rides on uTLS and needs one; the Xray export
+writes that `chrome` out. It can't be combined with `tls_ech_config`, `tls_alpn` or `tls_insecure`, nor with a `ws` or
+`httpupgrade` transport. `tls_fingerprint`, `tls_alpn` and `tls_ech_config` need TLS on; `flow` (Vision) needs TLS or
+REALITY and no transport.

@@ -112,11 +112,38 @@ type outboundDTO struct {
 	// TLS* is the common subset every TLS-capable outbound type here
 	// shares (vmess/trojan/vless/hysteria2/tuic/anytls/shadowtls/hysteria)
 	// - a deliberately small slice of sing-box's full
-	// OutboundTLSOptions (no ALPN/cert-pinning/client-cert fields), matching
+	// OutboundTLSOptions (no cert-pinning/client-cert fields), matching
 	// this form's "commonly-needed fields only" scope everywhere else.
 	TLSEnabled    bool   `json:"tls_enabled,omitempty"`
 	TLSServerName string `json:"tls_server_name,omitempty"`
 	TLSInsecure   bool   `json:"tls_insecure,omitempty"`
+
+	// What a server run by another provider usually needs on top of that: the
+	// rest of a share link. Each is allowed only on the types that use it (see
+	// validateOutboundStream) and maps to sing-box's own TLS and V2Ray transport
+	// options on the node. A node agent that predates them would leave them out
+	// and dial something else, so an outbound using any of them only goes to
+	// agents of node-config schema 5 (see nodeConfigSchema.outboundsFor).
+	//
+	// TLSALPN is the ALPN list (vless/vmess/trojan/hysteria2/tuic).
+	// TLSFingerprint is the uTLS ClientHello to imitate (vless/vmess/trojan).
+	// TLSECHConfig is an ECHConfigList in base64, the form Xray and share links
+	// carry it in (vless/vmess/trojan, with TLS and without REALITY).
+	TLSALPN        []string `json:"tls_alpn,omitempty"`
+	TLSFingerprint string   `json:"tls_fingerprint,omitempty"`
+	TLSECHConfig   string   `json:"tls_ech_config,omitempty"`
+	// RealityPublicKey turns TLS into REALITY (vless/vmess/trojan): TLS is then
+	// on whatever tls_enabled says, tls_server_name is required, and with no
+	// tls_fingerprint the node imitates chrome, since REALITY needs one.
+	RealityPublicKey string `json:"reality_public_key,omitempty"`
+	RealityShortID   string `json:"reality_short_id,omitempty"`
+	// TransportType wraps the protocol in a V2Ray transport (vless/vmess/trojan):
+	// ws, grpc, httpupgrade, or http (HTTP/2, Xray's "h2"). Path and host are
+	// for ws/httpupgrade/http, the service name for grpc.
+	TransportType        string `json:"transport_type,omitempty"`
+	TransportPath        string `json:"transport_path,omitempty"`
+	TransportHost        string `json:"transport_host,omitempty"`
+	TransportServiceName string `json:"transport_service_name,omitempty"`
 
 	// BindInterface binds this outbound's dialer to a specific network
 	// interface (e.g. a WireGuard tunnel device name) - the sing-box
@@ -461,6 +488,10 @@ func validateCoreConfig(dto coreConfigDTO) string {
 			if ob.Username == "" || ob.Password == "" {
 				return "outbound " + ob.Tag + ": username and password are required for type ssh"
 			}
+		}
+		// After the type's own checks, so a field it refuses is named for what it is.
+		if msg := validateOutboundStream(ob); msg != "" {
+			return msg
 		}
 	}
 	// Member references (selector/urltest) and routing-rule targets both

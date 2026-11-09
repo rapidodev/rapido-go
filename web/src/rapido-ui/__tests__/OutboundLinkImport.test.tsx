@@ -25,7 +25,7 @@ const doc = {
 };
 
 const UUID = "1b0f8d6e-3c2a-4e5f-9a7b-0c1d2e3f4a5b";
-const VLESS = `vless://${UUID}@de.example.com:443?security=tls&sni=sni.example.com&fp=chrome&flow=xtls-rprx-vision&type=tcp#Germany%201`;
+const VLESS = `vless://${UUID}@de.example.com:443?security=tls&sni=sni.example.com&fp=chrome&flow=xtls-rprx-vision&type=tcp&packetEncoding=xudp#Germany%201`;
 
 const wrap = (node: ReactNode) => (
   <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>{node}</QueryClientProvider>
@@ -84,9 +84,10 @@ describe("filling an outbound from a share link", () => {
       flow: "xtls-rprx-vision",
       tls_enabled: true,
       tls_server_name: "sni.example.com",
+      tls_fingerprint: "chrome",
     });
     expect(screen.getByRole("status").textContent).toContain("Germany 1");
-    expect(screen.getByText(/Left out, as the outbound has no field for them/).textContent).toContain("fp");
+    expect(screen.getByText(/Left out, as the outbound has no field for them/).textContent).toContain("packetEncoding");
     // The credentials are in the editor now; the box doesn't keep a second copy.
     expect(linkBox().value).toBe("");
 
@@ -123,16 +124,16 @@ describe("filling an outbound from a share link", () => {
 
     const user = await pasteLink(`vless://${UUID}@h.example:443?security=reality&pbk=key&sid=01`);
     await user.click(fillButton());
-    expect(screen.getByRole("alert").textContent).toBe("REALITY isn't supported on outbounds yet.");
+    expect(screen.getByRole("alert").textContent).toBe("The link's REALITY public key (pbk) is missing or isn't 43 characters of base64url.");
     expect(linkBox()).toHaveAttribute("aria-invalid", "true");
     expect(editor("Edit outbound").value).toBe(before);
     expect(screen.queryByRole("status")).toBeNull();
 
     await user.clear(linkBox());
-    await user.paste(`vless://${UUID}@h.example:443?type=ws&path=%2F`);
+    await user.paste(`vless://${UUID}@h.example:443?type=xhttp&path=%2F`);
     await user.click(fillButton());
     // The value is isolated left-to-right, for the Persian UI.
-    expect(screen.getByRole("alert").textContent).toBe("The ⁦ws⁩ transport isn't supported: the outbound connects over plain TCP.");
+    expect(screen.getByRole("alert").textContent).toBe("The ⁦xhttp⁩ transport isn't supported: the outbound takes tcp, ws, grpc, httpupgrade or h2.");
     expect(editor("Edit outbound").value).toBe(before);
 
     await user.clear(linkBox());

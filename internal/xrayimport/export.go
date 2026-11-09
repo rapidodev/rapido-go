@@ -1,6 +1,9 @@
 package xrayimport
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // ExportInbound is BuildXrayJSON's per-inbound input - the export
 // direction's counterpart to Inbound (the import direction's shape).
@@ -216,10 +219,35 @@ func buildXrayOutbound(ob Outbound) map[string]any {
 	if ob.BindInterface != "" {
 		stream["sockopt"] = map[string]any{"interface": ob.BindInterface}
 	}
-	if ob.TLSEnabled {
+	switch {
+	case ob.RealityPublicKey != "":
+		// Xray refuses REALITY without a fingerprint; chrome is what the node
+		// uses when none is set, so that is what the export says.
+		fingerprint := ob.TLSFingerprint
+		if fingerprint == "" {
+			fingerprint = "chrome"
+		}
+		stream["security"] = "reality"
+		stream["realitySettings"] = map[string]any{
+			"serverName": ob.TLSServerName, "publicKey": ob.RealityPublicKey,
+			"shortId": ob.RealityShortID, "fingerprint": fingerprint,
+		}
+	case ob.TLSEnabled:
 		stream["security"] = "tls"
-		stream["tlsSettings"] = map[string]any{"serverName": ob.TLSServerName, "allowInsecure": ob.TLSInsecure}
+		tls := map[string]any{"serverName": ob.TLSServerName, "allowInsecure": ob.TLSInsecure}
+		// Only when set, so an outbound without them exports as it always has.
+		if len(ob.TLSALPN) > 0 {
+			tls["alpn"] = ob.TLSALPN
+		}
+		if ob.TLSFingerprint != "" {
+			tls["fingerprint"] = ob.TLSFingerprint
+		}
+		if ob.TLSECHConfig != "" {
+			tls["echConfigList"] = ob.TLSECHConfig
+		}
+		stream["tlsSettings"] = tls
 	}
+	addXrayTransport(stream, ob)
 
 	switch ob.Type {
 	case "direct":
@@ -258,6 +286,44 @@ func buildXrayOutbound(ob Outbound) map[string]any {
 		out["streamSettings"] = stream
 	}
 	return out
+}
+
+// addXrayTransport writes an outbound's V2Ray transport as Xray's network and
+// its settings block. The Host of a ws transport goes in headers, which every
+// Xray version reads; the "host" key only newer ones do.
+func addXrayTransport(stream map[string]any, ob Outbound) {
+	withPath := func(settings map[string]any) map[string]any {
+		if ob.TransportPath != "" {
+			settings["path"] = ob.TransportPath
+		}
+		return settings
+	}
+	switch ob.TransportType {
+	case "ws":
+		stream["network"] = "ws"
+		ws := withPath(map[string]any{})
+		if ob.TransportHost != "" {
+			ws["headers"] = map[string]any{"Host": ob.TransportHost}
+		}
+		stream["wsSettings"] = ws
+	case "grpc":
+		stream["network"] = "grpc"
+		stream["grpcSettings"] = map[string]any{"serviceName": ob.TransportServiceName}
+	case "httpupgrade":
+		stream["network"] = "httpupgrade"
+		hu := withPath(map[string]any{})
+		if ob.TransportHost != "" {
+			hu["host"] = ob.TransportHost
+		}
+		stream["httpupgradeSettings"] = hu
+	case "http":
+		stream["network"] = "h2"
+		h := withPath(map[string]any{})
+		if ob.TransportHost != "" {
+			h["host"] = strings.Split(ob.TransportHost, ",")
+		}
+		stream["httpSettings"] = h
+	}
 }
 
 // buildXrayRoutingRule is parseRoutingRule's inverse for the fields that

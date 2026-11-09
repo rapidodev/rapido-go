@@ -53,6 +53,50 @@ describe("outboundFields", () => {
     expect(keys(outboundFields({ type: "snell", obfs_mode: "tls" }))).toContain("obfs_host");
   });
 
+  it("offers another provider's TLS, REALITY and transport on vless, vmess and trojan only, under headings", () => {
+    const stream = ["tls_fingerprint", "tls_ech_config", "reality_public_key", "reality_short_id", "transport_type"];
+    for (const type of ["vless", "vmess", "trojan"]) {
+      const fields = outboundFields({ type, tls_enabled: true });
+      for (const key of stream) expect(keys(fields), `${type} ${key}`).toContain(key);
+      expect(fields.find((f) => f.key === "tls_enabled")?.group).toBe("security");
+      expect(fields.find((f) => f.key === "transport_type")?.group).toBe("transport");
+      // The groups come last, so nothing ungrouped reads as part of one.
+      expect(fields[fields.length - 1].group).toBe("transport");
+    }
+    for (const type of ["hysteria2", "tuic", "anytls", "shadowtls", "socks", "shadowsocks"]) {
+      for (const key of stream) expect(keys(outboundFields({ type })), `${type} ${key}`).not.toContain(key);
+    }
+    expect(keys(outboundFields({ type: "hysteria2" }))).toContain("tls_alpn");
+    expect(keys(outboundFields({ type: "tuic" }))).toContain("tls_alpn");
+    expect(keys(outboundFields({ type: "anytls" }))).not.toContain("tls_alpn");
+  });
+
+  it("keeps REALITY's fields in view when REALITY turned TLS on by itself", () => {
+    const fields = keys(outboundFields({ type: "vless", reality_public_key: "k", tls_server_name: "s" }));
+    expect(fields).toContain("reality_public_key");
+    expect(fields).toContain("tls_server_name");
+    expect(normalizeOutbound({ tag: "x", type: "vless", reality_public_key: "k", reality_short_id: "ab", tls_server_name: "s" })).toEqual({
+      tag: "x",
+      type: "vless",
+      reality_public_key: "k",
+      reality_short_id: "ab",
+      tls_server_name: "s",
+    });
+  });
+
+  it("shows what each transport takes, and drops the rest on save", () => {
+    expect(keys(outboundFields({ type: "vless", transport_type: "grpc" }))).toContain("transport_service_name");
+    expect(keys(outboundFields({ type: "vless", transport_type: "grpc" }))).not.toContain("transport_path");
+    expect(keys(outboundFields({ type: "vmess", transport_type: "ws" }))).toEqual(expect.arrayContaining(["transport_path", "transport_host"]));
+    expect(normalizeOutbound({ tag: "x", type: "vless", transport_type: "grpc", transport_path: "/p", transport_service_name: "s" })).toEqual({
+      tag: "x",
+      type: "vless",
+      transport_type: "grpc",
+      transport_service_name: "s",
+    });
+    expect(normalizeOutbound({ tag: "x", type: "shadowsocks", transport_type: "ws", tls_fingerprint: "chrome" })).toEqual({ tag: "x", type: "shadowsocks" });
+  });
+
   it("marks the shadowtls password required except on version 1", () => {
     const required = (version: number) => outboundFields({ type: "shadowtls", version }).find((f) => f.key === "password")?.required;
     expect(required(1)).toBe(false);

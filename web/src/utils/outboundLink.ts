@@ -1,14 +1,15 @@
-import { SHADOWSOCKS_METHODS, VMESS_SECURITY_TYPES } from "types/CoreConfig";
-import { Item, isObject } from "./coreConfigRules";
+import { SHADOWSOCKS_METHODS, TLS_FINGERPRINTS, VMESS_SECURITY_TYPES } from "types/CoreConfig";
+import { Item, isEchConfigList, isObject, isRealityPublicKey, isRealityShortId } from "./coreConfigRules";
 
 // Turns a client share link (vless://, vmess://, trojan://, ss://, hysteria2:// or hy2://) into a
 // plain outbound in this panel's own core-config shape: the fields of outboundDTO in
-// internal/httpapi/coreconfig.go and nothing else. That shape dials plain TCP or QUIC with an
-// optional TLS layer (server name, skip verification), so a link that needs more - another
-// transport, REALITY, a plugin, obfuscation, a pinned certificate, port hopping - is refused with
-// the reason rather than turned into an outbound that would connect differently or not at all.
-// A setting the outbound can do without (a TLS fingerprint, ALPN) is left out and named in
-// `ignored`, so the dialog can say what was dropped.
+// internal/httpapi/coreconfig.go and nothing else. That shape dials TCP or QUIC with TLS or
+// REALITY (server name, fingerprint, ALPN, ECH, skip verification) and, for vless/vmess/trojan, a
+// ws, grpc, httpupgrade or h2 transport. A link that needs more - xhttp, kcp, quic, VLESS
+// encryption, a plugin, obfuscation, a pinned certificate, port hopping - is refused with the
+// reason rather than turned into an outbound that would connect differently or not at all. A
+// setting the outbound can do without is left out: named in `ignored`, or explained in `notes`
+// when what it means needs saying, so the dialog can say what was dropped.
 
 /** Each has its message under rapido.coreForm.link.error. */
 export const LINK_ERROR_KINDS = [
@@ -31,7 +32,9 @@ export const LINK_ERROR_KINDS = [
   "encryption",
   "flow",
   "security",
-  "reality",
+  "realityKey",
+  "realityShortId",
+  "realityServerName",
   "transport",
   "header",
   "ssFormat",
@@ -45,6 +48,11 @@ export type LinkErrorKind = (typeof LINK_ERROR_KINDS)[number];
 /** Why a link can't be imported. `value` is the offending setting, never a secret from the link. */
 export type LinkError = { kind: LinkErrorKind; value?: string };
 
+/** What was left out of an outbound, and why, beyond "it has no field for it". Each has its message
+ * under rapido.coreForm.link.note. */
+export const LINK_NOTE_KINDS = ["spiderX", "echNotConfig", "grpcMulti", "realityAlpn"] as const;
+export type LinkNoteKind = (typeof LINK_NOTE_KINDS)[number];
+
 export type ImportedOutbound = {
   /** The outbound without a tag: the dialog keeps its own. */
   outbound: Item;
@@ -52,6 +60,8 @@ export type ImportedOutbound = {
   name: string;
   /** Settings the link has that the outbound has no field for, by their name in the link. */
   ignored: string[];
+  /** Settings left out for a reason of their own. */
+  notes: LinkNoteKind[];
 };
 
 export type LinkResult = { ok: true; value: ImportedOutbound } | { ok: false; error: LinkError };
@@ -233,49 +243,120 @@ const fromBase64 = (encoded: string): string => {
   }
 };
 
-/** The outbounds dial the server directly: no V2Ray transport, and no HTTP header disguise. */
-const requirePlainTcp = (settings: Settings, network: string, header: string) => {
-  const net = settings.get(network).toLowerCase();
-  if (net !== "" && net !== "tcp" && net !== "raw") fail("transport", net);
-  const kind = settings.get(header).toLowerCase();
-  if (kind !== "" && kind !== "none") fail("header", kind);
-  // Only an HTTP header would use these.
-  settings.moot("host", "path");
-};
+/** Where a link writes its transport and what belongs to it: a vless or trojan link's query, or
+ * vmess's v2 JSON, which keeps the gRPC service name in "path" and the gRPC mode in "type". */
+type TransportNames = { network: string; header: string; service: string[]; mode: string };
+const QUERY_NAMES: TransportNames = { network: "type", header: "headertype", service: ["servicename"], mode: "mode" };
+const VMESS_NAMES: TransportNames = { network: "net", header: "type", service: ["path", "servicename"], mode: "type" };
 
-const tlsWanted = (security: string, byDefault: boolean): boolean => {
-  switch (security.toLowerCase()) {
-    case "":
-      return byDefault;
-    case "none":
-      return false;
-    case "tls":
-      return true;
-    case "reality":
-      return fail("reality");
+/** A path as the transports take it: from the root. */
+const rootedPath = (path: string): string => (path === "" || path.startsWith("/") ? path : `/${path}`);
+
+/** The V2Ray transport the link names, or none for plain TCP. An HTTP header disguise over TCP, and
+ * every other transport (xhttp, splithttp, kcp, mkcp, quic), is refused. */
+const transportOptions = (settings: Settings, names: TransportNames, notes: LinkNoteKind[]): Item => {
+  const net = (settings.get(names.network) || "tcp").toLowerCase();
+  const pathAndHost = (type: string): Item => {
+    // A header type means something over TCP only, a gRPC service name and mode to gRPC only.
+    settings.moot(names.header, names.mode, ...names.service.filter((n) => n !== "path"));
+    const path = rootedPath(settings.get("path"));
+    const host = settings.get("host");
+    return { transport_type: type, ...(path !== "" ? { transport_path: path } : {}), ...(host !== "" ? { transport_host: host } : {}) };
+  };
+  switch (net) {
+    case "tcp":
+    case "raw": {
+      const kind = settings.get(names.header).toLowerCase();
+      if (kind !== "" && kind !== "none") fail("header", kind);
+      // Only an HTTP header would use these.
+      settings.moot("host", "path", ...names.service, names.mode);
+      return {};
+    }
+    case "ws":
+      return pathAndHost("ws");
+    case "httpupgrade":
+      return pathAndHost("httpupgrade");
+    case "h2":
+    case "http":
+      return pathAndHost("http");
+    case "grpc": {
+      const service = settings.get(...names.service);
+      const mode = settings.get(names.mode).toLowerCase();
+      if (mode === "multi") notes.push("grpcMulti");
+      // gRPC goes by its service name; a header type, path or host means nothing to it.
+      settings.moot(names.header, "path", "host");
+      return { transport_type: "grpc", ...(service !== "" ? { transport_service_name: service } : {}) };
+    }
     default:
-      return fail("security", security);
+      return fail("transport", net);
   }
 };
 
-/** The TLS fields. `toggle` is false for the types whose TLS is always on and has no switch. A
- * fingerprint and ALPN are left unread with TLS on, so they are reported as left out. */
-const tlsOptions = (settings: Settings, enabled: boolean, toggle: boolean): Item => {
+type Security = "none" | "tls" | "reality";
+
+const securityOf = (security: string, byDefault: Security): Security => {
+  const value = security.toLowerCase();
+  if (value === "") return byDefault;
+  if (value === "none" || value === "tls" || value === "reality") return value;
+  return fail("security", security);
+};
+
+/** What a type's TLS takes. `toggle` is false for the types whose TLS is always on and has no
+ * switch; `stream` is true for those that also take a fingerprint, ECH and REALITY. */
+type TlsSupport = { toggle: boolean; stream: boolean };
+
+/** The TLS fields. Under REALITY the link's pbk, sid and sni are required, and its spx, which the
+ * node has no equivalent for, is left out with a note. A fingerprint the outbound can't imitate,
+ * or a type without fingerprints, leaves fp unread, so it is reported as left out. */
+const tlsOptions = (settings: Settings, security: Security, support: TlsSupport, notes: LinkNoteKind[]): Item => {
   const serverName = settings.get("sni", "peer");
   const insecure = truthy(settings.get("allowinsecure", "insecure"));
-  // REALITY's own settings, which mean nothing under any other security.
-  settings.moot("pbk", "sid", "spx");
-  const fingerprint = settings.peek("fp").toLowerCase();
-  if (!enabled || fingerprint === "none") settings.moot("fp");
-  if (!enabled) {
-    settings.moot("alpn");
+  if (security === "none") {
+    // All of this means nothing without TLS.
+    settings.moot("fp", "alpn", "ech", "pbk", "sid", "spx", "pqv");
     return {};
   }
-  return {
-    ...(toggle ? { tls_enabled: true } : {}),
+  const out: Item = {
+    ...(support.toggle ? { tls_enabled: true } : {}),
     ...(serverName !== "" ? { tls_server_name: serverName } : {}),
-    ...(insecure ? { tls_insecure: true } : {}),
   };
+  const fingerprint = settings.peek("fp").toLowerCase();
+  if (fingerprint === "" || fingerprint === "none") settings.moot("fp");
+  else if (support.stream && (TLS_FINGERPRINTS as readonly string[]).includes(fingerprint)) {
+    settings.moot("fp");
+    out.tls_fingerprint = fingerprint;
+  }
+
+  if (security === "reality") {
+    const publicKey = settings.get("pbk");
+    if (!isRealityPublicKey(publicKey)) fail("realityKey");
+    const shortId = settings.get("sid");
+    // The short id is a credential too: the reason doesn't repeat it.
+    if (!isRealityShortId(shortId)) fail("realityShortId");
+    if (serverName === "") fail("realityServerName");
+    out.reality_public_key = publicKey;
+    if (shortId !== "") out.reality_short_id = shortId;
+    if (settings.get("spx") !== "") notes.push("spiderX");
+    if (settings.get("alpn") !== "") notes.push("realityAlpn");
+    // REALITY checks the server by its key: skipping certificate checks means nothing to it.
+    settings.moot("allowinsecure", "insecure");
+    return out;
+  }
+
+  settings.moot("pbk", "sid", "spx", "pqv");
+  if (insecure) out.tls_insecure = true;
+  const alpn = settings
+    .get("alpn")
+    .split(",")
+    .map((p) => p.trim())
+    .filter((p) => p !== "");
+  if (alpn.length > 0) out.tls_alpn = alpn;
+  if (support.stream) {
+    const ech = settings.get("ech");
+    if (ech !== "" && isEchConfigList(ech)) out.tls_ech_config = ech;
+    else if (ech !== "") notes.push("echNotConfig");
+  }
+  return out;
 };
 
 const credential = (userinfo: string | null, missing: LinkErrorKind): string => {
@@ -283,11 +364,14 @@ const credential = (userinfo: string | null, missing: LinkErrorKind): string => 
   return value === "" ? fail(missing) : value;
 };
 
-const imported = (outbound: Item, name: string, settings: Settings): ImportedOutbound => ({
+const imported = (outbound: Item, name: string, settings: Settings, notes: LinkNoteKind[] = []): ImportedOutbound => ({
   outbound,
   name,
   ignored: settings.unread(),
+  notes,
 });
+
+const STREAM: TlsSupport = { toggle: true, stream: true };
 
 const vless = (link: LinkParts): ImportedOutbound => {
   const uuid = credential(link.userinfo, "noId");
@@ -295,14 +379,16 @@ const vless = (link: LinkParts): ImportedOutbound => {
   const s = link.settings;
   const encryption = s.get("encryption");
   if (encryption !== "" && encryption.toLowerCase() !== "none") fail("encryption", encryption);
-  const tls = tlsWanted(s.get("security"), false);
-  requirePlainTcp(s, "type", "headertype");
+  const security = securityOf(s.get("security"), "none");
+  const notes: LinkNoteKind[] = [];
+  const transport = transportOptions(s, QUERY_NAMES, notes);
   const flow = s.get("flow");
   if (flow !== "" && flow !== "xtls-rprx-vision") fail("flow", flow);
   return imported(
-    { type: "vless", ...address, uuid, ...(flow !== "" ? { flow } : {}), ...tlsOptions(s, tls, true) },
+    { type: "vless", ...address, uuid, ...(flow !== "" ? { flow } : {}), ...tlsOptions(s, security, STREAM, notes), ...transport },
     link.name,
-    s
+    s,
+    notes
   );
 };
 
@@ -311,11 +397,12 @@ const trojan = (link: LinkParts): ImportedOutbound => {
   const address = serverAddress(link.authority);
   const s = link.settings;
   // A trojan link means TLS unless it says otherwise.
-  const tls = tlsWanted(s.get("security"), true);
-  requirePlainTcp(s, "type", "headertype");
+  const security = securityOf(s.get("security"), "tls");
+  const notes: LinkNoteKind[] = [];
+  const transport = transportOptions(s, QUERY_NAMES, notes);
   const flow = s.get("flow");
   if (flow !== "") fail("flow", flow);
-  return imported({ type: "trojan", ...address, password, ...tlsOptions(s, tls, true) }, link.name, s);
+  return imported({ type: "trojan", ...address, password, ...tlsOptions(s, security, STREAM, notes), ...transport }, link.name, s, notes);
 };
 
 // The second name of each pair is the one sing-box knows; Xray takes both for the same cipher.
@@ -365,7 +452,7 @@ const hysteria2 = (link: LinkParts): ImportedOutbound => {
   if (s.get("pinsha256") !== "") fail("pin");
   // Its TLS is always on; obfs-password means nothing without obfs.
   s.moot("security", "obfs-password");
-  return imported({ type: "hysteria2", ...address, password, ...tlsOptions(s, true, false) }, link.name, s);
+  return imported({ type: "hysteria2", ...address, password, ...tlsOptions(s, "tls", { toggle: false, stream: false }, []) }, link.name, s);
 };
 
 // vmess://base64 of the "v2" JSON object v2rayN made the de facto standard.
@@ -392,10 +479,11 @@ const vmess = (body: string): ImportedOutbound => {
   if (alterId !== "" && Number(alterId) !== 0) fail("alterId", alterId);
   const security = (s.get("scy") || "auto").toLowerCase();
   if (!(VMESS_SECURITY_TYPES as readonly string[]).includes(security)) fail("vmessSecurity", security);
-  const tls = tlsWanted(s.get("tls"), false);
-  requirePlainTcp(s, "net", "type");
+  const tlsSecurity = securityOf(s.get("tls"), "none");
+  const notes: LinkNoteKind[] = [];
+  const transport = transportOptions(s, VMESS_NAMES, notes);
   const name = s.get("ps") || (hash >= 0 ? linkName(body.slice(hash + 1)) : "");
-  return imported({ type: "vmess", ...address, uuid, security, ...tlsOptions(s, tls, true) }, name, s);
+  return imported({ type: "vmess", ...address, uuid, security, ...tlsOptions(s, tlsSecurity, STREAM, notes), ...transport }, name, s, notes);
 };
 
 const importLink = (input: string): ImportedOutbound => {

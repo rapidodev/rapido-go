@@ -114,6 +114,8 @@ type OutboundTestResult struct {
 	InterfaceHere bool   `json:"interface_here"`
 	Via           string `json:"via,omitempty"`
 	Fallback      bool   `json:"fallback"`
+	// Draft is set on the result of an outbound sent whole rather than by tag.
+	Draft bool `json:"draft,omitempty"`
 }
 
 type OutboundTestResponse struct {
@@ -121,12 +123,20 @@ type OutboundTestResponse struct {
 	Results []OutboundTestResult `json:"results"`
 }
 
-// TestOutbounds asks the node at address:port to test the outbounds tagged
-// tags through its running core (POST /outbounds/test). The node bounds each
-// test and the whole call itself; ctx should allow it about 20 seconds.
-func (c *Client) TestOutbounds(ctx context.Context, address string, port int, tags []string) (OutboundTestResponse, error) {
+// OutboundTestRequest names what a node tests: outbounds of its running core by
+// tag, and drafts - outbounds in the core config's own JSON form, which the node
+// builds alone into a throwaway core of their own.
+type OutboundTestRequest struct {
+	Tags      []string          `json:"tags,omitempty"`
+	Outbounds []json.RawMessage `json:"outbounds,omitempty"`
+}
+
+// TestOutbounds asks the node at address:port to test outbounds
+// (POST /outbounds/test). The node bounds each test and the whole call itself;
+// ctx should allow it about 20 seconds.
+func (c *Client) TestOutbounds(ctx context.Context, address string, port int, req OutboundTestRequest) (OutboundTestResponse, error) {
 	var out OutboundTestResponse
-	err := c.post(ctx, address, port, "/outbounds/test", map[string]any{"tags": tags}, &out)
+	err := c.post(ctx, address, port, "/outbounds/test", req, &out)
 	return out, err
 }
 

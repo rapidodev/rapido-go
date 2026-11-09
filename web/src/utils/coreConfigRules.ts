@@ -1,15 +1,19 @@
 import {
+  ALPN_OUTBOUND_TYPES,
   CONGESTION_CONTROL_TYPES,
   DNS_SERVER_TYPES,
   IMPLICIT_OUTBOUND_TAGS,
   LOG_LEVELS,
   NETWORK_TYPES,
   OUTBOUND_GROUP_TYPES,
+  OUTBOUND_TRANSPORTS,
   OUTBOUND_TYPES,
   PROTOCOL_TYPES,
   RoutingRule,
   SHADOWSOCKS_METHODS,
   SNELL_OBFS_MODES,
+  STREAM_OUTBOUND_TYPES,
+  TLS_FINGERPRINTS,
   VLESS_FLOWS,
   VMESS_SECURITY_TYPES,
 } from "types/CoreConfig";
@@ -242,7 +246,25 @@ export type ConfigIssueKind =
   | "realityKeyInvalid"
   | "realityServerRequired"
   | "realityPortInvalid"
-  | "realityShortIdInvalid";
+  | "realityShortIdInvalid"
+  | "streamFieldWrongType"
+  | "tlsAlpnInvalid"
+  | "tlsAlpnTooMany"
+  | "tlsRequired"
+  | "fingerprintInvalid"
+  | "echConfigInvalid"
+  | "realityPublicKeyInvalid"
+  | "realityNeedsKey"
+  | "realityNeedsServerName"
+  | "realityConflict"
+  | "realityTransport"
+  | "transportInvalid"
+  | "transportNeedsType"
+  | "transportFieldWrongType"
+  | "transportPathInvalid"
+  | "transportHostInvalid"
+  | "grpcServiceNameInvalid"
+  | "visionNeedsTls";
 
 export type IssueScope = "general" | "outbound" | "rule" | "dns" | "inbound";
 
@@ -290,6 +312,122 @@ const checkDirectFallback = (o: Item, add: Reporter) => {
   else if (!hasBindInterface(o.bind_interface)) add("directFallbackNeedsInterface", "bind_interface");
 };
 
+// The TLS and transport fields of an outbound to another provider's server,
+// checked as validateOutboundStream (outboundstream.go) checks them.
+
+const REALITY_PUBLIC_KEY = /^[A-Za-z0-9_-]{43}$/;
+const REALITY_SHORT_ID = /^([0-9a-fA-F]{2}){0,8}$/;
+const ALPN_ENTRY = /^[A-Za-z0-9._/-]{1,32}$/;
+const TRANSPORT_HOST = /^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._-]+)(:[0-9]{1,5})?$/;
+const GRPC_SERVICE_NAME = /^[A-Za-z0-9._/|-]{1,256}$/;
+
+export const isRealityPublicKey = (value: string): boolean => REALITY_PUBLIC_KEY.test(value);
+export const isRealityShortId = (value: string): boolean => REALITY_SHORT_ID.test(value);
+export const isAlpnEntry = (value: string): boolean => ALPN_ENTRY.test(value);
+
+/** The bytes of standard or URL-safe base64, padded or not; null when it is neither. */
+const base64Decode = (value: string): Uint8Array | null => {
+  const body = value.replace(/=+$/, "");
+  let standard: string;
+  if (/^[A-Za-z0-9+/]+$/.test(body)) standard = body;
+  else if (/^[A-Za-z0-9_-]+$/.test(body)) standard = body.replace(/-/g, "+").replace(/_/g, "/");
+  else return null;
+  if (standard.length % 4 === 1) return null;
+  try {
+    return Uint8Array.from(atob(standard + "=".repeat((4 - (standard.length % 4)) % 4)), (c) => c.charCodeAt(0));
+  } catch {
+    return null;
+  }
+};
+
+/** An ECHConfigList in base64: a two-byte length and exactly that many bytes after it. Xray
+ * also takes a DNS server to look one up from in its place, which isn't one. */
+export const isEchConfigList = (value: string): boolean => {
+  const raw = base64Decode(value);
+  return raw !== null && raw.length >= 6 && ((raw[0] << 8) | raw[1]) === raw.length - 2;
+};
+
+const STREAM_FIELDS = ["tls_fingerprint", "tls_ech_config", "reality_public_key", "reality_short_id"] as const;
+const TRANSPORT_FIELDS = ["transport_type", "transport_path", "transport_host", "transport_service_name"] as const;
+
+const checkTransport = (o: Item, add: Reporter) => {
+  const type = str(o.transport_type);
+  const path = str(o.transport_path);
+  const host = str(o.transport_host);
+  const service = str(o.transport_service_name);
+  if (type === "") {
+    if (path !== "" || host !== "" || service !== "") add("transportNeedsType", "transport_type");
+    return;
+  }
+  if (!within(OUTBOUND_TRANSPORTS, type)) {
+    add("transportInvalid", "transport_type", type);
+    return;
+  }
+  if (str(o.reality_public_key) !== "" && (type === "ws" || type === "httpupgrade")) add("realityTransport", "transport_type", type);
+  if (type === "grpc") {
+    if (path !== "") add("transportFieldWrongType", "transport_path", "transport_path");
+    if (host !== "") add("transportFieldWrongType", "transport_host", "transport_host");
+    if (service !== "" && !GRPC_SERVICE_NAME.test(service)) add("grpcServiceNameInvalid", "transport_service_name", service);
+    return;
+  }
+  if (service !== "") add("transportFieldWrongType", "transport_service_name", "transport_service_name");
+  if (path !== "" && (!path.startsWith("/") || path.length > 512 || [...path].some((c) => c.codePointAt(0)! <= 0x20 || c === "\x7f"))) {
+    add("transportPathInvalid", "transport_path", path);
+  }
+  if (host !== "" && !(type === "http" ? host.split(",") : [host]).every((h) => TRANSPORT_HOST.test(h))) {
+    add("transportHostInvalid", "transport_host", host);
+  }
+};
+
+const checkOutboundStream = (o: Item, type: string, add: Reporter) => {
+  const stream = within(STREAM_OUTBOUND_TYPES, type);
+  const alpn = o.tls_alpn;
+  const alpnList = Array.isArray(alpn) ? alpn : [];
+  if (alpn !== undefined && alpn !== null && !(Array.isArray(alpn) && alpn.every((p) => typeof p === "string"))) {
+    add("tlsAlpnInvalid", "tls_alpn", String(alpn));
+    return;
+  }
+  if (alpnList.length > 0 && !within(ALPN_OUTBOUND_TYPES, type)) add("streamFieldWrongType", "tls_alpn", "tls_alpn");
+  if (!stream) {
+    for (const key of [...STREAM_FIELDS, ...TRANSPORT_FIELDS]) if (str(o[key]) !== "") add("streamFieldWrongType", key, key);
+    if (!within(ALPN_OUTBOUND_TYPES, type)) return;
+  }
+
+  const reality = str(o.reality_public_key) !== "";
+  // The QUIC types always run TLS; the TCP ones when asked, or under REALITY.
+  const tls = o.tls_enabled === true || reality || !stream;
+
+  for (const entry of alpnList as string[]) if (!ALPN_ENTRY.test(entry)) add("tlsAlpnInvalid", "tls_alpn", entry);
+  if (alpnList.length > 8) add("tlsAlpnTooMany", "tls_alpn");
+  if (alpnList.length > 0 && !tls) add("tlsRequired", "tls_alpn", "tls_alpn");
+  if (!stream) return;
+
+  const fingerprint = str(o.tls_fingerprint);
+  if (fingerprint !== "") {
+    if (!within(TLS_FINGERPRINTS, fingerprint)) add("fingerprintInvalid", "tls_fingerprint", fingerprint);
+    else if (!tls) add("tlsRequired", "tls_fingerprint", "tls_fingerprint");
+  }
+  const ech = str(o.tls_ech_config);
+  if (ech !== "") {
+    if (!isEchConfigList(ech)) add("echConfigInvalid", "tls_ech_config");
+    else if (o.tls_enabled !== true) add("tlsRequired", "tls_ech_config", "tls_ech_config");
+  }
+
+  const shortId = str(o.reality_short_id);
+  if (shortId !== "" && !reality) add("realityNeedsKey", "reality_public_key");
+  if (reality) {
+    if (!REALITY_PUBLIC_KEY.test(str(o.reality_public_key))) add("realityPublicKeyInvalid", "reality_public_key");
+    if (!REALITY_SHORT_ID.test(shortId)) add("realityShortIdInvalid", "reality_short_id", shortId);
+    if (str(o.tls_server_name) === "") add("realityNeedsServerName", "tls_server_name");
+    if (ech !== "") add("realityConflict", "tls_ech_config", "tls_ech_config");
+    if (alpnList.length > 0) add("realityConflict", "tls_alpn", "tls_alpn");
+    if (o.tls_insecure === true) add("realityConflict", "tls_insecure", "tls_insecure");
+  }
+
+  checkTransport(o, add);
+  if (type === "vless" && str(o.flow) !== "" && (str(o.transport_type) !== "" || !tls)) add("visionNeedsTls", "flow", str(o.flow));
+};
+
 export const outboundIssues = (o: Item, index: number, others: ReadonlySet<string>, targets: readonly string[]): ConfigIssue[] => {
   const out: ConfigIssue[] = [];
   const tag = str(o.tag);
@@ -330,6 +468,7 @@ export const outboundIssues = (o: Item, index: number, others: ReadonlySet<strin
     }
   }
   checkDirectFallback(o, add);
+  checkOutboundStream(o, type, add);
 
   const needPassword = () => {
     if (str(o.password) === "") add("passwordRequired", "password");

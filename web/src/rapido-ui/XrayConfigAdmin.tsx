@@ -457,6 +457,7 @@ const XrayConfigEditor: FC<{ config: XrayConfig }> = ({ config }) => {
         onChange={changeDoc}
         inboundPorts={inboundPorts}
         serverInboundTags={serverInboundTags}
+        savedOutbounds={config.outbounds}
         inboundActions={
           <>
             <Button

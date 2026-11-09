@@ -98,29 +98,32 @@ func newClient(t *testing.T, f fleet) *Client {
 
 func TestTestOutboundsTalksToANodeOfThisPanel(t *testing.T) {
 	f := testFleet(t)
-	var got []string
+	var got struct {
+		Tags      []string          `json:"tags"`
+		Outbounds []json.RawMessage `json:"outbounds"`
+	}
 	host, port := startNode(t, f.nodeCert, f.pool, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/outbounds/test" {
 			http.NotFound(w, r)
 			return
 		}
-		var req struct {
-			Tags []string `json:"tags"`
-		}
-		json.NewDecoder(r.Body).Decode(&req)
-		got = req.Tags
-		w.Write([]byte(`{"url":"https://www.gstatic.com/generate_204","results":[{"tag":"exit","delay_ms":74,"status_code":204,"interface_here":false,"fallback":false}]}`))
+		json.NewDecoder(r.Body).Decode(&got)
+		w.Write([]byte(`{"url":"https://www.gstatic.com/generate_204","results":[{"tag":"exit","delay_ms":74,"status_code":204,"interface_here":false,"fallback":false},{"tag":"new","delay_ms":120,"status_code":204,"interface_here":false,"fallback":false,"draft":true}]}`))
 	}))
 
-	resp, err := newClient(t, f).TestOutbounds(context.Background(), host, port, []string{"exit"})
+	draft := json.RawMessage(`{"tag":"new","type":"vless","server":"203.0.113.5","server_port":443}`)
+	resp, err := newClient(t, f).TestOutbounds(context.Background(), host, port, OutboundTestRequest{Tags: []string{"exit"}, Outbounds: []json.RawMessage{draft}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0] != "exit" {
-		t.Errorf("node was asked for %v", got)
+	if len(got.Tags) != 1 || got.Tags[0] != "exit" || len(got.Outbounds) != 1 || string(got.Outbounds[0]) != string(draft) {
+		t.Errorf("node was asked for %v and %s", got.Tags, got.Outbounds)
 	}
-	if len(resp.Results) != 1 || resp.Results[0].DelayMS != 74 || resp.Results[0].StatusCode != 204 {
+	if len(resp.Results) != 2 || resp.Results[0].DelayMS != 74 || resp.Results[0].StatusCode != 204 || resp.Results[0].Draft {
 		t.Errorf("resp = %+v", resp)
+	}
+	if !resp.Results[1].Draft || resp.Results[1].DelayMS != 120 {
+		t.Errorf("draft result = %+v", resp.Results[1])
 	}
 }
 
@@ -129,7 +132,7 @@ func TestTestOutboundsRefusesANodeCertificateFromAnotherCA(t *testing.T) {
 	host, port := startNode(t, foreignCert(t), f.pool, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("the request reached a node the panel must not trust")
 	}))
-	_, err := newClient(t, f).TestOutbounds(context.Background(), host, port, []string{"exit"})
+	_, err := newClient(t, f).TestOutbounds(context.Background(), host, port, OutboundTestRequest{Tags: []string{"exit"}})
 	if err == nil || !strings.Contains(err.Error(), "not issued by this panel") {
 		t.Errorf("err = %v, want the certificate refused", err)
 	}
@@ -146,7 +149,7 @@ func TestTestOutboundsExplainsAnAnswerOtherThan200(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	c := newClient(t, f)
-	_, err := c.TestOutbounds(context.Background(), host, port, []string{"exit"})
+	_, err := c.TestOutbounds(context.Background(), host, port, OutboundTestRequest{Tags: []string{"exit"}})
 	var status *StatusError
 	if !errors.As(err, &status) || status.Code != http.StatusConflict || !strings.Contains(err.Error(), "core is not started") {
 		t.Errorf("err = %v, want the node's 409 and its detail", err)
@@ -167,7 +170,7 @@ func TestTestOutboundsSaysWhenTheNodeCannotBeReached(t *testing.T) {
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	ln.Close()
-	_, err = newClient(t, f).TestOutbounds(context.Background(), "127.0.0.1", port, []string{"exit"})
+	_, err = newClient(t, f).TestOutbounds(context.Background(), "127.0.0.1", port, OutboundTestRequest{Tags: []string{"exit"}})
 	if err == nil || !strings.Contains(err.Error(), "cannot reach the node's control port") {
 		t.Errorf("err = %v", err)
 	}

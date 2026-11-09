@@ -52,11 +52,13 @@ func TestAPIDocExamplesMatchTheResponseTypes(t *testing.T) {
 				Totals      adminOverviewDTO   `json:"totals"`
 			}{}
 		},
-		"bulk":          func() any { return &bulkResponse{} },
-		"node_restart":  func() any { return &nodeRestartResponse{} },
-		"node_reboot":   func() any { return &nodeRestartResponse{} },
-		"node":          func() any { return &nodeDTO{} },
-		"outbound_test": func() any { return &outboundProbeResponse{} },
+		"bulk":                        func() any { return &bulkResponse{} },
+		"node_restart":                func() any { return &nodeRestartResponse{} },
+		"node_reboot":                 func() any { return &nodeRestartResponse{} },
+		"node":                        func() any { return &nodeDTO{} },
+		"outbound_test":               func() any { return &outboundProbeResponse{} },
+		"outbound_test_draft_request": func() any { return &outboundProbeRequest{} },
+		"outbound_test_draft":         func() any { return &outboundProbeResponse{} },
 	}
 
 	re := regexp.MustCompile("(?s)<!-- example:(\\w+) -->\\s*```json\\n(.*?)\\n```")
