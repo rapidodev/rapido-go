@@ -258,8 +258,10 @@ func (c *VisionConn) filterTLS(buffers [][]byte) {
 				if buffer[5] == 2 {
 					c.isTLS12orAbove = true
 					c.remainingServerHello = (int32(buffer[3])<<8 | int32(buffer[4])) + 5
-					if len(buffer) >= 79 && c.remainingServerHello >= 79 {
-						sessionIdLen := int32(buffer[43])
+					// The session ID length is one byte from the peer, so it can point the cipher suite past
+					// the end of the packet. A real ServerHello's session ID is at most 32 bytes.
+					if len(buffer) >= 79 && c.remainingServerHello >= 79 && 43+int(buffer[43])+3 <= len(buffer) {
+						sessionIdLen := int(buffer[43])
 						cipherSuite := buffer[43+sessionIdLen+1 : 43+sessionIdLen+3]
 						c.cipher = uint16(cipherSuite[0])<<8 | uint16(cipherSuite[1])
 					} else {
