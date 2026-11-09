@@ -58,6 +58,11 @@ func (p pulledConfig) MarshalJSON() ([]byte, error) {
 	}{p.Version, p.Core, inbounds, sets})
 }
 
+const (
+	lastGoodConfigFile = "last-good-config.json"
+	previousConfigFile = "previous-config.json"
+)
+
 func (s *server) persistConfig(name string, value *pulledConfig) error {
 	if s.stateDir == "" || value == nil {
 		return nil
@@ -66,7 +71,58 @@ func (s *server) persistConfig(name string, value *pulledConfig) error {
 	if err != nil {
 		return err
 	}
-	return atomicStateFile(filepath.Join(s.stateDir, name), raw)
+	if name == lastGoodConfigFile {
+		s.forgetLastGoodOnDisk()
+	}
+	if err := atomicStateFile(filepath.Join(s.stateDir, name), raw); err != nil {
+		return err
+	}
+	if name == lastGoodConfigFile {
+		s.lastGoodMu.Lock()
+		s.lastGoodOnDisk, s.lastGoodVersion = value, value.Version
+		s.lastGoodMu.Unlock()
+	}
+	return nil
+}
+
+func (s *server) forgetLastGoodOnDisk() {
+	s.lastGoodMu.Lock()
+	s.lastGoodOnDisk, s.lastGoodVersion = nil, ""
+	s.lastGoodMu.Unlock()
+}
+
+// snapshotPrevious keeps value as previous-config.json before a change replaces
+// it. Before a hot user change value is nearly always what this process last
+// wrote to last-good-config.json, and then the snapshot is a hard link to that
+// file instead of the whole user list marshalled and written a second time.
+// last-good-config.json stays in place throughout, and is only ever replaced
+// by renaming a new file over it, so the link keeps the old bytes.
+func (s *server) snapshotPrevious(value *pulledConfig) error {
+	if s.stateDir == "" || value == nil {
+		return nil
+	}
+	s.lastGoodMu.Lock()
+	same := s.lastGoodOnDisk == value && s.lastGoodVersion == value.Version
+	s.lastGoodMu.Unlock()
+	if same && linkStateFile(filepath.Join(s.stateDir, lastGoodConfigFile), filepath.Join(s.stateDir, previousConfigFile)) == nil {
+		return nil
+	}
+	return s.persistConfig(previousConfigFile, value)
+}
+
+// linkStateFile makes dst another name for src's current contents, atomically:
+// a hard link under a temporary name, renamed over dst.
+func linkStateFile(src, dst string) error {
+	tmp := dst + ".link"
+	_ = os.Remove(tmp)
+	if err := os.Link(src, tmp); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return syncDir(filepath.Dir(dst))
 }
 
 func validateUserList(protocol string, users []userSpec) error {
@@ -200,6 +256,7 @@ func (s *server) noteRefusedByPanel(now time.Time) {
 	s.rejected = nil
 	s.restoreWanted = false
 	if s.stateDir != "" {
+		s.forgetLastGoodOnDisk()
 		_ = os.Rename(filepath.Join(s.stateDir, "last-good-config.json"), filepath.Join(s.stateDir, "last-good-config.revoked.json"))
 	}
 }

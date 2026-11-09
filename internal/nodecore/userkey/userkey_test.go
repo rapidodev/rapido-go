@@ -77,3 +77,51 @@ func TestNewListPolicyMatchesItsKeys(t *testing.T) {
 		}
 	}
 }
+
+// BuildOptions remembers what it derived for the last lists, so a list that
+// differs by one user re-derives only that user - and must still give exactly
+// what deriving every user afresh gives, with Keys of its own.
+func TestBuildOptionsReusesDerivedFieldsButMintsFreshKeys(t *testing.T) {
+	type memoUser struct{ Name, Password string }
+	users := make([]memoUser, 500)
+	for i := range users {
+		users[i] = memoUser{fmt.Sprintf("u%d", i), fmt.Sprintf("p%d", i)}
+	}
+	users[7].Name = "" // unnamed: labelled by position
+	first := BuildOptions(users)
+
+	changed := append([]memoUser(nil), users...)
+	changed[3].Password = "new"
+	changed = append(changed[:10], changed[11:]...) // u10 removed: later users move up
+	changed = append(changed, memoUser{"late", "x"})
+	second := BuildOptions(changed)
+
+	for i, u := range changed {
+		want := OptionKey(u, i)
+		got := second[i]
+		if got.Fingerprint != want.Fingerprint || got.Name != want.Name || got.Label != want.Label {
+			t.Fatalf("user %d %+v: got %+v, want %+v", i, u, *got, *want)
+		}
+	}
+	if second[3].Fingerprint == first[3].Fingerprint {
+		t.Error("a changed password must change the fingerprint")
+	}
+	if second[0] == first[0] {
+		t.Error("each build must mint its own Keys")
+	}
+	if second[7].Label != "7" {
+		t.Errorf("an unnamed user is labelled by its position, got %q", second[7].Label)
+	}
+}
+
+// A type that can't be a map key still works, without the memo.
+func TestBuildOptionsHandlesUncomparableUsers(t *testing.T) {
+	type listUser struct {
+		Name  string
+		Ports []int
+	}
+	keys := BuildOptions([]listUser{{"a", []int{1}}, {"b", nil}})
+	if keys[0].Name != "a" || keys[1].Name != "b" || keys[0].Fingerprint == keys[1].Fingerprint {
+		t.Errorf("keys = %+v %+v", *keys[0], *keys[1])
+	}
+}

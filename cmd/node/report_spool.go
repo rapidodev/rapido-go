@@ -47,15 +47,20 @@ func atomicStateFile(path string, data []byte) error {
 	if err := os.Rename(f.Name(), path); err != nil {
 		return err
 	}
-	if runtime.GOOS != "windows" {
-		dir, err := os.Open(filepath.Dir(path))
-		if err != nil {
-			return err
-		}
-		defer dir.Close()
-		return dir.Sync()
+	return syncDir(filepath.Dir(path))
+}
+
+// syncDir makes a rename in dir durable. Windows has no directory sync.
+func syncDir(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
 	}
-	return nil
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 func (s *server) saveReportSpool(cfg config) error {
 	if cfg.StateDir == "" {

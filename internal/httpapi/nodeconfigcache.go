@@ -27,6 +27,14 @@ const (
 	// list again on every poll, 2.7 MB per node at 50,000 users.
 	nodeConfigHistory = 12
 
+	// nodeConfigDeltaTTL is how long an earlier payload stays usable as the base
+	// of a delta. Unlike nodeConfigSafetyTTL it is no freshness limit: the delta
+	// leads to the current payload, and the base only has to be what the node
+	// says it has, which its ETag proves. It used to be the 60 seconds of
+	// nodeConfigSafetyTTL, so after a quiet minute the first change sent every
+	// node the whole user list again; nodeConfigHistory still bounds the memory.
+	nodeConfigDeltaTTL = 15 * time.Minute
+
 	// nodeConfigBuildTimeout is the budget of a rebuild that several polls
 	// are waiting on. It is deliberately not the first caller's request
 	// context: that caller giving up must not fail everyone sharing its build.
@@ -102,7 +110,7 @@ func (c *nodeConfigCache) store(key string, e *nodeConfigEntry) {
 	now := time.Now()
 	for k, old := range c.entries {
 		if old.version < e.version || (k == key && old.etag != e.etag) {
-			if now.Sub(old.builtAt) < nodeConfigSafetyTTL {
+			if now.Sub(old.builtAt) < nodeConfigDeltaTTL {
 				history := append([]*nodeConfigEntry{old}, c.previous[k]...)
 				if len(history) > nodeConfigHistory {
 					history = history[:nodeConfigHistory]
@@ -117,7 +125,7 @@ func (c *nodeConfigCache) store(key string, e *nodeConfigEntry) {
 	for k, history := range c.previous {
 		valid := history[:0]
 		for _, old := range history {
-			if now.Sub(old.builtAt) < nodeConfigSafetyTTL {
+			if now.Sub(old.builtAt) < nodeConfigDeltaTTL {
 				valid = append(valid, old)
 			}
 		}

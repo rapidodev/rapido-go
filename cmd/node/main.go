@@ -175,6 +175,13 @@ func writeJSON(w http.ResponseWriter, status int, body map[string]any) {
 // server holds the one sing-box instance this node runs at a time - there
 // is only ever one, matching the current rapido-node's single-core model.
 type server struct {
+	// lastGoodOnDisk is the config this process last wrote to
+	// last-good-config.json, and lastGoodVersion its version then; see
+	// snapshotPrevious.
+	lastGoodMu      sync.Mutex
+	lastGoodOnDisk  *pulledConfig
+	lastGoodVersion string
+
 	reportMu     sync.Mutex
 	reportState  reportSpool
 	reportLoaded bool
@@ -765,7 +772,7 @@ func (s *server) handleUpdateUsers(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 422, map[string]any{"detail": err.Error()})
 		return
 	}
-	if err := s.persistConfig("previous-config.json", s.lastPulled); err != nil {
+	if err := s.snapshotPrevious(s.lastPulled); err != nil {
 		writeJSON(w, 503, map[string]any{"detail": "snapshot failed; users unchanged"})
 		return
 	}
@@ -1809,7 +1816,7 @@ func (s *server) pullOnce(ctx context.Context, client *http.Client, cfg config) 
 	// Whatever was rejected, this config's shape is the one running.
 	s.rejected = nil
 	if len(hot) > 0 {
-		if err := s.persistConfig("previous-config.json", s.lastPulled); err != nil {
+		if err := s.snapshotPrevious(s.lastPulled); err != nil {
 			s.logger.Error("snapshot failed; users unchanged", "error", err)
 			return
 		}
@@ -1881,7 +1888,7 @@ func (s *server) applyFullLocked(pulled pulledConfig) error {
 		return fmt.Errorf("config rejected before stopping the core: %w", err)
 	}
 	previous := s.lastPulled
-	if err := s.persistConfig("previous-config.json", previous); err != nil {
+	if err := s.snapshotPrevious(previous); err != nil {
 		candidate.Close()
 		return fmt.Errorf("snapshot failed; core unchanged: %w", err)
 	}

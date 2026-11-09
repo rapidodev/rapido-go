@@ -24,7 +24,7 @@ func (c *nodeConfigCache) delta(key, etag string, current *nodeConfigEntry) []by
 	c.mu.Lock()
 	var previous *nodeConfigEntry
 	for _, entry := range c.previous[key] {
-		if etagMatches(etag, entry.etag) && time.Since(entry.builtAt) < nodeConfigSafetyTTL {
+		if etagMatches(etag, entry.etag) && time.Since(entry.builtAt) < nodeConfigDeltaTTL {
 			previous = entry
 			break
 		}
