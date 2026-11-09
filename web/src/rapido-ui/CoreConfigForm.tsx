@@ -1,6 +1,6 @@
 import { FC, Fragment, ReactNode, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { ConfigIssue, Item, asList, asStrings, isObject, str } from "utils/coreConfigRules";
+import { ConfigIssue, Item, asList, asStrings, isObject, parseDocObject, str } from "utils/coreConfigRules";
 import { FieldSpec, splitList } from "utils/coreConfigFields";
 import {
   generatePassword,
@@ -16,6 +16,7 @@ import { Checkbox } from "./Checkbox";
 import { Input } from "./Input";
 import { JsonEditor } from "./JsonEditor";
 import { Modal } from "./Modal";
+import { OutboundLinkImport } from "./OutboundLinkImport";
 import { Segmented } from "./Segmented";
 import { Select } from "./Select";
 import { ltrIsolate } from "./bidi";
@@ -207,11 +208,13 @@ export type ItemFormProps = {
   choices: FormChoices;
   /** A line under the title, for what the whole section needs explained. */
   note?: ReactNode;
+  /** A plain outbound: its JSON tab offers a share-link box that fills the editor in. */
+  linkImport?: boolean;
   onSave: (item: Item) => void;
   onClose: () => void;
 };
 
-export const ItemForm: FC<ItemFormProps> = ({ title, initial, fields, issues, normalize, withDefaults, choices, note, onSave, onClose }) => {
+export const ItemForm: FC<ItemFormProps> = ({ title, initial, fields, issues, normalize, withDefaults, choices, note, linkImport, onSave, onClose }) => {
   const { t: rawT } = useTranslation();
   const t = rawT as Translate;
   const [draft, setDraft] = useState<Item>(initial);
@@ -264,6 +267,16 @@ export const ItemForm: FC<ItemFormProps> = ({ title, initial, fields, issues, no
       setEpoch((n) => n + 1);
     }
     setMode(next);
+  };
+
+  // The editor takes the link's outbound under the tag it has now, and earlier Save errors go:
+  // they were about what the editor held before.
+  const fillFromLink = (outbound: Item) => {
+    const shown = parseDocObject(jsonText);
+    const tag = shown && typeof shown.tag === "string" ? shown.tag : str(draft.tag);
+    setJsonText(JSON.stringify({ tag, ...outbound }, null, 2));
+    setJsonError("");
+    setAttempted(false);
   };
 
   const save = () => {
@@ -476,16 +489,19 @@ export const ItemForm: FC<ItemFormProps> = ({ title, initial, fields, issues, no
           })}
         </div>
       ) : (
-        <JsonEditor
-          codeKeys
-          rows={14}
-          value={jsonText}
-          ariaLabel={`${title} (JSON)`}
-          onChange={(v) => {
-            setJsonText(v);
-            setJsonError("");
-          }}
-        />
+        <>
+          {linkImport && <OutboundLinkImport onImport={fillFromLink} />}
+          <JsonEditor
+            codeKeys
+            rows={14}
+            value={jsonText}
+            ariaLabel={`${title} (JSON)`}
+            onChange={(v) => {
+              setJsonText(v);
+              setJsonError("");
+            }}
+          />
+        </>
       )}
 
       {(jsonError || looseProblems.length > 0) && (
