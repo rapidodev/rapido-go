@@ -14,6 +14,9 @@ export type IntegrationSettingsStatus = {
   webhook_addresses: string[];
   webhook_secret?: string | null; // masked
   discord_webhook_url?: string | null; // masked
+  // Send Iranian sites and IPs direct: the dashboard's choice, else
+  // SUBSCRIPTION_IRAN_DIRECT. PUT null to go back to the environment's.
+  subscription_iran_direct: boolean;
   updated_at?: string | null;
 };
 

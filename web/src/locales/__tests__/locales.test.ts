@@ -17,6 +17,7 @@ const NAMESPACES = [
   "rapido.monitoring.",
   "rapido.nodes.",
   "rapido.logs.",
+  "rapido.iranDirect.",
   "rapido.hosts.load",
   "rapido.hosts.varLoad",
   "rapido.templates.",
