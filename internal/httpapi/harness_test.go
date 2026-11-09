@@ -174,7 +174,8 @@ func resetIntegrationSettings(t testing.TB, pool *pgxpool.Pool) {
 		reseller_api_secret = NULL, reseller_api_url = NULL, reseller_api_license = NULL,
 		telegram_api_token = NULL, telegram_admin_ids = NULL, telegram_proxy_url = NULL,
 		telegram_logger_channel_id = NULL, telegram_logger_topic_id = NULL, telegram_default_vless_flow = NULL,
-		webhook_addresses = NULL, webhook_secret = NULL, discord_webhook_url = NULL, updated_at = NULL`)
+		webhook_addresses = NULL, webhook_secret = NULL, discord_webhook_url = NULL,
+		telegram_topic_ids = NULL, subscription_iran_direct = NULL, updated_at = NULL`)
 	if err != nil {
 		t.Fatalf("reset integration_settings: %v", err)
 	}

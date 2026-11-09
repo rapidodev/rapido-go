@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgtype"
+
 	"github.com/legendary1205/rapido-go/internal/db/generated"
 )
 
@@ -23,5 +25,26 @@ func TestResolveMergesTelegramTopicIDsOverEnvDefault(t *testing.T) {
 	want := map[string]int64{"infra_alert": 42, "user_created": 7}
 	if !reflect.DeepEqual(got.TelegramTopicIDs, want) {
 		t.Errorf("TelegramTopicIDs = %v, want %v", got.TelegramTopicIDs, want)
+	}
+}
+
+func TestResolveSubscriptionIranDirect(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		db   pgtype.Bool
+		env  bool
+		want bool
+	}{
+		{"unset keeps env on", pgtype.Bool{}, true, true},
+		{"unset keeps env off", pgtype.Bool{}, false, false},
+		{"false overrides env on", pgtype.Bool{Bool: false, Valid: true}, true, false},
+		{"true overrides env off", pgtype.Bool{Bool: true, Valid: true}, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Resolve(generated.IntegrationSetting{SubscriptionIranDirect: tc.db}, Values{SubscriptionIranDirect: tc.env})
+			if got.SubscriptionIranDirect != tc.want {
+				t.Errorf("SubscriptionIranDirect = %v, want %v", got.SubscriptionIranDirect, tc.want)
+			}
+		})
 	}
 }

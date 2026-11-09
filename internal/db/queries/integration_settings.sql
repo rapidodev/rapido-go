@@ -23,6 +23,7 @@ UPDATE integration_settings SET
     webhook_secret = $11,
     discord_webhook_url = $12,
     telegram_topic_ids = $13,
+    subscription_iran_direct = $14,
     updated_at = now()
 WHERE id = (SELECT id FROM integration_settings ORDER BY id LIMIT 1)
 RETURNING *;

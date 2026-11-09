@@ -188,7 +188,7 @@ func TestSingBoxConfigIsValidJSONWithSelector(t *testing.T) {
 	raw, err := SingBoxConfig([]map[string]any{
 		{"type": "vless", "tag": "node-a"},
 		{"type": "trojan", "tag": "node-b"},
-	}, nil)
+	}, nil, false)
 	if err != nil {
 		t.Fatalf("SingBoxConfig: %v", err)
 	}
@@ -218,6 +218,7 @@ func TestSingBoxConfigHidesGlueOutboundsFromSelector(t *testing.T) {
 	raw, err := SingBoxConfig(
 		[]map[string]any{{"type": "shadowsocks", "tag": "node-a", "detour": "node-a-tls"}},
 		[]map[string]any{{"type": "shadowtls", "tag": "node-a-tls"}},
+		false,
 	)
 	if err != nil {
 		t.Fatalf("SingBoxConfig: %v", err)
@@ -243,7 +244,7 @@ func TestSingBoxConfigHidesGlueOutboundsFromSelector(t *testing.T) {
 // probe (which needs neither) but never actually captured or routed any of
 // the device's real traffic - see this function's own doc comment.
 func TestSingBoxConfigHasAWorkingStandaloneRoute(t *testing.T) {
-	raw, err := SingBoxConfig([]map[string]any{{"type": "vless", "tag": "node-a"}}, nil)
+	raw, err := SingBoxConfig([]map[string]any{{"type": "vless", "tag": "node-a"}}, nil, false)
 	if err != nil {
 		t.Fatalf("SingBoxConfig: %v", err)
 	}

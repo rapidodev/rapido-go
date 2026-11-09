@@ -174,7 +174,7 @@ func TestSingBoxConfigNeverRepeatsATag(t *testing.T) {
 		{"type": "vless", "tag": "same"},
 		{"type": "vless", "tag": "same"},
 		{"type": "vless", "tag": "proxy"},
-	}, nil)
+	}, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}

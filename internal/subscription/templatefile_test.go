@@ -222,7 +222,7 @@ func TestV2rayJSONConfigUsesRealTemplateFile(t *testing.T) {
 
 	in := EffectiveInbound{Network: "tcp", Port: 443, Security: "tls", SNI: "example.com"}
 	settings := proxysettings.Settings{Type: proxysettings.VLESS, VLESS: &proxysettings.VLESSSettings{ID: "uuid-1"}}
-	cfg, err := V2rayJSONConfig("My Node", "1.2.3.4", in, settings, template)
+	cfg, err := V2rayJSONConfig("My Node", "1.2.3.4", in, settings, template, false)
 	if err != nil {
 		t.Fatalf("V2rayJSONConfig: %v", err)
 	}

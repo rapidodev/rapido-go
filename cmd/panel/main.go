@@ -139,6 +139,7 @@ func run(logger *slog.Logger) error {
 		TelegramLoggerChannelID: cfg.TelegramLoggerChannelID, TelegramLoggerTopicID: cfg.TelegramLoggerTopicID,
 		TelegramDefaultVlessFlow: cfg.TelegramDefaultVlessFlow,
 		WebhookAddresses:         cfg.WebhookAddresses, WebhookSecret: cfg.WebhookSecret, DiscordWebhookURL: cfg.DiscordWebhookURL,
+		SubscriptionIranDirect: cfg.SubscriptionIranDirect,
 	}
 	settingsFn := func(ctx context.Context) (integrationsettings.Values, error) {
 		row, err := store.CachedGetIntegrationSettings(ctx)
