@@ -46,6 +46,11 @@ type Handler struct {
 	// The node-config payloads currently being served - see cachedNodeConfig.
 	nodeConfig nodeConfigCache
 
+	// The client for node control planes - see nodeControl. outboundTester
+	// replaces it in tests.
+	nodeCtl        nodeControlCache
+	outboundTester outboundTester
+
 	// Memoized direct host read for GET /api/system - see cachedHostSample.
 	hostSampleMu    sync.Mutex
 	hostSampleAt    time.Time
@@ -327,6 +332,9 @@ func NewRouter(h *Handler, logger *slog.Logger, allowedOrigins []string) *gin.En
 		api.GET("/core/config/backups", requireSudo, h.handleListCoreConfigBackups)
 		api.GET("/core/config/backups/:id", requireSudo, h.handleGetCoreConfigBackup)
 		api.POST("/core/config/backups/:id/restore", requireSudo, h.handleRestoreCoreConfigBackup)
+		// Measures outbounds on the nodes and changes nothing: outside
+		// /core/config so it runs in no transaction (see needsAtomicMutation).
+		api.POST("/core/outbounds/test", requireSudo, h.handleTestOutbounds)
 
 		api.GET("/settings/backup", requireSudo, h.handleListBackups)
 		api.POST("/settings/backup", requireSudo, h.handleCreateBackup)

@@ -22,6 +22,7 @@ Contents
 4. Node restart and `ssh_known` (sudo)
 5. Config-sharing detection: not built
 6. Settings and background jobs
+7. Outbound test (sudo)
 
 ---
 
@@ -798,7 +799,8 @@ admin per UTC day, across restarts.
 
 ## 4. Node restart
 
-Nodes poll the panel; there is no channel from the panel to a node, so this goes in over SSH.
+Nodes poll the panel. The panel's only call into a node is the outbound test (section 7), which cannot restart
+anything, so this goes in over SSH.
 
 ### `POST /api/node/:id/restart` (sudo)
 
@@ -897,3 +899,43 @@ honest to report.
 
 Background (backend singleton only): `tunnelwatch` stores samples/events each metrics round and prunes samples older than 14
 days and events older than 90 days hourly; the digest job checks every 10 minutes. New migration: `00030_tunnel_samples_events.sql`.
+
+## 7. Outbound test (sudo)
+
+### `POST /api/core/outbounds/test`
+
+Measures outbounds of the core the nodes are running now (not unsaved edits): each node makes one `HEAD` request to
+`https://www.gstatic.com/generate_204` through the outbound and times it, from the dial to the response headers. The
+panel asks the node on its control port (`api_port`, default 62051) over the same mutual TLS the node already requires,
+so that port must be reachable from the panel; a node that cannot be reached gets an `error` on every result.
+
+Body: `tags` (1 to 16 outbound tags, required) and `node_id` (optional; absent or 0 = every node whose status is
+`connected`). Errors: **422** bad body, **404** unknown node, **409** the node is disabled or no node is connected,
+**429** other tests are still running in this panel process.
+
+Limits: a node runs at most 8 tests at once, each up to 5 s, and answers within 18 s; the panel asks up to 8 nodes at
+once and runs up to 4 test requests at once.
+
+Each result is one tag on one node, ordered by tag, then node. A measurement has `delay_ms` and `status_code`; a failed
+test has `error`; an outbound with nothing to measure has `skipped`: `missing` (not in that node's running core),
+`block`, `no_tcp`, or `busy` (no free slot in time). `interface` is the interface the outbound is pinned to and
+`interface_here` whether that node has it (or a WireGuard config for it). For an exit with a direct fallback, `via` is
+the member in use (`<tag>~wg` or `<tag>~direct`) and `fallback` is true while it runs over plain direct, because its
+tunnel is down or not on that node.
+
+<!-- example:outbound_test -->
+```json
+{
+  "url": "https://www.gstatic.com/generate_204",
+  "nodes": [
+    { "id": 1, "name": "de-1" },
+    { "id": 2, "name": "nl-1" },
+    { "id": 3, "name": "fr-1", "error": "cannot reach the node's control port 198.51.100.7:62051: connect: connection refused" }
+  ],
+  "results": [
+    { "node_id": 1, "node": "de-1", "tag": "exit-de", "delay_ms": 74, "status_code": 204, "interface": "wg-de", "interface_here": true, "via": "exit-de~wg", "fallback": false },
+    { "node_id": 2, "node": "nl-1", "tag": "exit-de", "delay_ms": 131, "status_code": 204, "interface": "wg-de", "interface_here": false, "via": "exit-de~direct", "fallback": true },
+    { "node_id": 3, "node": "fr-1", "tag": "exit-de", "delay_ms": 0, "status_code": 0, "error": "cannot reach the node's control port 198.51.100.7:62051: connect: connection refused", "interface_here": false, "fallback": false }
+  ]
+}
+```

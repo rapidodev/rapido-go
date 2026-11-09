@@ -46,6 +46,13 @@ const serve = (extra: Handler = () => undefined) =>
     if (handled !== undefined) return handled;
     if (url === "/settings/xray-config") return opts?.method === "PUT" ? { ...doc, ...(opts.body as object) } : doc;
     if (url === "/inbounds") return { vless: [{ tag: "main", protocol: "vless", port: 20100, ports: [20100, 20101] }] };
+    if (url === "/nodes") {
+      return [
+        { id: 1, name: "n1", status: "connected" },
+        { id: 2, name: "n2", status: "connected" },
+        { id: 3, name: "off", status: "disabled" },
+      ];
+    }
     if (url === "/monitoring") {
       return {
         hosts: [
@@ -763,5 +770,102 @@ describe("removing a protocol's last inbound", () => {
     await user.click(screen.getByRole("button", { name: "Delete the credentials and apply" }));
     await waitFor(() => expect(confirmed).toEqual([false, true]));
     await waitFor(() => expect(screen.queryByText("vmess, users affected: 24")).toBeNull());
+  });
+});
+
+describe("outbound tests", () => {
+  const probe = (results: object[]) => ({ url: "https://www.gstatic.com/generate_204", nodes: [], results });
+  const testCalls = () => fetchMock.mock.calls.filter(([url]) => url === "/core/outbounds/test");
+  const result = (tag: string, node: [number, string], fields: object) => ({
+    node_id: node[0],
+    node: node[1],
+    tag,
+    delay_ms: 0,
+    status_code: 0,
+    interface_here: false,
+    fallback: false,
+    ...fields,
+  });
+
+  it("tests one outbound from its row and shows the delay and the status", async () => {
+    const user = userEvent.setup();
+    serve((url) =>
+      url === "/core/outbounds/test"
+        ? probe([result("exit", [1, "n1"], { delay_ms: 74, status_code: 204, interface: "wg0", interface_here: true })])
+        : undefined
+    );
+    render(wrap(<XrayConfigAdmin />));
+    await screen.findByRole("tablist");
+    await goTo(/^Outbounds/);
+    expect(screen.getByRole("columnheader", { name: "Test result" })).toBeInTheDocument();
+
+    await user.click(within(rowOf("exit")).getByRole("button", { name: "Test this outbound" }));
+    expect(await within(rowOf("exit")).findByText("74ms (204)")).toBeInTheDocument();
+    expect(testCalls()).toHaveLength(1);
+    expect(testCalls()[0][1]).toMatchObject({ method: "POST", body: { tags: ["exit"] } });
+    // the button's click is its own, not the row's: no editor opened
+    expect(screen.queryByRole("button", { name: "Save to document" })).toBeNull();
+    // the other row was not tested
+    expect(within(rowOf("other")).queryByText(/ms \(/)).toBeNull();
+  });
+
+  it("tests all from every node and says per node what each went through", async () => {
+    const user = userEvent.setup();
+    serve((url, opts) => {
+      if (url !== "/core/outbounds/test") return undefined;
+      const { tags } = opts?.body as { tags: string[] };
+      return probe(
+        tags.flatMap((tag) =>
+          tag === "exit"
+            ? [
+                result(tag, [1, "n1"], { delay_ms: 74, status_code: 204, interface: "wg0", interface_here: true, via: "exit~wg" }),
+                result(tag, [2, "n2"], { delay_ms: 131, status_code: 204, interface: "wg0", via: "exit~direct", fallback: true }),
+              ]
+            : [result(tag, [1, "n1"], { error: "dial tcp 192.0.2.9:443: i/o timeout" }), result(tag, [2, "n2"], { skipped: "block" })]
+        )
+      );
+    });
+    render(wrap(<XrayConfigAdmin />));
+    await screen.findByRole("tablist");
+    await goTo(/^Outbounds/);
+
+    await user.click(screen.getByRole("button", { name: "Test all" }));
+    const exit = rowOf("exit");
+    expect(await within(exit).findByText("74ms (204)")).toBeInTheDocument();
+    expect(within(exit).getByText("131ms (204)")).toBeInTheDocument();
+    expect(within(exit).getByText("via direct")).toHaveAttribute("title", expect.stringContaining("wg0 is not on this node"));
+    const other = rowOf("other");
+    expect(within(other).getByText("dial tcp 192.0.2.9:443: i/o timeout")).toBeInTheDocument();
+    expect(within(other).getByText("block: nothing to test")).toBeInTheDocument();
+    expect(testCalls()).toHaveLength(1);
+    expect(testCalls()[0][1]).toMatchObject({ body: { tags: ["exit", "other"] } });
+  });
+
+  it("tests from the node picked, and offers no disabled node", async () => {
+    const user = userEvent.setup();
+    serve((url) => (url === "/core/outbounds/test" ? probe([result("exit", [2, "n2"], { delay_ms: 90, status_code: 204 })]) : undefined));
+    render(wrap(<XrayConfigAdmin />));
+    await screen.findByRole("tablist");
+    await goTo(/^Outbounds/);
+
+    const from = (await screen.findByRole("combobox", { name: "Test from" })) as HTMLSelectElement;
+    await waitFor(() => expect([...from.options].map((o) => o.textContent)).toEqual(["All connected nodes", "n1", "n2"]));
+    fireEvent.change(from, { target: { value: "2" } });
+    await user.click(within(rowOf("exit")).getByRole("button", { name: "Test this outbound" }));
+    expect(await within(rowOf("exit")).findByText("90ms (204)")).toBeInTheDocument();
+    expect(testCalls()[0][1]).toMatchObject({ body: { tags: ["exit"], node_id: 2 } });
+  });
+
+  it("shows why the test could not run", async () => {
+    const user = userEvent.setup();
+    serve((url) => {
+      if (url === "/core/outbounds/test") throw { response: { _data: { detail: "No node is connected to test from" } } };
+      return undefined;
+    });
+    render(wrap(<XrayConfigAdmin />));
+    await screen.findByRole("tablist");
+    await goTo(/^Outbounds/);
+    await user.click(within(rowOf("exit")).getByRole("button", { name: "Test this outbound" }));
+    expect(await within(rowOf("exit")).findByText("No node is connected to test from")).toBeInTheDocument();
   });
 });

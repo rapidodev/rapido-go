@@ -21,7 +21,7 @@ func TestRouterRegistersEveryRouteWithoutConflict(t *testing.T) {
 		"GET /api/tunnels/timeline": false, "GET /api/tunnels/:id/events": false, "GET /api/tunnels/:id/samples": false,
 		"POST /api/tunnels/:id/diagnose": false, "GET /api/tunnels/:id/diagnose": false, "GET /api/tunnels/:id/diagnose/report": false,
 		"GET /api/admins/overview": false, "POST /api/users/bulk": false, "GET /api/users/export": false,
-		"POST /api/node/:id/restart": false,
+		"POST /api/node/:id/restart": false, "POST /api/core/outbounds/test": false,
 	}
 	for _, r := range engine.Routes() {
 		key := r.Method + " " + r.Path

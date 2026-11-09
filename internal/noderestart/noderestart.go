@@ -1,7 +1,7 @@
 // Package noderestart restarts the node agent (or the whole server) of a node
-// over SSH. Nodes poll the panel; there is no channel from the panel to a node,
-// so SSH - with the login a tunnel row stores for the node, or one supplied for
-// a single call - is the only way in.
+// over SSH. Nodes poll the panel, and the agent's control plane only answers
+// questions (internal/nodecontrol), so SSH - with the login a tunnel row stores
+// for the node, or one supplied for a single call - is the only way in.
 package noderestart
 
 import (

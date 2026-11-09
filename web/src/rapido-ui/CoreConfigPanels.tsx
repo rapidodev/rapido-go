@@ -1,6 +1,7 @@
 import { ComponentType, DragEvent, FC, ReactNode, SVGProps, useMemo, useState } from "react";
 import {
   Bars3Icon,
+  BoltIcon,
   ChevronDownIcon,
   ChevronUpIcon,
   DocumentDuplicateIcon,
@@ -10,6 +11,7 @@ import {
 } from "@heroicons/react/24/outline";
 import { useTranslation } from "react-i18next";
 import { useMonitoringQuery } from "hooks/useMonitoringQuery";
+import { useNodesQuery } from "hooks/useNodesQuery";
 import { LOG_LEVELS, OUTBOUND_GROUP_TYPES, RoutingRule } from "types/CoreConfig";
 import {
   ConfigIssue,
@@ -60,6 +62,7 @@ import { FormChoices, ItemForm, issueMessage } from "./CoreConfigForm";
 import { DataTable, DataTableColumn } from "./DataTable";
 import { Input } from "./Input";
 import { Modal } from "./Modal";
+import { OutboundTestCell, OutboundTestControls, useOutboundTests } from "./OutboundTests";
 import { Select } from "./Select";
 
 // The Core Config page's tabs: one form-driven view per section of the document,
@@ -138,7 +141,9 @@ const ItemTable: FC<{
   onDelete: (row: Row) => void;
   /** Present when the order means something; rows can then be dragged and nudged. */
   onMove?: (from: number, to: number) => void;
-}> = ({ label, guide, rows, columns, issuesOf, addLabel, actions, onAdd, onEdit, onDuplicate, onDelete, onMove }) => {
+  /** Extra buttons at the start of a row's actions. */
+  rowActions?: (row: Row) => ReactNode;
+}> = ({ label, guide, rows, columns, issuesOf, addLabel, actions, onAdd, onEdit, onDuplicate, onDelete, onMove, rowActions }) => {
   const { t } = useTranslation();
   const [search, setSearch] = useState("");
   const [dragging, setDragging] = useState<number | null>(null);
@@ -174,6 +179,7 @@ const ItemTable: FC<{
     className: "w-px whitespace-nowrap",
     cell: (row) => (
       <span className="inline-flex items-center gap-0.5" dir="ltr">
+        {rowActions?.(row)}
         {onMove && (
           <>
             <IconAction
@@ -305,6 +311,11 @@ export const CoreConfigPanels: FC<{
   // The same reports the Monitoring page shows: nodes say how each tunnel is doing,
   // which is what an interface-bound outbound depends on.
   const { data: monitoring } = useMonitoringQuery(tab === "outbounds");
+  // Outbound tests run on the nodes; which ones to ask is picked here.
+  const tests = useOutboundTests();
+  const [testNode, setTestNode] = useState(0);
+  const { data: nodeList } = useNodesQuery(tab === "outbounds");
+  const nodes = Array.isArray(nodeList) ? nodeList : [];
   const tunnels = useMemo(() => {
     const byName = new Map<string, TunnelHealth>();
     for (const host of monitoring?.hosts ?? []) {
@@ -499,8 +510,25 @@ export const CoreConfigPanels: FC<{
         );
       },
     },
+    {
+      key: "test",
+      header: t("rapido.coreForm.colTest"),
+      cell: ({ item }) => <OutboundTestCell state={tests.byTag[str(item.tag)]} />,
+    },
     { key: "used", header: t("rapido.coreForm.colUsedBy"), cell: ({ item }) => <Muted>{usedBy(str(item.tag))}</Muted> },
   ];
+
+  const testOutbound = (row: Row) => {
+    const tag = str(row.item.tag);
+    return (
+      <IconAction
+        label={t("rapido.coreForm.testOne")}
+        icon={BoltIcon}
+        disabled={tag === "" || tests.byTag[tag]?.running === true}
+        onClick={() => void tests.test([tag], testNode)}
+      />
+    );
+  };
 
   const balancerColumns: DataTableColumn<Row>[] = [
     tagColumn,
@@ -789,11 +817,22 @@ export const CoreConfigPanels: FC<{
       {tab === "outbounds" && doc && (
         <ItemTable
           label={t("rapido.xrayConfig.tabOutbounds")}
-          guide={t("rapido.xrayConfig.guideOutbounds")}
+          guide={`${t("rapido.xrayConfig.guideOutbounds")} ${t("rapido.coreForm.testNote")}`}
           rows={plainRows}
           columns={outboundColumns}
           issuesOf={issuesFor("outbound")}
           addLabel={t("rapido.coreForm.addOutbound")}
+          actions={
+            <OutboundTestControls
+              nodes={nodes}
+              nodeId={testNode}
+              onNode={setTestNode}
+              testing={tests.testingAll}
+              disabled={plainRows.length === 0}
+              onTestAll={() => void tests.testAll([...new Set(plainRows.map((row) => str(row.item.tag)).filter(Boolean))], testNode)}
+            />
+          }
+          rowActions={testOutbound}
           onAdd={addOutbound}
           onEdit={editRow("outbounds")}
           onDuplicate={duplicateRow("outbounds")}

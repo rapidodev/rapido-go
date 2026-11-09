@@ -11,7 +11,8 @@ import {
 } from "types/Node";
 import { queryKeys } from "utils/queryClient";
 
-export const useNodesQuery = () =>
+// `enabled: false` keeps a page that only sometimes needs the list from asking.
+export const useNodesQuery = (enabled = true) =>
   useQuery({
     queryKey: queryKeys.nodes,
     queryFn: () => fetch<Node[]>("/nodes"),
@@ -20,6 +21,7 @@ export const useNodesQuery = () =>
     // requests at all (mirrors the old dashboard's own hasPending gate).
     refetchInterval: (query) =>
       (query.state.data ?? []).some((n) => n.status === "connecting") ? 3000 : false,
+    enabled,
   });
 
 const invalidateNodes = (queryClient: ReturnType<typeof useQueryClient>) =>
