@@ -56,7 +56,8 @@ func (h *Handler) resolveNodeLogin(ctx context.Context, nodeID int32, req nodeRe
 }
 
 // handleRestartNode implements POST /api/node/:id/restart (sudo only). Nodes
-// poll the panel and there is no channel back, so this goes in over SSH:
+// poll the panel and the agent's control plane only answers questions (see
+// nodecontrol), so this goes in over SSH:
 // mode "service" restarts the node agent (rapido-go-node) and waits until it is
 // active and has pulled its config again; mode "reboot" reboots the whole
 // server - it needs confirm_name equal to the node's name and returns at once.

@@ -371,6 +371,7 @@ func main() {
 	mux.HandleFunc("POST /start", srv.handleStart)
 	mux.HandleFunc("POST /stop", srv.handleStop)
 	mux.HandleFunc("PUT /inbounds/{tag}/users", srv.handleUpdateUsers)
+	mux.HandleFunc("POST /outbounds/test", srv.handleTestOutbounds)
 
 	attempts := noteBootAttempt(cfg.StateDir)
 	if previous, ok, crashedDigest := loadBootConfig(cfg.StateDir, attempts); ok {
@@ -858,6 +859,19 @@ type nodePlan struct {
 	// fallbacks are the outbounds that must fail over to a direct connection
 	// when their WireGuard interface is down.
 	fallbacks []nodecore.FallbackGroup
+	// boundInterfaces maps each outbound pinned to an interface (by its Core
+	// Config tag) to that interface.
+	boundInterfaces map[string]string
+}
+
+// fallbackGroup returns the fallback group standing in for the outbound tag.
+func (p nodePlan) fallbackGroup(tag string) (nodecore.FallbackGroup, bool) {
+	for _, g := range p.fallbacks {
+		if g.Group == tag {
+			return g, true
+		}
+	}
+	return nodecore.FallbackGroup{}, false
 }
 
 // listenerTags returns the sing-box inbound tags behind one logical inbound.
@@ -1178,6 +1192,16 @@ func buildOptionsPlan(req startRequest) (sbox.Options, nodePlan, error) {
 		return sbox.Options{}, nodePlan{}, err
 	}
 	plan.fallbacks = fallbacks
+	if req.Core != nil {
+		for _, ob := range req.Core.Outbounds {
+			if ob.BindInterface != "" && isLeafOutbound(ob.Type) {
+				if plan.boundInterfaces == nil {
+					plan.boundInterfaces = make(map[string]string)
+				}
+				plan.boundInterfaces[ob.Tag] = ob.BindInterface
+			}
+		}
+	}
 	return sbox.Options{
 		Log:       log,
 		DNS:       dns,
