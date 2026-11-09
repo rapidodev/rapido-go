@@ -309,6 +309,16 @@ func (m *Monitor) record(name string, rtt time.Duration, err error) {
 	}
 }
 
+// Confirmed reports whether the tunnel has been probed and found working. It
+// is Up without the benefit of the doubt, for a tunnel that would take users
+// over from one that works.
+func (m *Monitor) Confirmed(name string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	e, ok := m.entries[name]
+	return ok && e.Probed && e.Up
+}
+
 // Up reports whether the tunnel is usable. A tunnel that has never been
 // probed counts as up: acting on a guess would make a fresh start send
 // everyone through the fallback before the first probe has even returned.

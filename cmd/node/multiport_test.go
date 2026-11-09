@@ -19,6 +19,7 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 
 	"github.com/legendary1205/rapido-go/internal/nodecore"
+	"github.com/legendary1205/rapido-go/internal/nodecore/spread"
 	"github.com/legendary1205/rapido-go/internal/nodecore/traffic"
 )
 
@@ -218,10 +219,13 @@ func TestDirectFallbackBuildsAPrimaryAFallbackAndASelector(t *testing.T) {
 		if d, ok := o.Options.(*sbox.DirectOutboundOptions); ok {
 			b = d.BindInterface
 		}
+		if sp, ok := o.Options.(*spread.Options); ok {
+			b = sp.Interface
+		}
 		got[o.Tag] = ob{o.Type, b}
 	}
 	for tag, want := range map[string]ob{
-		"uk~wg":     {"direct", "uk"},
+		"uk~wg":     {spread.Type, "uk"},
 		"uk~direct": {"direct", ""},
 		"uk":        {"selector", ""},
 		"plain":     {"direct", "eth9"},
@@ -329,6 +333,15 @@ func (f *fakeHealth) Up(iface string) bool {
 	return !f.down[iface]
 }
 
+// confirmingHealth is a fakeHealth that, like the real monitor, also knows
+// which tunnels it has actually seen working.
+type confirmingHealth struct {
+	fakeHealth
+	seen map[string]bool
+}
+
+func (c *confirmingHealth) Confirmed(iface string) bool { return c.seen[iface] && c.Up(iface) }
+
 func (f *fakeHealth) setDown(iface string, down bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -419,5 +432,61 @@ func TestExitFallsBackToDirectWhileItsTunnelIsDownAndReturnsWhenItRecovers(t *te
 		if err := echoVia(p1, testUserA, echoHost, echoPort); err == nil {
 			t.Error("back on the tunnel, an exit pinned to a nonexistent interface should fail: proof the primary really is the bound one")
 		}
+	}
+}
+
+// An exit with more than one tunnel on the host shares its users among the
+// healthy ones, keeps its tunnel selected while any of them works, and only
+// falls back to a direct connection once all are down.
+func TestExitSharesItsUsersAmongItsHealthyTunnels(t *testing.T) {
+	p1 := freeTCPPort(t)
+	const iface = "rapido-test-fi"
+	node, plan := startPlanned(t, startRequest{
+		Inbounds: []inboundSpec{{
+			Tag: "main", Protocol: "vless", ListenPort: p1,
+			Users: []userSpec{{Name: "a", UUID: testUserA}},
+		}},
+		Core: &coreSpec{
+			Outbounds:    []outboundSpec{{Tag: "exit", Type: "direct", BindInterface: iface, DirectFallback: true}},
+			RoutingRules: []routingRuleSpec{{Inbound: []string{"main"}, OutboundTag: "exit"}},
+		},
+	})
+	health := &confirmingHealth{seen: map[string]bool{iface + "-2": true}}
+	sup := nodecore.NewSupervisor(node, plan.fallbacks, health, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	tunnels := []string{"eth0", iface, iface + "-2", iface + "-3", iface + "x-2", iface + "-1", iface + "-100"}
+	sup.Tunnels = func() []string { return tunnels }
+
+	check := func(step, selected string, members ...string) {
+		t.Helper()
+		sup.Reconcile()
+		if got, _ := node.SelectedOutbound("exit"); got != selected {
+			t.Fatalf("%s: selected = %q, want %q", step, got, selected)
+		}
+		if got := node.SpreadMembers("exit~wg"); !reflect.DeepEqual(got, members) {
+			t.Fatalf("%s: tunnels in use = %v, want %v", step, got, members)
+		}
+	}
+
+	// -3 has never been seen working, and the other names are not siblings.
+	check("start", "exit~wg", iface, iface+"-2")
+	health.seen[iface+"-3"] = true
+	check("a third tunnel proved itself", "exit~wg", iface, iface+"-2", iface+"-3")
+	health.setDown(iface, true)
+	check("the exit's own tunnel died", "exit~wg", iface+"-2", iface+"-3")
+	if sup.ActiveByInterface()[iface] {
+		t.Error("while other tunnels carry the exit it is not on its fallback")
+	}
+	health.setDown(iface+"-2", true)
+	health.setDown(iface+"-3", true)
+	check("every tunnel died", "exit~direct", iface+"-2", iface+"-3")
+	if !sup.ActiveByInterface()[iface] {
+		t.Error("with every tunnel down the exit is on its fallback")
+	}
+	health.setDown(iface, false)
+	check("its own tunnel came back", "exit~wg", iface)
+
+	// Without a tunnel list the supervisor behaves as it always did.
+	if got := nodecore.Siblings("uk", []string{"uk-2", "uk-10", "uk-0", "uk-1", "ukraine-2", "uk-99", "uk-2a"}); !reflect.DeepEqual(got, []string{"uk-2", "uk-10", "uk-99"}) {
+		t.Errorf("Siblings = %v", got)
 	}
 }

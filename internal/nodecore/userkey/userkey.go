@@ -13,6 +13,7 @@ package userkey
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"reflect"
 	"slices"
 	"strconv"
 	"sync"
@@ -60,13 +61,76 @@ func OptionKey(value any, index int) *Key {
 	return &Key{Name: name, Label: label, Fingerprint: sha256.Sum256(canonical)}
 }
 
+// BuildOptions mints one fresh Key per user, in order.
+//
+// What a Key holds depends only on the user's options, and deriving it means a
+// round trip through JSON. A change of one user used to repeat that for every
+// user on the node - most of what a user change cost there - so the derived
+// fields of the last list built for each type are remembered, and only users
+// whose options are new are derived again. The Keys themselves are still new
+// each time.
 func BuildOptions[T any](users []T) []*Key {
 	keys := make([]*Key, len(users))
-	for i, value := range users {
-		keys[i] = OptionKey(value, i)
+	typ := reflect.TypeFor[T]()
+	if !typ.Comparable() || typ.Kind() == reflect.Interface {
+		for i, value := range users {
+			keys[i] = OptionKey(value, i)
+		}
+		return keys
 	}
+	derivedMu.Lock()
+	previous := derived[typ]
+	derivedMu.Unlock()
+	next := make(map[any]keyFields, len(users))
+	for i, value := range users {
+		fields, ok := lookupDerived(previous, value)
+		if !ok {
+			k := OptionKey(value, i)
+			fields = keyFields{fingerprint: k.Fingerprint, name: k.Name}
+		}
+		next[value] = fields
+		label := fields.name
+		if label == "" {
+			label = strconv.Itoa(i)
+		}
+		keys[i] = &Key{Fingerprint: fields.fingerprint, Name: fields.name, Label: label}
+	}
+	derivedMu.Lock()
+	if derived == nil {
+		derived = map[reflect.Type][]map[any]keyFields{}
+	}
+	lists := append([]map[any]keyFields{next}, derived[typ]...)
+	derived[typ] = lists[:min(len(lists), derivedLists)]
+	derivedMu.Unlock()
 	return keys
 }
+
+func lookupDerived(lists []map[any]keyFields, value any) (keyFields, bool) {
+	for _, list := range lists {
+		if fields, ok := list[value]; ok {
+			return fields, true
+		}
+	}
+	return keyFields{}, false
+}
+
+// keyFields is what OptionKey derives from a user's options, apart from the
+// label, which also depends on the user's position.
+type keyFields struct {
+	fingerprint [32]byte
+	name        string
+}
+
+// derived holds, per user type, keyFields for every user of the last
+// derivedLists lists built, newest first: two, because an inbound that cannot
+// carry a flow builds the same users with flows cleared. A published list is
+// never edited.
+var (
+	derivedMu sync.Mutex
+	derived   map[reflect.Type][]map[any]keyFields
+)
+
+const derivedLists = 2
 
 // List is what one user list builds to: the Keys its service looks users up by
 // and the credential fingerprints its connections are checked against. Nothing

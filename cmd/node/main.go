@@ -39,6 +39,7 @@ import (
 	"github.com/legendary1205/rapido-go/internal/hostmetrics"
 	"github.com/legendary1205/rapido-go/internal/nodecore"
 	forkedshadowtls "github.com/legendary1205/rapido-go/internal/nodecore/shadowtls"
+	"github.com/legendary1205/rapido-go/internal/nodecore/spread"
 	"github.com/legendary1205/rapido-go/internal/nodecore/traffic"
 	"github.com/legendary1205/rapido-go/internal/nodelog"
 	"github.com/legendary1205/rapido-go/internal/tunnelhealth"
@@ -174,6 +175,13 @@ func writeJSON(w http.ResponseWriter, status int, body map[string]any) {
 // server holds the one sing-box instance this node runs at a time - there
 // is only ever one, matching the current rapido-node's single-core model.
 type server struct {
+	// lastGoodOnDisk is the config this process last wrote to
+	// last-good-config.json, and lastGoodVersion its version then; see
+	// snapshotPrevious.
+	lastGoodMu      sync.Mutex
+	lastGoodOnDisk  *pulledConfig
+	lastGoodVersion string
+
 	reportMu     sync.Mutex
 	reportState  reportSpool
 	reportLoaded bool
@@ -294,6 +302,7 @@ func (s *server) startSupervisorLocked(plan nodePlan) {
 	ctx, cancel := context.WithCancel(s.ctx)
 	sup := nodecore.NewSupervisor(s.node, plan.fallbacks, s.monitor, s.logger)
 	sup.Foreign = func(iface string) bool { return !slices.Contains(hostmetrics.TunnelNames(), iface) }
+	sup.Tunnels = hostmetrics.TunnelNames
 	s.supervisor, s.supCancel = sup, cancel
 	go sup.Run(ctx, fallbackCheckInterval)
 }
@@ -763,7 +772,7 @@ func (s *server) handleUpdateUsers(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 422, map[string]any{"detail": err.Error()})
 		return
 	}
-	if err := s.persistConfig("previous-config.json", s.lastPulled); err != nil {
+	if err := s.snapshotPrevious(s.lastPulled); err != nil {
 		writeJSON(w, 503, map[string]any{"detail": "snapshot failed; users unchanged"})
 		return
 	}
@@ -1443,8 +1452,16 @@ func buildCoreOptions(core *coreSpec, portsByTag map[string][]uint16) ([]sbox.Ou
 				return nil, nil, nil, nil, nil, err
 			}
 			primary, fallback := ob.Tag+fallbackPrimarySuffix, ob.Tag+fallbackFallbackSuffix
+			primaryOutbound := sbox.Outbound{Type: ob.Type, Tag: primary, Options: opts}
+			if direct, ok := opts.(*sbox.DirectOutboundOptions); ok {
+				// A direct exit can be served by more than one tunnel: the
+				// supervisor shares its users among the healthy ones.
+				primaryOutbound = sbox.Outbound{Type: spread.Type, Tag: primary, Options: &spread.Options{
+					Direct: *direct, Interface: ob.BindInterface,
+				}}
+			}
 			outbounds = append(outbounds,
-				sbox.Outbound{Type: ob.Type, Tag: primary, Options: opts},
+				primaryOutbound,
 				sbox.Outbound{Type: ob.Type, Tag: fallback, Options: plainOpts},
 				sbox.Outbound{Type: "selector", Tag: ob.Tag, Options: &sbox.SelectorOutboundOptions{
 					Outbounds: []string{primary, fallback},
@@ -1806,7 +1823,7 @@ func (s *server) pullOnce(ctx context.Context, client *http.Client, cfg config) 
 	// Whatever was rejected, this config's shape is the one running.
 	s.rejected = nil
 	if len(hot) > 0 {
-		if err := s.persistConfig("previous-config.json", s.lastPulled); err != nil {
+		if err := s.snapshotPrevious(s.lastPulled); err != nil {
 			s.logger.Error("snapshot failed; users unchanged", "error", err)
 			return
 		}
@@ -1878,7 +1895,7 @@ func (s *server) applyFullLocked(pulled pulledConfig) error {
 		return fmt.Errorf("config rejected before stopping the core: %w", err)
 	}
 	previous := s.lastPulled
-	if err := s.persistConfig("previous-config.json", previous); err != nil {
+	if err := s.snapshotPrevious(previous); err != nil {
 		candidate.Close()
 		return fmt.Errorf("snapshot failed; core unchanged: %w", err)
 	}
